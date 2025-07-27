@@ -230,7 +230,7 @@ EOL
 
 # Function to update Xray
 update_xray() {
-    if ! docker ps -q -f name=xray_server | grep -q .; then
+    if ! sudo docker ps -q -f name=xray_server | grep -q .; then
         echo -e "${RED}Container 'xray_server' not found. Cannot update.${NC}"
         exit 1
     fi
