@@ -69,7 +69,7 @@ install_xray() {
 
     # Pull Docker image
     echo "Pulling teddysun/xray image..."
-    docker pull teddysun/xray
+    sudo docker pull teddysun/xray
 
     # Get user input for counts
     read -p "How many user UUIDs do you need? [Default: $DEFAULT_UUIDS]: " num_uuids
@@ -80,13 +80,13 @@ install_xray() {
 
     # Generate keys and IDs
     echo "Generating keys and IDs..."
-    KEYS=$(docker run --rm teddysun/xray xray x25519)
+    KEYS=$(sudo docker run --rm teddysun/xray xray x25519)
     PRIVATE_KEY=$(echo "$KEYS" | awk '/Private key:/ {print $3}')
     PUBLIC_KEY=$(echo "$KEYS" | awk '/Public key:/ {print $3}')
 
     CLIENTS_JSON=""
     for i in $(seq 1 $num_uuids); do
-        uuid=$(docker run --rm teddysun/xray xray uuid)
+        uuid=$(sudo docker run --rm teddysun/xray xray uuid)
         CLIENTS_JSON+="{\n                        \"id\": \"$uuid\",\n                        \"flow\": \"\"\n                    }"
         if [ "$i" -lt "$num_uuids" ]; then
             CLIENTS_JSON+="\n                    ,"
@@ -207,7 +207,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        docker compose up -d
+        sudo docker compose up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
     else
@@ -222,7 +222,7 @@ update_xray() {
         exit 1
     fi
     echo "Updating xray_server..."
-    docker run --rm \
+    sudo docker run --rm \
       -v /var/run/docker.sock:/var/run/docker.sock \
       containrrr/watchtower \
       --run-once \
