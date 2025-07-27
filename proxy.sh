@@ -87,9 +87,9 @@ install_xray() {
     CLIENTS_JSON=""
     for i in $(seq 1 $num_uuids); do
         uuid=$(sudo docker run --rm teddysun/xray xray uuid)
-        CLIENTS_JSON+="{\n                        \"id\": \"$uuid\",\n                        \"flow\": \"\"\n                    }"
+        CLIENTS_JSON+="{\"id\": \"$uuid\", \"flow\": \"\"}"
         if [ "$i" -lt "$num_uuids" ]; then
-            CLIENTS_JSON+="\n                    ,"
+            CLIENTS_JSON+="," 
         fi
     done
 
@@ -98,7 +98,7 @@ install_xray() {
         shortid=$(openssl rand -hex 2)
         SHORTIDS_JSON+="\"$shortid\""
         if [ "$i" -lt "$num_shortids" ]; then
-            SHORTIDS_JSON+="\n                        ,"
+            SHORTIDS_JSON+="," 
         fi
     done
 
