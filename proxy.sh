@@ -305,7 +305,7 @@ delete_xray() {
 
 update_script() {
     echo -e "${YELLOW}Checking for updates...${NC}"
-    LATEST_VERSION=$(curl -s https://raw.githubusercontent.com/your_username/your_repository/main/proxy.sh | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
+    LATEST_VERSION=$(curl -s https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
     if [ -z "$LATEST_VERSION" ]; then
         echo -e "${RED}Could not check for updates. Please check your internet connection or the repository URL.${NC}"
         return
