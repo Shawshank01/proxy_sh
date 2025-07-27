@@ -209,21 +209,12 @@ EOL
     read -p "Enter your server IP address or domain: " SERVER_ADDR
     read -p "Enter a remarks name for this server: " REMARKS
 
-    # Parse UUIDs and shortIds for vless link generation
-    UUID_LIST=()
-    while read -r line; do
-        uuid=$(echo "$line" | grep -oE '[a-f0-9\-]{36}')
-        if [ ! -z "$uuid" ]; then
-            UUID_LIST+=("$uuid")
-        fi
-    done < <(echo -e "$CLIENTS_JSON")
-
+    # Parse UUIDs for vless link generation (one link per UUID)
+    echo -e "\n${GREEN}VLESS Links:${NC}"
     # Get the first shortId
     SHORTID=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
-
-    # Generate and display vless links
-    echo -e "\n${GREEN}VLESS Links:${NC}"
-    for uuid in "${UUID_LIST[@]}"; do
+    # Extract UUIDs from CLIENTS_JSON and print one link per UUID
+    echo "$CLIENTS_JSON" | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/' | while read -r uuid; do
         echo "vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
     done
 
