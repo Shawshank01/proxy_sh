@@ -213,8 +213,8 @@ EOL
     echo -e "\n${GREEN}VLESS Links:${NC}"
     # Get the first shortId
     SHORTID=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
-    # Extract UUIDs from CLIENTS_JSON and print one link per UUID
-    echo "$CLIENTS_JSON" | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/' | while read -r uuid; do
+    # Extract UUIDs from CLIENTS_JSON and print one link per UUID (split by comma)
+    echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/' | while read -r uuid; do
         echo "vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
     done
 
