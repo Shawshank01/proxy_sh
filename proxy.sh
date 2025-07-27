@@ -87,9 +87,9 @@ install_xray() {
     CLIENTS_JSON=""
     for i in $(seq 1 $num_uuids); do
         uuid=$(docker run --rm teddysun/xray xray uuid)
-        CLIENTS_JSON+="{\n            \"id\": \"$uuid\",\n            \"flow\": \"\"\n        }"
+        CLIENTS_JSON+="{\n                        \"id\": \"$uuid\",\n                        \"flow\": \"\"\n                    }"
         if [ "$i" -lt "$num_uuids" ]; then
-            CLIENTS_JSON+=",\n        "
+            CLIENTS_JSON+="\n                    ,"
         fi
     done
 
@@ -98,11 +98,11 @@ install_xray() {
         shortid=$(openssl rand -hex 2)
         SHORTIDS_JSON+="\"$shortid\""
         if [ "$i" -lt "$num_shortids" ]; then
-            SHORTIDS_JSON+=",\n            "
+            SHORTIDS_JSON+="\n                        ,"
         fi
     done
 
-    # Create docker-compose.yml
+    # Create docker-compose.yml (with logging options)
     cat > docker-compose.yml << EOL
 services:
   xray:
@@ -114,11 +114,35 @@ services:
       - "443:443/udp"
     volumes:
       - ./server.jsonc:/etc/xray/config.json:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 EOL
 
-    # Create server.jsonc
+    # Create server.jsonc (with routing, sniffing, two outbounds, and all serverNames)
     cat > server.jsonc << EOL
 {
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {
+                "type": "field",
+                "ip": [
+                    "geoip:cn"
+                ],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "domain": [
+                    "geosite:cn"
+                ],
+                "outboundTag": "block"
+            }
+        ]
+    },
     "inbounds": [
         {
             "listen": "0.0.0.0",
@@ -139,14 +163,23 @@ EOL
                 "realitySettings": {
                     "target": "www.apple.com:443",
                     "serverNames": [
-                        "www.apple.com",
-                        "images.apple.com"
+                        "images.apple.com",
+                        "www.apple.com.cn",
+                        "www.apple.com"
                     ],
                     "privateKey": "$PRIVATE_KEY",
                     "shortIds": [
                         $SHORTIDS_JSON
                     ]
                 }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls",
+                    "quic"
+                ]
             }
         }
     ],
@@ -154,6 +187,10 @@ EOL
         {
             "protocol": "freedom",
             "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
         }
     ]
 }
