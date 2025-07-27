@@ -205,6 +205,28 @@ EOL
     echo "--------------------"
     echo -e "${YELLOW}Public Key: $PUBLIC_KEY${NC}"
 
+    # Prompt for server IP/domain and remarks
+    read -p "Enter your server IP address or domain: " SERVER_ADDR
+    read -p "Enter a remarks name for this server: " REMARKS
+
+    # Parse UUIDs and shortIds for vless link generation
+    UUID_LIST=()
+    while read -r line; do
+        uuid=$(echo "$line" | grep -oE '[a-f0-9\-]{36}')
+        if [ ! -z "$uuid" ]; then
+            UUID_LIST+=("$uuid")
+        fi
+    done < <(echo -e "$CLIENTS_JSON")
+
+    # Get the first shortId
+    SHORTID=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
+
+    # Generate and display vless links
+    echo -e "\n${GREEN}VLESS Links:${NC}"
+    for uuid in "${UUID_LIST[@]}"; do
+        echo "vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
+    done
+
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
         sudo docker compose up -d
