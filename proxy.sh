@@ -303,16 +303,46 @@ delete_xray() {
     echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
 }
 
+update_script() {
+    echo -e "${YELLOW}Checking for updates...${NC}"
+    LATEST_VERSION=$(curl -s https://raw.githubusercontent.com/your_username/your_repository/main/proxy.sh | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
+    if [ -z "$LATEST_VERSION" ]; then
+        echo -e "${RED}Could not check for updates. Please check your internet connection or the repository URL.${NC}"
+        return
+    fi
+
+    if [ "$SCRIPT_VERSION" == "$LATEST_VERSION" ]; then
+        echo -e "${GREEN}You are already using the latest version of the script.${NC}"
+        return
+    }
+
+    echo -e "${YELLOW}A new version of the script is available: $LATEST_VERSION${NC}"
+    read -p "Do you want to update? [y/N]: " update_confirm
+    if [[ "$update_confirm" != "y" && "$update_confirm" != "Y" ]]; then
+        echo -e "${RED}Update cancelled.${NC}"
+        return
+    }
+
+    echo -e "${YELLOW}Updating script...${NC}"
+    curl -s https://raw.githubusercontent.com/your_username/your_repository/main/proxy.sh > proxy.sh
+    echo -e "${GREEN}Script updated successfully! Please run the script again.${NC}"
+    exit 0
+}
+
 echo -e "${YELLOW}--- Xray Proxy Installer ---${NC}"
 echo "Please choose an option:"
+echo "0) Update this script"
 echo "1) Install Xray (VLESS-XHTTP-Reality)"
 echo "2) ss_2022 (coming soon)"
 echo "3) Update existing Xray container"
 echo "4) Show VLESS links for current config"
 echo "5) Delete Xray container and config"
-read -p "Enter your choice [1-5]: " choice
+read -p "Enter your choice [0-5]: " choice
 
 case $choice in
+    0)
+        update_script
+        ;;
     1)
         install_xray
         ;;
