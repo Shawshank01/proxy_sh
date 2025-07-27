@@ -278,9 +278,20 @@ show_links() {
     SNI=$(grep -A 3 '"realitySettings":' "$CONFIG_FILE" | grep '"serverNames":' -A 1 | tail -n1 | grep -oE '"[^"]+"' | head -n1 | tr -d '"')
     if [ -z "$SNI" ]; then SNI="www.apple.com"; fi
     echo -e "\n${GREEN}VLESS Links:${NC}"
+    LINKS=""
     for uuid in $UUIDS; do
-        echo "vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=$(python3 -c 'import urllib.parse; import sys; print(urllib.parse.quote(sys.argv[1]))' "$PATH")#$REMARKS"
+        LINK="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=$(python3 -c 'import urllib.parse; import sys; print(urllib.parse.quote(sys.argv[1]))' "$PATH")#$REMARKS"
+        echo "$LINK"
+        LINKS+="$LINK\n"
     done
+    save_links "$LINKS"
+}
+
+save_links() {
+    LINKS_FILE="xray/vless_links.txt"
+    echo -e "\n${YELLOW}Saving links to $LINKS_FILE...${NC}"
+    echo -e "$1" > "$LINKS_FILE"
+    echo -e "${GREEN}Links saved successfully!${NC}"
 }
 
 echo -e "${YELLOW}--- Xray Proxy Installer ---${NC}"
