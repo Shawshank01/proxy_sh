@@ -294,13 +294,23 @@ save_links() {
     echo -e "${GREEN}Links saved successfully!${NC}"
 }
 
+delete_xray() {
+    echo -e "${YELLOW}Deleting Xray container and config...${NC}"
+    cd xray || exit
+    sudo docker compose down
+    cd ..
+    rm -rf xray
+    echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
+}
+
 echo -e "${YELLOW}--- Xray Proxy Installer ---${NC}"
 echo "Please choose an option:"
 echo "1) Install Xray (VLESS-XHTTP-Reality)"
 echo "2) ss_2022 (coming soon)"
 echo "3) Update existing Xray container"
 echo "4) Show VLESS links for current config"
-read -p "Enter your choice [1-4]: " choice
+echo "5) Delete Xray container and config"
+read -p "Enter your choice [1-5]: " choice
 
 case $choice in
     1)
@@ -314,6 +324,9 @@ case $choice in
         ;;
     4)
         show_links
+        ;;
+    5)
+        delete_xray
         ;;
     *)
         echo -e "${RED}Invalid choice. Exiting.${NC}"
