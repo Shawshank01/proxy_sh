@@ -255,12 +255,41 @@ fi
 check_distro
 install_docker
 
+show_links() {
+    CONFIG_FILE="xray/server.jsonc"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}Config file $CONFIG_FILE not found. Please install Xray first.${NC}"
+        return
+    fi
+    # Prompt for server address and remarks
+    read -p "Enter your server IP address or domain: " SERVER_ADDR
+    read -p "Enter a remarks name for this server: " REMARKS
+    # Extract values from config
+    UUIDS=$(grep -oE '"id": "[a-f0-9\-]{36}"' "$CONFIG_FILE" | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/')
+    PUBLIC_KEY=$(grep -oE '"publicKey": "[^"]+"' "$CONFIG_FILE" | head -n1 | cut -d'"' -f4)
+    if [ -z "$PUBLIC_KEY" ]; then
+        # fallback for old config: get from privateKey and print warning
+        PUBLIC_KEY="<your_public_key_here>"
+        echo -e "${YELLOW}Warning: Could not find publicKey in config. Please check your config or upgrade your script.${NC}"
+    fi
+    SHORTID=$(grep -A 1 '"shortIds":' "$CONFIG_FILE" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
+    PATH=$(grep -A 3 '"xhttpSettings":' "$CONFIG_FILE" | grep '"path":' | head -n1 | cut -d'"' -f4)
+    if [ -z "$PATH" ]; then PATH="/xrayxskvhqoiwe"; fi
+    SNI=$(grep -A 3 '"realitySettings":' "$CONFIG_FILE" | grep '"serverNames":' -A 1 | tail -n1 | grep -oE '"[^"]+"' | head -n1 | tr -d '"')
+    if [ -z "$SNI" ]; then SNI="www.apple.com"; fi
+    echo -e "\n${GREEN}VLESS Links:${NC}"
+    for uuid in $UUIDS; do
+        echo "vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=$(python3 -c 'import urllib.parse; import sys; print(urllib.parse.quote(sys.argv[1]))' "$PATH")#$REMARKS"
+    done
+}
+
 echo -e "${YELLOW}--- Xray Proxy Installer ---${NC}"
 echo "Please choose an option:"
 echo "1) Install Xray (VLESS-XHTTP-Reality)"
 echo "2) ss_2022 (coming soon)"
 echo "3) Update existing Xray container"
-read -p "Enter your choice [1-3]: " choice
+echo "4) Show VLESS links for current config"
+read -p "Enter your choice [1-4]: " choice
 
 case $choice in
     1)
@@ -271,6 +300,9 @@ case $choice in
         ;;
     3)
         update_xray
+        ;;
+    4)
+        show_links
         ;;
     *)
         echo -e "${RED}Invalid choice. Exiting.${NC}"
