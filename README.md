@@ -45,6 +45,13 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
 - The script should not be run as root; use your normal user account.
 - The `ss_2022` option is not yet available.
 
+## Credits
+
+- [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
+- [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
+
+Special thanks to the Xray and teddysun teams for their excellent work!
+
 ---
 
 **This project is not affiliated with Xray or teddysun. Use at your own risk.**
