@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.1" # Updated version
+SCRIPT_VERSION="1.2" # Updated version
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -124,7 +124,7 @@ install_xray() {
         uuid=$(sudo docker run --rm teddysun/xray xray uuid)
         CLIENTS_JSON+="{\"id\": \"$uuid\", \"flow\": \"\"}"
         if [ "$i" -lt "$num_uuids" ]; then
-            CLIENTS_JSON+="," 
+            CLIENTS_JSON+=","
         fi
     done
 
@@ -133,7 +133,7 @@ install_xray() {
         shortid=$(openssl rand -hex 2)
         SHORTIDS_JSON+="\"$shortid\""
         if [ "$i" -lt "$num_shortids" ]; then
-            SHORTIDS_JSON+="," 
+            SHORTIDS_JSON+=","
         fi
     done
 
@@ -287,17 +287,21 @@ show_links() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${RED}Config file $CONFIG_FILE not found. Please install Xray first.${NC}"
         return
-    }
+    fi
     # Prompt for server address and remarks
     read -p "Enter your server IP address or domain: " SERVER_ADDR
     read -p "Enter a remarks name for this server: " REMARKS
     # Extract values from config
     UUIDS=$(awk -F'"' '/"id":/ {print $4}' "$CONFIG_FILE")
-    PUBLIC_KEY=$(awk -F'"' '/"publicKey":/ {print $4; exit}' "$CONFIG_FILE")
+    PRIVATE_KEY=$(awk -F'"' '/"privateKey":/ {print $4; exit}' "$CONFIG_FILE")
+    if [ -z "$PRIVATE_KEY" ]; then
+        echo -e "${RED}Could not find privateKey in config. Cannot generate links.${NC}"
+        return
+    fi
+    PUBLIC_KEY=$(sudo docker run --rm teddysun/xray xray x25519 -i "$PRIVATE_KEY" | awk '/Public key:/ {print $3}')
     if [ -z "$PUBLIC_KEY" ]; then
-        # fallback for old config: get from privateKey and print warning
-        PUBLIC_KEY="<your_public_key_here>"
-        echo -e "${YELLOW}Warning: Could not find publicKey in config. Please check your config or upgrade your script.${NC}"
+        echo -e "${RED}Could not derive publicKey from privateKey.${NC}"
+        PUBLIC_KEY="<your_public_key_here>" # Fallback
     fi
     SHORTID=$(awk '/"shortIds":/ {getline; print}' "$CONFIG_FILE" | awk -F'"' '{print $2}')
     PATH_VALUE=$(awk -F'"' '/"path":/ {print $4}' "$CONFIG_FILE")
@@ -341,26 +345,26 @@ update_script() {
     if [ -z "$LATEST_SCRIPT" ]; then
         echo -e "${RED}Could not fetch the update script. Please check your internet connection or the repository URL.${NC}"
         return
-    }
+    fi
 
     LATEST_VERSION=$(echo "$LATEST_SCRIPT" | awk -F'"' '/SCRIPT_VERSION=/ {print $2}')
 
     if [ -z "$LATEST_VERSION" ]; then
         echo -e "${RED}Could not determine the latest version. The script format might have changed.${NC}"
         return
-    }
+    fi
 
     if [ "$SCRIPT_VERSION" == "$LATEST_VERSION" ]; then
         echo -e "${GREEN}You are already using the latest version of the script (v$SCRIPT_VERSION).${NC}"
         return
-    }
+    fi
 
     echo -e "${YELLOW}A new version (v$LATEST_VERSION) is available. You are using v$SCRIPT_VERSION.${NC}"
     read -p "Do you want to update? [y/N]: " update_confirm
     if [[ "$update_confirm" != "y" && "$update_confirm" != "Y" ]]; then
         echo -e "${RED}Update cancelled.${NC}"
         return
-    }
+    fi
 
     echo -e "${YELLOW}Updating script...${NC}"
     # Write the fetched script to a temporary file
@@ -371,7 +375,7 @@ update_script() {
         echo -e "${RED}The downloaded update is not a valid script. Aborting update.${NC}"
         rm "proxy.sh.tmp"
         return
-    }
+    fi
 
     # Replace the old script with the new one
     mv "proxy.sh.tmp" "$0"
