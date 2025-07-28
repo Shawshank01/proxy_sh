@@ -4,9 +4,9 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="0.9.0"
+SCRIPT_VERSION="0.9.1"
 DEFAULT_UUIDS=1
-DEFAULT_SHORTIDS=6
+DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -212,12 +212,16 @@ EOL
 
     # Parse UUIDs for vless link generation (one link per UUID)
     echo -e "\n${GREEN}VLESS Links:${NC}"
+    LINKS=""
     # Get the first shortId
     SHORTID=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
     # Extract UUIDs from CLIENTS_JSON and print one link per UUID (split by comma)
     echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/' | while read -r uuid; do
-        echo "vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
+        LINK="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
+        echo "$LINK"
+        LINKS+="$LINK\n"
     done
+    save_links "$LINKS"
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
