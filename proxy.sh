@@ -4,9 +4,8 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.0"
 DEFAULT_UUIDS=1
-DEFAULT_SHORTIDS=9
+DEFAULT_SHORTIDS=6
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -305,49 +304,28 @@ delete_xray() {
 }
 
 update_script() {
-    SCRIPT_URL="https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh"
     echo -e "${YELLOW}Checking for updates...${NC}"
-    # Fetch the latest script content
-    LATEST_SCRIPT=$(curl -s "$SCRIPT_URL")
-    if [ -z "$LATEST_SCRIPT" ]; then
-        echo -e "${RED}Could not fetch the update script. Please check your internet connection or the repository URL.${NC}"
-        return
-    fi
-
-    LATEST_VERSION=$(echo "$LATEST_SCRIPT" | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
-
+    LATEST_VERSION=$(curl -s https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
     if [ -z "$LATEST_VERSION" ]; then
-        echo -e "${RED}Could not determine the latest version. The script format might have changed.${NC}"
+        echo -e "${RED}Could not check for updates. Please check your internet connection or the repository URL.${NC}"
         return
     fi
 
     if [ "$SCRIPT_VERSION" == "$LATEST_VERSION" ]; then
-        echo -e "${GREEN}You are already using the latest version of the script (v$SCRIPT_VERSION).${NC}"
+        echo -e "${GREEN}You are already using the latest version of the script.${NC}"
         return
-    fi
+    }
 
-    echo -e "${YELLOW}A new version (v$LATEST_VERSION) is available. You are using v$SCRIPT_VERSION.${NC}"
+    echo -e "${YELLOW}A new version of the script is available: $LATEST_VERSION${NC}"
     read -p "Do you want to update? [y/N]: " update_confirm
     if [[ "$update_confirm" != "y" && "$update_confirm" != "Y" ]]; then
         echo -e "${RED}Update cancelled.${NC}"
         return
-    fi
+    }
 
     echo -e "${YELLOW}Updating script...${NC}"
-    # Write the fetched script to a temporary file
-    echo "$LATEST_SCRIPT" > proxy.sh.tmp
-
-    # Verify the downloaded file is a valid script
-    if ! bash -n "proxy.sh.tmp"; then
-        echo -e "${RED}The downloaded update is not a valid script. Aborting update.${NC}"
-        rm "proxy.sh.tmp"
-        return
-    fi
-
-    # Replace the old script with the new one
-    mv "proxy.sh.tmp" "$0"
-
-    echo -e "${GREEN}Script updated successfully! Please run the script again to apply the changes.${NC}"
+    curl -s https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh > proxy.sh
+    echo -e "${GREEN}Script updated successfully! Please run the script again.${NC}"
     exit 0
 }
 
