@@ -315,12 +315,14 @@ update_script() {
     if [ "$SCRIPT_VERSION" == "$LATEST_VERSION" ]; then
         echo -e "${GREEN}You are already using the latest version of the script.${NC}"
         return
+    fi
 
     echo -e "${YELLOW}A new version of the script is available: $LATEST_VERSION${NC}"
     read -p "Do you want to update? [y/N]: " update_confirm
     if [[ "$update_confirm" != "y" && "$update_confirm" != "Y" ]]; then
         echo -e "${RED}Update cancelled.${NC}"
         return
+    fi
 
     echo -e "${YELLOW}Updating script...${NC}"
     curl -s https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh > proxy.sh
