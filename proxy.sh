@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="0.9.2"
+SCRIPT_VERSION="0.9.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -223,9 +223,8 @@ EOL
     done
 
     # Save links to file
-    echo -e "\nSaving links to xray/vless_links.txt..."
-    mkdir -p xray
-    echo -e "$LINKS" > xray/vless_links.txt
+    echo -e "\nSaving links to vless_links.txt..."
+    echo -e "$LINKS" > vless_links.txt
     echo "Links saved successfully!"
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
@@ -267,7 +266,13 @@ install_docker
 
 show_links() {
     LINKS_FILE="xray/vless_links.txt"
-    if [ ! -f "$LINKS_FILE" ]; then
+    if [ -f "xray/vless_links.txt" ]; then
+        LINKS_FILE="xray/vless_links.txt"
+    elif [ -f "xray/vless_links.txt" ]; then
+        LINKS_FILE="xray/vless_links.txt"
+    elif [ -f "vless_links.txt" ]; then
+        LINKS_FILE="vless_links.txt"
+    else
         echo -e "${RED}No saved VLESS links found. Please install Xray first to generate and save links.${NC}"
         return
     fi
