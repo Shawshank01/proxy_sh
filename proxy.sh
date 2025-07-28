@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="0.9.1"
+SCRIPT_VERSION="0.9.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -212,16 +212,21 @@ EOL
 
     # Parse UUIDs for vless link generation (one link per UUID)
     echo -e "\n${GREEN}VLESS Links:${NC}"
-    LINKS=""
     # Get the first shortId
     SHORTID=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
     # Extract UUIDs from CLIENTS_JSON and print one link per UUID (split by comma)
-    echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/' | while read -r uuid; do
-        LINK="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
-        echo "$LINK"
-        LINKS+="$LINK\n"
+    LINKS=""
+    for uuid in $(echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/'); do
+        link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
+        echo "$link"
+        LINKS+="$link\n"
     done
-    save_links "$LINKS"
+
+    # Save links to file
+    echo -e "\nSaving links to xray/vless_links.txt..."
+    mkdir -p xray
+    echo -e "$LINKS" > xray/vless_links.txt
+    echo "Links saved successfully!"
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
@@ -261,35 +266,13 @@ check_distro
 install_docker
 
 show_links() {
-    CONFIG_FILE="xray/server.jsonc"
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}Config file $CONFIG_FILE not found. Please install Xray first.${NC}"
+    LINKS_FILE="xray/vless_links.txt"
+    if [ ! -f "$LINKS_FILE" ]; then
+        echo -e "${RED}No saved VLESS links found. Please install Xray first to generate and save links.${NC}"
         return
     fi
-    # Prompt for server address and remarks
-    read -p "Enter your server IP address or domain: " SERVER_ADDR
-    read -p "Enter a remarks name for this server: " REMARKS
-    # Extract values from config
-    UUIDS=$(grep -oE '"id": "[a-f0-9\-]{36}"' "$CONFIG_FILE" | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/')
-    PUBLIC_KEY=$(grep -oE '"publicKey": "[^"]+"' "$CONFIG_FILE" | head -n1 | cut -d'"' -f4)
-    if [ -z "$PUBLIC_KEY" ]; then
-        # fallback for old config: get from privateKey and print warning
-        PUBLIC_KEY="<your_public_key_here>"
-        echo -e "${YELLOW}Warning: Could not find publicKey in config. Please check your config or upgrade your script.${NC}"
-    fi
-    SHORTID=$(grep -A 1 '"shortIds":' "$CONFIG_FILE" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
-    PATH=$(grep -A 3 '"xhttpSettings":' "$CONFIG_FILE" | grep '"path":' | head -n1 | cut -d'"' -f4)
-    if [ -z "$PATH" ]; then PATH="/xrayxskvhqoiwe"; fi
-    SNI=$(grep -A 3 '"realitySettings":' "$CONFIG_FILE" | grep '"serverNames":' -A 1 | tail -n1 | grep -oE '"[^"]+"' | head -n1 | tr -d '"')
-    if [ -z "$SNI" ]; then SNI="www.apple.com"; fi
-    echo -e "\n${GREEN}VLESS Links:${NC}"
-    LINKS=""
-    for uuid in $UUIDS; do
-        LINK="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=$(python3 -c 'import urllib.parse; import sys; print(urllib.parse.quote(sys.argv[1]))' "$PATH")#$REMARKS"
-        echo "$LINK"
-        LINKS+="$LINK\n"
-    done
-    save_links "$LINKS"
+    echo -e "\n${GREEN}Saved VLESS Links:${NC}"
+    cat "$LINKS_FILE"
 }
 
 save_links() {
