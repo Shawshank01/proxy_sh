@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.2" # Updated version
+SCRIPT_VERSION="1.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -13,40 +13,6 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # --- Functions ---
-
-# Function to check for required commands
-check_dependencies() {
-    local missing_deps=()
-    for cmd in curl awk docker; do
-        if ! command -v "$cmd" &> /dev/null; then
-            missing_deps+=("$cmd")
-        fi
-    done
-
-    if [ ${#missing_deps[@]} -gt 0 ]; then
-        echo -e "${RED}The following required commands are not found: ${missing_deps[*]}.${NC}"
-        echo -e "${YELLOW}Please install them and try again.${NC}"
-        exit 1
-    fi
-}
-
-# Function to URL encode a string
-rawurlencode() {
-  local string="${1}"
-  local strlen=${#string}
-  local encoded=""
-  local pos c o
-
-  for (( pos=0 ; pos<strlen ; pos++ )); do
-     c=${string:$pos:1}
-     case "$c" in
-        [-_.~a-zA-Z0-9] ) o="${c}" ;;
-        * )               printf -v o '%%%02x' "'$c"
-     esac
-    encoded+="${o}"
-  done
-  echo "${encoded}"
-}
 
 # Function to detect the Linux distribution
 check_distro() {
@@ -61,7 +27,7 @@ check_distro() {
 
 # Function to check for and install Docker
 install_docker() {
-    if command -v docker &> /dev/null && command -v docker-compose &> /dev/null; then
+    if command -v docker &> /dev/null && command -v docker compose &> /dev/null; then
         echo -e "${GREEN}Docker and Docker Compose are already installed.${NC}"
         return
     fi
@@ -124,7 +90,7 @@ install_xray() {
         uuid=$(sudo docker run --rm teddysun/xray xray uuid)
         CLIENTS_JSON+="{\"id\": \"$uuid\", \"flow\": \"\"}"
         if [ "$i" -lt "$num_uuids" ]; then
-            CLIENTS_JSON+=","
+            CLIENTS_JSON+="," 
         fi
     done
 
@@ -133,7 +99,7 @@ install_xray() {
         shortid=$(openssl rand -hex 2)
         SHORTIDS_JSON+="\"$shortid\""
         if [ "$i" -lt "$num_shortids" ]; then
-            SHORTIDS_JSON+=","
+            SHORTIDS_JSON+="," 
         fi
     done
 
@@ -246,15 +212,12 @@ EOL
 
     # Parse UUIDs for vless link generation (one link per UUID)
     echo -e "\n${GREEN}VLESS Links:${NC}"
-    SHORTID=$(echo "$SHORTIDS_JSON" | awk -F'"' '{print $2}')
-    UUIDS=$(echo "$CLIENTS_JSON" | awk -F'"' '{print $4}')
-    LINKS=""
-    for uuid in $UUIDS; do
-        LINK="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
-        echo "$LINK"
-        LINKS+="$LINK\n"
+    # Get the first shortId
+    SHORTID=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
+    # Extract UUIDs from CLIENTS_JSON and print one link per UUID (split by comma)
+    echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/' | while read -r uuid; do
+        echo "vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
     done
-    save_links "$LINKS"
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
@@ -281,7 +244,18 @@ update_xray() {
     echo -e "${GREEN}Update process finished.${NC}"
 }
 
-# Function to show VLESS links for current config
+
+# --- Main Script ---
+
+# Make sure the script is not run as root
+if [ "$EUID" -eq 0 ]; then
+  echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
+  exit 1
+fi
+
+check_distro
+install_docker
+
 show_links() {
     CONFIG_FILE="xray/server.jsonc"
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -292,33 +266,28 @@ show_links() {
     read -p "Enter your server IP address or domain: " SERVER_ADDR
     read -p "Enter a remarks name for this server: " REMARKS
     # Extract values from config
-    UUIDS=$(awk -F'"' '/"id":/ {print $4}' "$CONFIG_FILE")
-    PRIVATE_KEY=$(awk -F'"' '/"privateKey":/ {print $4; exit}' "$CONFIG_FILE")
-    if [ -z "$PRIVATE_KEY" ]; then
-        echo -e "${RED}Could not find privateKey in config. Cannot generate links.${NC}"
-        return
-    fi
-    PUBLIC_KEY=$(sudo docker run --rm teddysun/xray xray x25519 -i "$PRIVATE_KEY" | awk '/Public key:/ {print $3}')
+    UUIDS=$(grep -oE '"id": "[a-f0-9\-]{36}"' "$CONFIG_FILE" | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/')
+    PUBLIC_KEY=$(grep -oE '"publicKey": "[^"]+"' "$CONFIG_FILE" | head -n1 | cut -d'"' -f4)
     if [ -z "$PUBLIC_KEY" ]; then
-        echo -e "${RED}Could not derive publicKey from privateKey.${NC}"
-        PUBLIC_KEY="<your_public_key_here>" # Fallback
+        # fallback for old config: get from privateKey and print warning
+        PUBLIC_KEY="<your_public_key_here>"
+        echo -e "${YELLOW}Warning: Could not find publicKey in config. Please check your config or upgrade your script.${NC}"
     fi
-    SHORTID=$(awk '/"shortIds":/ {getline; print}' "$CONFIG_FILE" | awk -F'"' '{print $2}')
-    PATH_VALUE=$(awk -F'"' '/"path":/ {print $4}' "$CONFIG_FILE")
-    if [ -z "$PATH_VALUE" ]; then PATH_VALUE="/xrayxskvhqoiwe"; fi
-    SNI=$(awk '/"serverNames":/ {getline; print}' "$CONFIG_FILE" | awk -F'"' '{print $2}')
+    SHORTID=$(grep -A 1 '"shortIds":' "$CONFIG_FILE" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
+    PATH=$(grep -A 3 '"xhttpSettings":' "$CONFIG_FILE" | grep '"path":' | head -n1 | cut -d'"' -f4)
+    if [ -z "$PATH" ]; then PATH="/xrayxskvhqoiwe"; fi
+    SNI=$(grep -A 3 '"realitySettings":' "$CONFIG_FILE" | grep '"serverNames":' -A 1 | tail -n1 | grep -oE '"[^"]+"' | head -n1 | tr -d '"')
     if [ -z "$SNI" ]; then SNI="www.apple.com"; fi
     echo -e "\n${GREEN}VLESS Links:${NC}"
     LINKS=""
     for uuid in $UUIDS; do
-        LINK="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=$(rawurlencode "$PATH_VALUE")#$REMARKS"
+        LINK="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=$(python3 -c 'import urllib.parse; import sys; print(urllib.parse.quote(sys.argv[1]))' "$PATH")#$REMARKS"
         echo "$LINK"
         LINKS+="$LINK\n"
     done
     save_links "$LINKS"
 }
 
-# Function to save generated links to a file
 save_links() {
     LINKS_FILE="xray/vless_links.txt"
     echo -e "\n${YELLOW}Saving links to $LINKS_FILE...${NC}"
@@ -326,7 +295,6 @@ save_links() {
     echo -e "${GREEN}Links saved successfully!${NC}"
 }
 
-# Function to delete Xray container and config
 delete_xray() {
     echo -e "${YELLOW}Deleting Xray container and config...${NC}"
     cd xray || exit
@@ -336,7 +304,6 @@ delete_xray() {
     echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
 }
 
-# Function to update the script from GitHub
 update_script() {
     SCRIPT_URL="https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh"
     echo -e "${YELLOW}Checking for updates...${NC}"
@@ -347,7 +314,7 @@ update_script() {
         return
     fi
 
-    LATEST_VERSION=$(echo "$LATEST_SCRIPT" | awk -F'"' '/SCRIPT_VERSION=/ {print $2}')
+    LATEST_VERSION=$(echo "$LATEST_SCRIPT" | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
 
     if [ -z "$LATEST_VERSION" ]; then
         echo -e "${RED}Could not determine the latest version. The script format might have changed.${NC}"
@@ -383,18 +350,6 @@ update_script() {
     echo -e "${GREEN}Script updated successfully! Please run the script again to apply the changes.${NC}"
     exit 0
 }
-
-# --- Main Script ---
-
-# Make sure the script is not run as root
-if [ "$EUID" -eq 0 ]; then
-  echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
-  exit 1
-fi
-
-check_dependencies
-check_distro
-install_docker
 
 echo -e "${YELLOW}--- Xray Proxy Installer ---${NC}"
 echo "Please choose an option:"
