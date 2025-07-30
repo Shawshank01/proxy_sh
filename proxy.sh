@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -48,12 +48,29 @@ install_docker() {
                 exit 1
             fi
             
-            # Try to install docker-compose-plugin, fallback to docker-compose if not available
+            # Try to install docker-compose-plugin (newer version)
             if sudo apt-get install -y docker-compose-plugin 2>/dev/null; then
                 echo -e "${GREEN}Docker Compose plugin installed successfully.${NC}"
             else
-                echo -e "${YELLOW}Docker Compose plugin not available, installing docker-compose...${NC}"
-                if ! sudo apt-get install -y docker-compose; then
+                echo -e "${YELLOW}Docker Compose plugin not available, trying alternative installation...${NC}"
+                # Try installing docker-compose-plugin from Docker's official repository
+                if ! sudo apt-get install -y ca-certificates curl gnupg; then
+                    echo -e "${RED}Failed to install prerequisites for Docker Compose.${NC}"
+                    exit 1
+                fi
+                
+                # Add Docker's official GPG key
+                sudo install -m 0755 -d /etc/apt/keyrings
+                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+                sudo chmod a+r /etc/apt/keyrings/docker.gpg
+                
+                # Add the repository to Apt sources
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                
+                sudo apt-get update
+                if sudo apt-get install -y docker-compose-plugin; then
+                    echo -e "${GREEN}Docker Compose plugin installed successfully from Docker repository.${NC}"
+                else
                     echo -e "${RED}Failed to install Docker Compose. Please install it manually.${NC}"
                     exit 1
                 fi
@@ -299,10 +316,17 @@ check_xray_requirements() {
         return 1
     fi
     # Check for both docker-compose (hyphen) and docker compose (space) versions
-    if command -v docker-compose &> /dev/null; then
-        DOCKER_COMPOSE_CMD="docker-compose"
-    elif docker compose version &> /dev/null; then
+    # Prioritize the newer 'docker compose' version
+    if docker compose version &> /dev/null 2>&1; then
         DOCKER_COMPOSE_CMD="docker compose"
+    elif command -v docker-compose &> /dev/null; then
+        # Test if the old docker-compose actually works
+        if docker-compose version &> /dev/null 2>&1; then
+            DOCKER_COMPOSE_CMD="docker-compose"
+        else
+            echo -e "${RED}Docker Compose is installed but not working. Please install the newer version.${NC}"
+            return 1
+        fi
     else
         echo -e "${RED}Docker Compose is not installed. Please run option 1 (Environment Check) first.${NC}"
         return 1
@@ -376,7 +400,7 @@ if [ "$EUID" -eq 0 ]; then
   exit 1
 fi
 
-echo -e "${YELLOW}--- Xray Proxy Installer ---${NC}"
+echo -e "${YELLOW}--- VLESS Proxy Installer v1.0.1 ---${NC}"
 echo "Please choose an option:"
 echo "0) Update this script"
 echo "1) Environment Check (Check distro and install Docker)"
