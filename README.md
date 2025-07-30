@@ -5,50 +5,59 @@
 An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy server using Docker.
 
 ## Features
-- **Automatic Docker installation** (if not present)
-- **Supports Ubuntu, Debian, CentOS, Fedora** (and similar distros)
-- **Interactive setup**: choose proxy type, number of UUIDs and shortIds
-- **Generates secure configuration** with user-specified or default values
-- **Blocks China (CN) IPs and domains** by default in the generated config
-- **Easy update**: run the script and choose the update option
+- **Automated Environment Check**: Installs Docker and Docker Compose if they are not present.
+- **Wide Distro Support**: Works with Debian, Ubuntu, Fedora, CentOS, RHEL, and Linux Mint.
+- **Interactive Installation**: Guides you through setting up an Xray VLESS-XHTTP-Reality proxy.
+- **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
+- **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
+- **Container Management**: Easy-to-use menu for updating, viewing links, or deleting the Xray container and its configuration.
+- **Self-Updating**: The script can manually check for and pull the latest version of itself from GitHub.
 
 ## Usage
 
-1. **Download the script:**
-   ```bash
-   wget https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh
-   chmod +x proxy.sh
-   ```
+1.  **Download and execute the script:**
+    ```bash
+    wget https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh
+    chmod +x proxy.sh
+    ```
 
-2. **Run the script (do NOT use sudo):**
-   ```bash
-   ./proxy.sh
-   ```
-   The script will prompt for sudo when needed.
+2.  **Run the script (do NOT use `sudo`):**
+    ```bash
+    ./proxy.sh
+    ```
+    The script will request `sudo` permissions only when necessary.
 
-3. **Follow the prompts:**
-   - If Docker is not installed, you will be asked if you want to install it.
-   - Choose the proxy type (currently only Xray VLESS-XHTTP-Reality is available).
-   - Enter the number of UUIDs and shortIds (or press Enter for defaults).
-   - Review the generated configuration and confirm to start the container.
+3.  **Choose an option from the menu.**
 
-4. **To update the Xray container:**
-   - Run the script again and choose the update option.
+## Menu Options
+
+-   **0) Update this script**: Checks for a new version on GitHub and updates itself.
+-   **1) Environment Check**: Verifies the Linux distribution and installs Docker and Docker Compose if needed. Run this first if you are on a new server.
+-   **2) Install Xray (VLESS-XHTTP-Reality)**: The main installation process. It will:
+    -   Ask for the number of users (UUIDs) and `shortIds`.
+    -   Generate `docker-compose.yml` and `server.jsonc` in a new `xray/` directory.
+    -   Ask for your server's IP/domain and a remarks name to generate VLESS links.
+    -   Save the links to `xray/vless_links.txt`.
+    -   Start the Xray container.
+-   **3) ss_2022**: (Coming soon)
+-   **4) Update existing Xray container**: Pulls the latest `teddysun/xray` Docker image and restarts the container using Watchtower.
+-   **5) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
+-   **6) Delete Xray container and config**: Stops the Docker container, and deletes the `xray/` directory, including all configurations and link files.
 
 ## Configuration Details
-- The generated `server.jsonc` **blocks all China (CN) IPs and domains** using Xray's routing rules.
-- The config uses the Reality protocol with a random path and secure keys.
-- All configuration files are created in a new `xray` directory in your current path.
+- The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
+- The configuration uses the Reality protocol for obfuscation.
+- All configuration files are created in a new `xray` directory relative to the script's location.
 
 ## Notes
-- Make sure to open port 443 (TCP & UDP) in your server's firewall.
-- The script should not be run as root; use your normal user account.
-- The `ss_2022` option is not yet available.
+- Remember to open port **443 (TCP & UDP)** in your server's firewall.
+- The script should not be run as the `root` user.
 
 ## Credits
 
-- [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
-- [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
+-   [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
+-   [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
+-   [containrrr/watchtower](https://github.com/containrrr/watchtower) — Used for safely updating the container.
 
 Special thanks to the Xray and teddysun teams for their excellent work!
 
