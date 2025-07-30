@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.0.4"
+SCRIPT_VERSION="1.0.5"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -145,7 +145,15 @@ install_docker_compose() {
                 sudo chmod a+r /etc/apt/keyrings/docker.gpg
                 
                 # Add the repository to Apt sources
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                # For Linux Mint, get the Ubuntu codename it's based on
+                if [ "$DISTRO" = "linuxmint" ]; then
+                    UBUNTU_CODENAME=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
+                    echo -e "${YELLOW}Linux Mint detected, using Ubuntu codename: $UBUNTU_CODENAME${NC}"
+                else
+                    UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+                fi
+                
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $UBUNTU_CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
                 
                 sudo apt-get update
                 if sudo apt-get install -y docker-compose-plugin; then
@@ -477,7 +485,7 @@ if [ "$EUID" -eq 0 ]; then
   exit 1
 fi
 
-echo -e "${YELLOW}--- VLESS Proxy Installer v1.0.4 ---${NC}"
+echo -e "${YELLOW}--- VLESS Proxy Installer v1.0.5 ---${NC}"
 echo "Please choose an option:"
 echo "0) Update this script"
 echo "1) Environment Check (Check distro and install Docker)"
