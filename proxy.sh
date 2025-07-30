@@ -341,15 +341,19 @@ fi
 
 echo -e "${YELLOW}--- Xray Proxy Installer ---${NC}"
 echo "Please choose an option:"
+echo "0) Update this script"
 echo "1) Environment Check (Check distro and install Docker)"
 echo "2) Install Xray (VLESS-XHTTP-Reality)"
 echo "3) ss_2022 (coming soon)"
 echo "4) Update existing Xray container"
 echo "5) Show VLESS links for current config"
 echo "6) Delete Xray container and config"
-read -p "Enter your choice [1-6]: " choice
+read -p "Enter your choice [0-6]: " choice
 
 case $choice in
+    0)
+        update_script
+        ;;
     1)
         check_environment
         ;;
