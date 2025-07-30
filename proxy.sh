@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="0.9.4"
+SCRIPT_VERSION="0.9.5"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -252,17 +252,26 @@ update_xray() {
     echo -e "${GREEN}Update process finished.${NC}"
 }
 
+# Function to check environment (distro and Docker)
+check_environment() {
+    echo -e "${YELLOW}Checking environment...${NC}"
+    check_distro
+    install_docker
+    echo -e "${GREEN}Environment check completed!${NC}"
+}
 
-# --- Main Script ---
-
-# Make sure the script is not run as root
-if [ "$EUID" -eq 0 ]; then
-  echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
-  exit 1
-fi
-
-check_distro
-install_docker
+# Function to check if environment is ready for Xray installation
+check_xray_requirements() {
+    if ! command -v docker &> /dev/null; then
+        echo -e "${RED}Docker is not installed. Please run option 1 (Environment Check) first.${NC}"
+        return 1
+    fi
+    if ! command -v docker compose &> /dev/null; then
+        echo -e "${RED}Docker Compose is not installed. Please run option 1 (Environment Check) first.${NC}"
+        return 1
+    fi
+    return 0
+}
 
 show_links() {
     LINKS_FILE="xray/vless_links.txt"
@@ -322,34 +331,48 @@ update_script() {
     exit 0
 }
 
+# --- Main Script ---
+
+# Make sure the script is not run as root
+if [ "$EUID" -eq 0 ]; then
+  echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
+  exit 1
+fi
+
 echo -e "${YELLOW}--- Xray Proxy Installer ---${NC}"
 echo "Please choose an option:"
-echo "0) Update this script"
-echo "1) Install Xray (VLESS-XHTTP-Reality)"
-echo "2) ss_2022 (coming soon)"
-echo "3) Update existing Xray container"
-echo "4) Show VLESS links for current config"
-echo "5) Delete Xray container and config"
-read -p "Enter your choice [0-5]: " choice
+echo "1) Environment Check (Check distro and install Docker)"
+echo "2) Install Xray (VLESS-XHTTP-Reality)"
+echo "3) ss_2022 (coming soon)"
+echo "4) Update existing Xray container"
+echo "5) Show VLESS links for current config"
+echo "6) Delete Xray container and config"
+read -p "Enter your choice [1-6]: " choice
 
 case $choice in
-    0)
-        update_script
-        ;;
     1)
-        install_xray
+        check_environment
         ;;
     2)
-        echo "This option is not yet available."
+        if ! check_xray_requirements; then
+            exit 1
+        fi
+        install_xray
         ;;
     3)
-        update_xray
+        echo "This option is not yet available."
         ;;
     4)
-        show_links
+        if ! check_xray_requirements; then
+            exit 1
+        fi
+        update_xray
         ;;
     5)
-        delete_xray
+        show_links
+        ;;
+    6)
+        echo "This option is not yet available."
         ;;
     *)
         echo -e "${RED}Invalid choice. Exiting.${NC}"
