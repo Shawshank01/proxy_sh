@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -30,17 +30,53 @@ check_distro() {
 
 # Function to check for and install Docker
 install_docker() {
-    if command -v docker &> /dev/null && command -v docker compose &> /dev/null; then
-        echo -e "${GREEN}Docker and Docker Compose are already installed.${NC}"
+    # Check if Docker is installed
+    if command -v docker &> /dev/null; then
+        echo -e "${GREEN}Docker is already installed.${NC}"
+    else
+        echo -e "${YELLOW}Docker is not installed.${NC}"
+        read -p "$(echo -e ${YELLOW}Would you like to install Docker? [y/N]: ${NC})" install_confirm
+        if [[ "$install_confirm" != "y" && "$install_confirm" != "Y" ]]; then
+            echo -e "${RED}Docker installation cancelled. Exiting.${NC}"
+            exit 1
+        fi
+        install_docker_packages
         return
     fi
 
-    read -p "$(echo -e ${YELLOW}Docker is not installed. Would you like to install it? [y/N]: ${NC})" install_confirm
-    if [[ "$install_confirm" != "y" && "$install_confirm" != "Y" ]]; then
-        echo -e "${RED}Docker installation cancelled. Exiting.${NC}"
-        exit 1
+    # Check if Docker Compose is working
+    if docker compose version &> /dev/null 2>&1; then
+        echo -e "${GREEN}Docker Compose is working properly.${NC}"
+        return
+    elif command -v docker-compose &> /dev/null; then
+        if docker-compose version &> /dev/null 2>&1; then
+            echo -e "${GREEN}Docker Compose is working properly.${NC}"
+            return
+        else
+            echo -e "${YELLOW}Docker Compose is installed but not working (broken on newer Python versions).${NC}"
+            read -p "$(echo -e ${YELLOW}Would you like to upgrade to a working Docker Compose version? [y/N]: ${NC})" upgrade_confirm
+            if [[ "$upgrade_confirm" == "y" || "$upgrade_confirm" == "Y" ]]; then
+                echo -e "${YELLOW}Upgrading Docker Compose...${NC}"
+                install_docker_compose
+            else
+                echo -e "${RED}Docker Compose upgrade cancelled. Some features may not work.${NC}"
+            fi
+            return
+        fi
+    else
+        echo -e "${YELLOW}Docker Compose is not installed.${NC}"
+        read -p "$(echo -e ${YELLOW}Would you like to install Docker Compose? [y/N]: ${NC})" install_confirm
+        if [[ "$install_confirm" == "y" || "$install_confirm" == "Y" ]]; then
+            install_docker_compose
+        else
+            echo -e "${RED}Docker Compose installation cancelled. Some features may not work.${NC}"
+        fi
+        return
     fi
+}
 
+# Function to install Docker packages
+install_docker_packages() {
     echo "Installing Docker for ${DISTRO}..."
     case "$DISTRO" in
         ubuntu|debian|linuxmint)
@@ -51,33 +87,8 @@ install_docker() {
                 exit 1
             fi
             
-            # Try to install docker-compose-plugin (newer version)
-            if sudo apt-get install -y docker-compose-plugin 2>/dev/null; then
-                echo -e "${GREEN}Docker Compose plugin installed successfully.${NC}"
-            else
-                echo -e "${YELLOW}Docker Compose plugin not available, trying alternative installation...${NC}"
-                # Try installing docker-compose-plugin from Docker's official repository
-                if ! sudo apt-get install -y ca-certificates curl gnupg; then
-                    echo -e "${RED}Failed to install prerequisites for Docker Compose.${NC}"
-                    exit 1
-                fi
-                
-                # Add Docker's official GPG key
-                sudo install -m 0755 -d /etc/apt/keyrings
-                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-                sudo chmod a+r /etc/apt/keyrings/docker.gpg
-                
-                # Add the repository to Apt sources
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-                
-                sudo apt-get update
-                if sudo apt-get install -y docker-compose-plugin; then
-                    echo -e "${GREEN}Docker Compose plugin installed successfully from Docker repository.${NC}"
-                else
-                    echo -e "${RED}Failed to install Docker Compose. Please install it manually.${NC}"
-                    exit 1
-                fi
-            fi
+            # Install Docker Compose
+            install_docker_compose
             ;;
         centos|rhel|fedora)
             sudo dnf -y install dnf-plugins-core
@@ -110,6 +121,65 @@ install_docker() {
         echo -e "${RED}Docker installation failed. Please install it manually.${NC}"
         exit 1
     fi
+}
+
+# Function to install Docker Compose
+install_docker_compose() {
+    echo -e "${YELLOW}Installing Docker Compose...${NC}"
+    case "$DISTRO" in
+        ubuntu|debian|linuxmint)
+            # Try to install docker-compose-plugin (newer version)
+            if sudo apt-get install -y docker-compose-plugin 2>/dev/null; then
+                echo -e "${GREEN}Docker Compose plugin installed successfully.${NC}"
+            else
+                echo -e "${YELLOW}Docker Compose plugin not available, trying alternative installation...${NC}"
+                # Try installing docker-compose-plugin from Docker's official repository
+                if ! sudo apt-get install -y ca-certificates curl gnupg; then
+                    echo -e "${RED}Failed to install prerequisites for Docker Compose.${NC}"
+                    exit 1
+                fi
+                
+                # Add Docker's official GPG key
+                sudo install -m 0755 -d /etc/apt/keyrings
+                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+                sudo chmod a+r /etc/apt/keyrings/docker.gpg
+                
+                # Add the repository to Apt sources
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                
+                sudo apt-get update
+                if sudo apt-get install -y docker-compose-plugin; then
+                    echo -e "${GREEN}Docker Compose plugin installed successfully from Docker repository.${NC}"
+                else
+                    echo -e "${RED}Failed to install Docker Compose. Please install it manually.${NC}"
+                    exit 1
+                fi
+            fi
+            ;;
+        centos|rhel|fedora)
+            sudo dnf install -y docker-compose-plugin
+            ;;
+        *)
+            echo -e "${RED}Unsupported distribution for automatic Docker Compose installation. Please install it manually.${NC}"
+            exit 1
+            ;;
+    esac
+}
+
+# Function to check for and install Docker (old version - kept for compatibility)
+install_docker_old() {
+    if command -v docker &> /dev/null && command -v docker compose &> /dev/null; then
+        echo -e "${GREEN}Docker and Docker Compose are already installed.${NC}"
+        return
+    fi
+
+    read -p "$(echo -e ${YELLOW}Docker is not installed. Would you like to install it? [y/N]: ${NC})" install_confirm
+    if [[ "$install_confirm" != "y" && "$install_confirm" != "Y" ]]; then
+        echo -e "${RED}Docker installation cancelled. Exiting.${NC}"
+        exit 1
+    fi
+
+    install_docker_packages
 }
 
 # Function to install Xray VLESS-XHTTP-Reality
@@ -407,7 +477,7 @@ if [ "$EUID" -eq 0 ]; then
   exit 1
 fi
 
-echo -e "${YELLOW}--- VLESS Proxy Installer v1.0.3 ---${NC}"
+echo -e "${YELLOW}--- VLESS Proxy Installer v1.0.4 ---${NC}"
 echo "Please choose an option:"
 echo "0) Update this script"
 echo "1) Environment Check (Check distro and install Docker)"
