@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="0.9.7"
+SCRIPT_VERSION="0.9.8"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -408,7 +408,10 @@ case $choice in
         show_links
         ;;
     6)
-        echo "This option is not yet available."
+        if ! check_xray_requirements; then
+            exit 1
+        fi
+        delete_xray
         ;;
     *)
         echo -e "${RED}Invalid choice. Exiting.${NC}"
