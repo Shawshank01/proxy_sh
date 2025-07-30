@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="0.9.9"
+SCRIPT_VERSION="1.0.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -261,7 +261,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        sudo docker-compose up -d
+        sudo $DOCKER_COMPOSE_CMD up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
     else
@@ -298,7 +298,12 @@ check_xray_requirements() {
         echo -e "${RED}Docker is not installed. Please run option 1 (Environment Check) first.${NC}"
         return 1
     fi
-    if ! command -v docker-compose &> /dev/null; then
+    # Check for both docker-compose (hyphen) and docker compose (space) versions
+    if command -v docker-compose &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    elif docker compose version &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    else
         echo -e "${RED}Docker Compose is not installed. Please run option 1 (Environment Check) first.${NC}"
         return 1
     fi
@@ -331,7 +336,7 @@ save_links() {
 delete_xray() {
     echo -e "${YELLOW}Deleting Xray container and config...${NC}"
     cd xray || exit
-    sudo docker-compose down
+    sudo $DOCKER_COMPOSE_CMD down
     cd ..
     rm -rf xray
     echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
