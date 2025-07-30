@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="0.9.3"
+SCRIPT_VERSION="0.9.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -40,7 +40,7 @@ install_docker() {
 
     echo "Installing Docker for ${DISTRO}..."
     case "$DISTRO" in
-        ubuntu|debian)
+        ubuntu|debian|linuxmint)
             sudo apt-get update
             sudo apt-get install -y docker.io docker-compose-plugin
             ;;
