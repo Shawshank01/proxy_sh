@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -318,13 +318,12 @@ check_xray_requirements() {
         echo -e "${RED}Docker is not installed. Please run option 1 (Environment Check) first.${NC}"
         return 1
     fi
+    echo -e "${YELLOW}Checking Docker Compose availability...${NC}"
+    
     # Check for both docker-compose (hyphen) and docker compose (space) versions
     # Prioritize the newer 'docker compose' version
-    if docker compose version &> /dev/null 2>&1; then
-        DOCKER_COMPOSE_CMD="docker compose"
-        echo -e "${GREEN}Using Docker Compose: $DOCKER_COMPOSE_CMD${NC}"
-    elif command -v docker-compose &> /dev/null; then
-        # Test if the old docker-compose actually works
+    if command -v docker-compose &> /dev/null; then
+        echo -e "${YELLOW}Found docker-compose (old version), testing if it works...${NC}"
         if docker-compose version &> /dev/null 2>&1; then
             DOCKER_COMPOSE_CMD="docker-compose"
             echo -e "${GREEN}Using Docker Compose: $DOCKER_COMPOSE_CMD${NC}"
@@ -332,6 +331,9 @@ check_xray_requirements() {
             echo -e "${RED}Docker Compose is installed but not working. Please install the newer version.${NC}"
             return 1
         fi
+    elif docker compose version &> /dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker compose"
+        echo -e "${GREEN}Using Docker Compose: $DOCKER_COMPOSE_CMD${NC}"
     else
         echo -e "${RED}Docker Compose is not installed. Please run option 1 (Environment Check) first.${NC}"
         return 1
@@ -405,7 +407,7 @@ if [ "$EUID" -eq 0 ]; then
   exit 1
 fi
 
-echo -e "${YELLOW}--- VLESS Proxy Installer v1.0.2 ---${NC}"
+echo -e "${YELLOW}--- VLESS Proxy Installer v1.0.3 ---${NC}"
 echo "Please choose an option:"
 echo "0) Update this script"
 echo "1) Environment Check (Check distro and install Docker)"
