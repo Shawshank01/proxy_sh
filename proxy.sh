@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="0.9.6"
+SCRIPT_VERSION="0.9.7"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -42,7 +42,22 @@ install_docker() {
     case "$DISTRO" in
         ubuntu|debian|linuxmint)
             sudo apt-get update
-            sudo apt-get install -y docker.io docker-compose-plugin
+            # Install Docker
+            if ! sudo apt-get install -y docker.io; then
+                echo -e "${RED}Failed to install Docker. Please install it manually.${NC}"
+                exit 1
+            fi
+            
+            # Try to install docker-compose-plugin, fallback to docker-compose if not available
+            if sudo apt-get install -y docker-compose-plugin 2>/dev/null; then
+                echo -e "${GREEN}Docker Compose plugin installed successfully.${NC}"
+            else
+                echo -e "${YELLOW}Docker Compose plugin not available, installing docker-compose...${NC}"
+                if ! sudo apt-get install -y docker-compose; then
+                    echo -e "${RED}Failed to install Docker Compose. Please install it manually.${NC}"
+                    exit 1
+                fi
+            fi
             ;;
         centos|rhel|fedora)
             sudo dnf -y install dnf-plugins-core
@@ -55,9 +70,26 @@ install_docker() {
             ;;
     esac
 
-    sudo systemctl start docker
-    sudo systemctl enable docker
-    echo -e "${GREEN}Docker has been installed and started.${NC}"
+    # Start and enable Docker service
+    if sudo systemctl start docker 2>/dev/null; then
+        echo -e "${GREEN}Docker service started successfully.${NC}"
+    else
+        echo -e "${YELLOW}Could not start Docker service. You may need to start it manually.${NC}"
+    fi
+    
+    if sudo systemctl enable docker 2>/dev/null; then
+        echo -e "${GREEN}Docker service enabled for auto-start.${NC}"
+    else
+        echo -e "${YELLOW}Could not enable Docker service. You may need to enable it manually.${NC}"
+    fi
+    
+    # Verify Docker installation
+    if command -v docker &> /dev/null; then
+        echo -e "${GREEN}Docker has been installed successfully.${NC}"
+    else
+        echo -e "${RED}Docker installation failed. Please install it manually.${NC}"
+        exit 1
+    fi
 }
 
 # Function to install Xray VLESS-XHTTP-Reality
