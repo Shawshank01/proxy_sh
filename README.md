@@ -1,7 +1,5 @@
 # proxy_sh
 
-[View on GitHub](https://github.com/Shawshank01/proxy_sh)
-
 An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy server using Docker.
 
 ## Features
