@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# proxy.sh - An automated script to install and manage an Xray proxy server.
+# proxy.sh: An automated script to install and manage an Xray proxy server.
 #
 
 # --- Configuration & Colors ---
@@ -16,6 +16,45 @@ NC='\033[0m' # No Color
 DOCKER_COMPOSE_CMD=""
 
 # --- Functions ---
+
+# Check and install dependencies
+check_dependencies() {
+    # Only check for tools we might need to install.
+    local dependencies=("curl" "openssl")
+    local missing_deps=()
+
+    for cmd in "${dependencies[@]}"; do
+        if ! command -v $cmd &> /dev/null; then
+            missing_deps+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        echo -e "${YELLOW}Missing dependencies: ${missing_deps[*]}${NC}"
+        echo -e "${YELLOW}Attempting to install them...${NC}"
+        
+        # Detect package manager
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y "${missing_deps[@]}"
+        elif command -v dnf &> /dev/null; then
+            sudo dnf install -y "${missing_deps[@]}"
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y "${missing_deps[@]}"
+        else
+            echo -e "${RED}Could not detect package manager. Please install manually: ${missing_deps[*]}${NC}"
+            exit 1
+        fi
+        
+        # Verify installation
+        for cmd in "${missing_deps[@]}"; do
+            if ! command -v $cmd &> /dev/null; then
+                 echo -e "${RED}Failed to install $cmd. Please install manually.${NC}"
+                 exit 1
+            fi
+        done
+        echo -e "${GREEN}Dependencies installed successfully!${NC}"
+    fi
+}
 
 # Function to detect the Linux distribution
 check_distro() {
@@ -174,22 +213,6 @@ install_docker_compose() {
     esac
 }
 
-# Function to check for and install Docker (old version - kept for compatibility)
-install_docker_old() {
-    if command -v docker &> /dev/null && command -v docker compose &> /dev/null; then
-        echo -e "${GREEN}Docker and Docker Compose are already installed.${NC}"
-        return
-    fi
-
-    read -p "$(echo -e ${YELLOW}Docker is not installed. Would you like to install it? [y/N]: ${NC})" install_confirm
-    if [[ "$install_confirm" != "y" && "$install_confirm" != "Y" ]]; then
-        echo -e "${RED}Docker installation cancelled. Exiting.${NC}"
-        exit 1
-    fi
-
-    install_docker_packages
-}
-
 # Function to install Xray VLESS-XHTTP-Reality
 install_xray() {
     echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
@@ -211,13 +234,13 @@ install_xray() {
 
     # Generate keys and IDs
     echo "Generating keys and IDs..."
-    KEYS=$(sudo docker run --rm teddysun/xray xray x25519)
+    KEYS=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519)
     PRIVATE_KEY=$(echo "$KEYS" | awk '/Private key:/ {print $3}')
     PUBLIC_KEY=$(echo "$KEYS" | awk '/Public key:/ {print $3}')
 
     CLIENTS_JSON=""
     for i in $(seq 1 $num_uuids); do
-        uuid=$(sudo docker run --rm teddysun/xray xray uuid)
+        uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray uuid)
         CLIENTS_JSON+="{\"id\": \"$uuid\", \"flow\": \"\"}"
         if [ "$i" -lt "$num_uuids" ]; then
             CLIENTS_JSON+="," 
@@ -226,7 +249,7 @@ install_xray() {
 
     SHORTIDS_JSON=""
     for i in $(seq 1 $num_shortids); do
-        shortid=$(openssl rand -hex 2)
+        shortid=$(openssl rand -hex 4) # Generates 8 characters
         SHORTIDS_JSON+="\"$shortid\""
         if [ "$i" -lt "$num_shortids" ]; then
             SHORTIDS_JSON+="," 
@@ -365,21 +388,37 @@ EOL
     else
         echo -e "${RED}Container start cancelled.${NC}"
     fi
+
+    # RETURN TO MAIN DIRECTORY
+    cd ..
 }
 
 # Function to update Xray
 update_xray() {
-    if ! sudo docker ps -q -f name=xray_server | grep -q .; then
-        echo -e "${RED}Container 'xray_server' not found. Cannot update.${NC}"
-        exit 1
+    local CONTAINER_NAME="xray_server"
+
+    # Check if container exists (running or stopped)
+    # Using -a ensures we find it even if it happens to be stopped currently
+    if ! sudo docker ps -a -q -f name="^/${CONTAINER_NAME}$" | grep -q .; then
+        echo -e "${RED}Container '${CONTAINER_NAME}' not found. Cannot update.${NC}"
+        return 1
     fi
-    echo "Updating xray_server..."
-    sudo docker run --rm \
+
+    echo "Updating ${CONTAINER_NAME}..."
+
+    # Run Watchtower with the API Fix
+    if sudo docker run --rm \
+      -e DOCKER_API_VERSION=1.44 \
       -v /var/run/docker.sock:/var/run/docker.sock \
       containrrr/watchtower \
       --run-once \
-      xray_server
-    echo -e "${GREEN}Update process finished.${NC}"
+      -c \
+      "$CONTAINER_NAME"; then
+        echo -e "${GREEN}Update process finished successfully.${NC}"
+    else
+        echo -e "${RED}Watchtower failed to run.${NC}"
+        return 1
+    fi
 }
 
 # Function to check environment (distro and Docker)
@@ -423,8 +462,6 @@ show_links() {
     LINKS_FILE="xray/vless_links.txt"
     if [ -f "xray/vless_links.txt" ]; then
         LINKS_FILE="xray/vless_links.txt"
-    elif [ -f "xray/vless_links.txt" ]; then
-        LINKS_FILE="xray/vless_links.txt"
     elif [ -f "vless_links.txt" ]; then
         LINKS_FILE="vless_links.txt"
     else
@@ -435,15 +472,15 @@ show_links() {
     cat "$LINKS_FILE"
 }
 
-save_links() {
-    LINKS_FILE="xray/vless_links.txt"
-    echo -e "\n${YELLOW}Saving links to $LINKS_FILE...${NC}"
-    echo -e "$1" > "$LINKS_FILE"
-    echo -e "${GREEN}Links saved successfully!${NC}"
-}
-
 delete_xray() {
     echo -e "${YELLOW}Deleting Xray container and config...${NC}"
+    
+    # SAFETY CHECK: Only try to enter/delete if directory exists
+    if [ ! -d "xray" ]; then
+        echo -e "${RED}Directory 'xray' not found. Nothing to delete.${NC}"
+        return
+    fi
+
     cd xray || exit
     sudo $DOCKER_COMPOSE_CMD down
     cd ..
@@ -484,6 +521,9 @@ if [ "$EUID" -eq 0 ]; then
   echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
   exit 1
 fi
+
+# CHECK DEPENDENCIES NOW (Running as non-root, will use sudo inside)
+check_dependencies
 
 echo -e "${YELLOW}--- VLESS Proxy Installer v1.0.6 ---${NC}"
 echo "Please choose an option:"
