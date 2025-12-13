@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.1.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -282,14 +282,12 @@ EOL
         "domainStrategy": "IPIfNonMatch",
         "rules": [
             {
-                "type": "field",
                 "ip": [
                     "geoip:cn"
                 ],
                 "outboundTag": "block"
             },
             {
-                "type": "field",
                 "domain": [
                     "geosite:cn"
                 ],
@@ -315,11 +313,11 @@ EOL
                 },
                 "security": "reality",
                 "realitySettings": {
-                    "target": "www.apple.com:443",
+                    "target": "zum.com:443",
                     "serverNames": [
-                        "images.apple.com",
-                        "www.apple.com.cn",
-                        "www.apple.com"
+                        "m.zum.com",
+                        "www.zum.com",
+                        "zum.com"
                     ],
                     "privateKey": "$PRIVATE_KEY",
                     "shortIds": [
