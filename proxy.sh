@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.2.8"
+SCRIPT_VERSION="1.2.9"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -382,12 +382,30 @@ EOL
     read -p "Enter your server IP address or domain: " SERVER_ADDR
     read -p "Enter a remarks name for this server: " REMARKS
 
-    # Determine the SNI domain from server.jsonc target (host portion before :port)
-    TARGET_VALUE=$(sed -nE 's/.*"target": *"([^"]+)".*/\1/p' server.jsonc | head -n1)
-    SNI_DOMAIN=${TARGET_VALUE%%:*}
+    # Determine the SNI domain (first serverName, fallback to target host if list empty)
+    SNI_DOMAIN=$(awk '
+        /"serverNames": *\[/ {flag=1; next}
+        flag {
+            if ($0 ~ /\]/) {
+                flag=0
+            } else if ($0 ~ /"/) {
+                gsub(/[",]/, "", $0)
+                gsub(/^[ \t]+/, "", $0)
+                if ($0 != "") {
+                    print $0
+                    exit
+                }
+            }
+        }
+    ' server.jsonc)
 
     if [ -z "$SNI_DOMAIN" ]; then
-        echo -e "${RED}Unable to determine Reality SNI from target in server.jsonc. Please set a valid target (host:port).${NC}"
+        TARGET_VALUE=$(sed -nE 's/.*"target": *"([^"]+)".*/\1/p' server.jsonc | head -n1)
+        SNI_DOMAIN=${TARGET_VALUE%%:*}
+    fi
+
+    if [ -z "$SNI_DOMAIN" ]; then
+        echo -e "${RED}Unable to determine Reality SNI from server.jsonc. Please set serverNames or a valid target (host:port).${NC}"
         exit 1
     fi
 
