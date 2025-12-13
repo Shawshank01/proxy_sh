@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.6"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -235,8 +235,15 @@ install_xray() {
     # Generate keys and IDs
     echo "Generating keys and IDs..."
     KEYS=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519)
-    PRIVATE_KEY=$(echo "$KEYS" | awk '/Private key:/ {print $3}')
-    PUBLIC_KEY=$(echo "$KEYS" | awk '/Public key:/ {print $3}')
+    PRIVATE_KEY=$(echo "$KEYS" | awk -F': *' 'BEGIN{IGNORECASE=1} /private[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
+    PUBLIC_KEY=$(echo "$KEYS" | awk -F': *' 'BEGIN{IGNORECASE=1} /public[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
+
+    if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+        echo -e "${RED}Failed to parse x25519 keys. Command output:${NC}"
+        echo "$KEYS"
+        echo -e "${RED}Ensure 'sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519' prints both private and public keys.${NC}"
+        exit 1
+    fi
 
     CLIENTS_JSON=""
     for i in $(seq 1 $num_uuids); do
