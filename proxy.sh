@@ -238,10 +238,24 @@ install_xray() {
     PRIVATE_KEY=$(echo "$KEYS" | awk -F': *' 'BEGIN{IGNORECASE=1} /private[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
     PUBLIC_KEY=$(echo "$KEYS" | awk -F': *' 'BEGIN{IGNORECASE=1} /public[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
 
-    if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
-        echo -e "${RED}Failed to parse x25519 keys. Command output:${NC}"
+    if [ -z "$PRIVATE_KEY" ]; then
+        echo -e "${RED}Failed to parse x25519 private key. Command output:${NC}"
         echo "$KEYS"
-        echo -e "${RED}Ensure 'sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519' prints both private and public keys.${NC}"
+        exit 1
+    fi
+
+    if [ -z "$PUBLIC_KEY" ]; then
+        DERIVED=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$PRIVATE_KEY")
+        PUBLIC_KEY=$(echo "$DERIVED" | awk -F': *' 'BEGIN{IGNORECASE=1} /public[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
+    fi
+
+    if [ -z "$PUBLIC_KEY" ]; then
+        echo -e "${RED}Failed to derive x25519 public key. Command output:${NC}"
+        if [ -n "$DERIVED" ]; then
+            echo "$DERIVED"
+        else
+            echo "$KEYS"
+        fi
         exit 1
     fi
 
