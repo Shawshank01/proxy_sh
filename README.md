@@ -46,6 +46,14 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
 - The configuration uses the Reality protocol for obfuscation.
 - All configuration files are created in a new `xray` directory relative to the script's location.
+- **Reality target & server names**:
+    - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.
+    - `serverNames` should list the domains allowed by the target certificate. You can discover them with:
+      ```bash
+      sudo docker run --rm teddysun/xray:latest xray tls ping <target-domain>
+      ```
+      Copy the “Allowed domains” output into the script’s `serverNames` array.
+    - Update both `target` and `serverNames` in `proxy.sh` before running option 2 so the generated config and VLESS links match your environment.
 
 ## Notes
 - Remember to open port **443 (TCP & UDP)** in your server's firewall.
@@ -57,7 +65,7 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
 -   [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
 -   [containrrr/watchtower](https://github.com/containrrr/watchtower) — Used for safely updating the container.
 
-Special thanks to the Xray and teddysun teams for their excellent work!
+Special thanks to the Xray Project and teddysun for their excellent work!
 
 ---
 

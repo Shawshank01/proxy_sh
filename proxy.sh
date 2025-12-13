@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.1.2"
+SCRIPT_VERSION="1.2.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -361,6 +361,15 @@ EOL
     read -p "Enter your server IP address or domain: " SERVER_ADDR
     read -p "Enter a remarks name for this server: " REMARKS
 
+    # Determine the SNI domain from server.jsonc target (host portion before :port)
+    TARGET_VALUE=$(sed -nE 's/.*"target": *"([^"]+)".*/\1/p' server.jsonc | head -n1)
+    SNI_DOMAIN=${TARGET_VALUE%%:*}
+
+    if [ -z "$SNI_DOMAIN" ]; then
+        echo -e "${RED}Unable to determine Reality SNI from target in server.jsonc. Please set a valid target (host:port).${NC}"
+        exit 1
+    fi
+
     # Parse UUIDs for vless link generation (one link per UUID)
     echo -e "\n${GREEN}VLESS Links:${NC}"
     # Get the first shortId
@@ -368,7 +377,7 @@ EOL
     # Extract UUIDs from CLIENTS_JSON and print one link per UUID (split by comma)
     LINKS=""
     for uuid in $(echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/'); do
-        link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=www.apple.com&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
+        link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
         echo "$link"
         LINKS+="$link\n"
     done
