@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.2.9"
+SCRIPT_VERSION="1.3.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -278,15 +278,13 @@ install_xray() {
     done
 
     # Create docker-compose.yml (with logging options)
-    cat > docker-compose.yml << EOL
+    cat > docker-compose.yml << 'EOL'
 services:
   xray:
     image: teddysun/xray
     container_name: xray_server
     restart: unless-stopped
-    ports:
-      - "443:443/tcp"
-      - "443:443/udp"
+    network_mode: host
     volumes:
       - ./server.jsonc:/etc/xray/config.json:ro
     logging:
@@ -318,7 +316,7 @@ EOL
     },
     "inbounds": [
         {
-            "listen": "0.0.0.0",
+            "listen": "::",
             "port": 443,
             "protocol": "vless",
             "settings": {
