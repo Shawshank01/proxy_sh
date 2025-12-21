@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -277,6 +277,65 @@ install_xray() {
         fi
     done
 
+    REALITY_TARGET_DEFAULT="zum.com:443"
+    REALITY_SERVER_NAMES_DEFAULT="\"m.zum.com\",\"www.zum.com\",\"zum.com\""
+    REALITY_TARGET="$REALITY_TARGET_DEFAULT"
+    REALITY_SERVER_NAMES="$REALITY_SERVER_NAMES_DEFAULT"
+
+    read -p "Enter a domain to probe with 'xray tls ping' (leave empty to keep defaults): " REALITY_DOMAIN
+    if [ -n "$REALITY_DOMAIN" ]; then
+        echo "Running xray tls ping for $REALITY_DOMAIN..."
+        PING_OUTPUT=$(sudo docker run --rm teddysun/xray:latest xray tls ping "$REALITY_DOMAIN" 2>&1)
+
+        PARSED_TARGET=$(echo "$PING_OUTPUT" | awk -F'Using IP:' '/Using IP:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
+        if [ -n "$PARSED_TARGET" ]; then
+            REALITY_TARGET="$PARSED_TARGET"
+        else
+            REALITY_TARGET="${REALITY_DOMAIN}:443"
+        fi
+
+        PARSED_SERVER_NAMES=""
+        ALLOWED_DOMAINS=$(echo "$PING_OUTPUT" | sed -nE "s/.*Cert's allowed domains: *\\[([^]]*)\\].*/\\1/p")
+        if [ -n "$ALLOWED_DOMAINS" ]; then
+            DROPPED_WILDCARDS=0
+            for domain in $ALLOWED_DOMAINS; do
+                if [[ "$domain" == *"*"* ]]; then
+                    DROPPED_WILDCARDS=1
+                    continue
+                fi
+                if [ -n "$PARSED_SERVER_NAMES" ]; then
+                    PARSED_SERVER_NAMES+=","
+                fi
+                PARSED_SERVER_NAMES+="\"$domain\""
+            done
+            if [ "$DROPPED_WILDCARDS" -eq 1 ]; then
+                echo -e "${YELLOW}Wildcard domains were omitted from serverNames (not supported).${NC}"
+            fi
+        fi
+
+        if [ -n "$PARSED_SERVER_NAMES" ]; then
+            REALITY_SERVER_NAMES="$PARSED_SERVER_NAMES"
+        else
+            read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $REALITY_DOMAIN]: " SERVER_NAMES_INPUT
+            if [ -n "$SERVER_NAMES_INPUT" ]; then
+                REALITY_SERVER_NAMES=$(echo "$SERVER_NAMES_INPUT" | awk -F',' '{
+                    for (i=1; i<=NF; i++) {
+                        gsub(/^[ \t]+|[ \t]+$/, "", $i)
+                        if ($i == "" || $i ~ /\*/) { continue }
+                        if (out != "") { out=out"," }
+                        out=out"\"" $i "\""
+                    }
+                    print out
+                }')
+                if [ -z "$REALITY_SERVER_NAMES" ]; then
+                    REALITY_SERVER_NAMES="\"$REALITY_DOMAIN\""
+                fi
+            else
+                REALITY_SERVER_NAMES="\"$REALITY_DOMAIN\""
+            fi
+        fi
+    fi
+
     # Ask whether to enable IPv6 (dual-stack) listen
     read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6
     if [[ "$enable_ipv6" == "y" || "$enable_ipv6" == "Y" ]]; then
@@ -340,11 +399,9 @@ EOL
                 },
                 "security": "reality",
                 "realitySettings": {
-                    "target": "zum.com:443",
+                    "target": "$REALITY_TARGET",
                     "serverNames": [
-                        "m.zum.com",
-                        "www.zum.com",
-                        "zum.com"
+                        $REALITY_SERVER_NAMES
                     ],
                     "privateKey": "$PRIVATE_KEY",
                     "shortIds": [
