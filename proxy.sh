@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=9
 GREEN='\033[0;32m'
@@ -277,6 +277,14 @@ install_xray() {
         fi
     done
 
+    # Ask whether to enable IPv6 (dual-stack) listen
+    read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6
+    if [[ "$enable_ipv6" == "y" || "$enable_ipv6" == "Y" ]]; then
+        LISTEN_ADDR="::"
+    else
+        LISTEN_ADDR="0.0.0.0"
+    fi
+
     # Create docker-compose.yml (with logging options)
     cat > docker-compose.yml << 'EOL'
 services:
@@ -316,7 +324,7 @@ EOL
     },
     "inbounds": [
         {
-            "listen": "::",
+            "listen": "$LISTEN_ADDR",
             "port": 443,
             "protocol": "vless",
             "settings": {
