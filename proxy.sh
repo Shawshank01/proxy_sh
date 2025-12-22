@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.2.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -536,7 +536,7 @@ install_shadowsocks() {
         user_label=${user_label:-$default_label}
         user_label=${user_label//\"/}
 
-        CLIENTS_JSON+="{\"password\": \"$user_psk\", \"email\": \"$user_label\"}"
+        CLIENTS_JSON+="{\"name\": \"$user_label\", \"password\": \"$user_psk\"}"
         if [ "$i" -lt "$num_users" ]; then
             CLIENTS_JSON+=","
         fi
@@ -568,24 +568,13 @@ EOL
     # Create server.json
     cat > server.json << EOL
 {
-  "inbounds": [
-    {
-      "port": $ss_port,
-      "protocol": "shadowsocks",
-      "settings": {
-        "method": "$SS_METHOD",
-        "password": "$SERVER_PSK",
-        "clients": [
-          $CLIENTS_JSON
-        ],
-        "network": "tcp,udp"
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom"
-    }
+  "server": "0.0.0.0",
+  "server_port": $ss_port,
+  "password": "$SERVER_PSK",
+  "method": "$SS_METHOD",
+  "mode": "tcp_and_udp",
+  "users": [
+    $CLIENTS_JSON
   ]
 }
 EOL
@@ -757,6 +746,21 @@ delete_xray() {
     echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
 }
 
+delete_shadowsocks() {
+    echo -e "${YELLOW}Deleting Shadowsocks container and config...${NC}"
+
+    if [ ! -d "shadowsocks" ]; then
+        echo -e "${RED}Directory 'shadowsocks' not found. Nothing to delete.${NC}"
+        return
+    fi
+
+    cd shadowsocks || exit
+    sudo $DOCKER_COMPOSE_CMD down
+    cd ..
+    rm -rf shadowsocks
+    echo -e "${GREEN}Shadowsocks container and config deleted successfully!${NC}"
+}
+
 update_script() {
     echo -e "${YELLOW}Checking for updates...${NC}"
     LATEST_VERSION=$(curl -s https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
@@ -802,7 +806,7 @@ echo "2) Install Xray (VLESS-XHTTP-Reality)"
 echo "3) Install Shadowsocks (ssserver-rust)"
 echo "4) Update existing container (Xray / Shadowsocks)"
 echo "5) Show VLESS links for current config"
-echo "6) Delete Xray container and config"
+echo "6) Delete container and config (Xray or Shadowsocks)"
 read -p "Enter your choice [0-6]: " choice
 
 case $choice in
@@ -856,7 +860,21 @@ case $choice in
         if ! check_xray_requirements; then
             exit 1
         fi
-        delete_xray
+        echo "Which container do you want to delete?"
+        echo "1) Xray"
+        echo "2) Shadowsocks"
+        read -p "Enter your choice [1-2]: " delete_choice
+        case $delete_choice in
+            1)
+                delete_xray
+                ;;
+            2)
+                delete_shadowsocks
+                ;;
+            *)
+                echo -e "${RED}Invalid choice. Exiting.${NC}"
+                ;;
+        esac
         ;;
     *)
         echo -e "${RED}Invalid choice. Exiting.${NC}"

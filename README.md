@@ -44,7 +44,7 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
     -   Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
 -   **4) Update existing container (Xray or Shadowsocks)**: Pulls the latest Docker image and restarts the selected container using Watchtower.
 -   **5) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
--   **6) Delete Xray container and config**: Stops the Docker container, and deletes the `xray/` directory, including all configurations and link files.
+-   **6) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
 
 ## Configuration Details
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
