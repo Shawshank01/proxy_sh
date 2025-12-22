@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.5.1"
+SCRIPT_VERSION="2.6.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -760,6 +760,20 @@ show_links() {
     cat "$LINKS_FILE"
 }
 
+show_ss_links() {
+    LINKS_FILE="shadowsocks/ss_links.txt"
+    if [ -f "shadowsocks/ss_links.txt" ]; then
+        LINKS_FILE="shadowsocks/ss_links.txt"
+    elif [ -f "ss_links.txt" ]; then
+        LINKS_FILE="ss_links.txt"
+    else
+        echo -e "${RED}No saved SS links found. Please install Shadowsocks first to generate and save links.${NC}"
+        return
+    fi
+    echo -e "\n${GREEN}Saved SS Links:${NC}"
+    cat "$LINKS_FILE"
+}
+
 delete_xray() {
     echo -e "${YELLOW}Deleting Xray container and config...${NC}"
     
@@ -836,8 +850,9 @@ echo "2) Install Xray (VLESS-XHTTP-Reality)"
 echo "3) Install Shadowsocks (ssserver-rust)"
 echo "4) Update existing container (Xray / Shadowsocks)"
 echo "5) Show VLESS links for current config"
-echo "6) Delete container and config (Xray / Shadowsocks)"
-read -p "Enter your choice [0-6]: " choice
+echo "6) Show SS links for current config"
+echo "7) Delete container and config (Xray / Shadowsocks)"
+read -p "Enter your choice [0-7]: " choice
 
 case $choice in
     0)
@@ -887,6 +902,9 @@ case $choice in
         show_links
         ;;
     6)
+        show_ss_links
+        ;;
+    7)
         if ! check_xray_requirements; then
             exit 1
         fi
