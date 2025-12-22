@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.3.1"
+SCRIPT_VERSION="2.5.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -283,27 +283,51 @@ install_xray() {
     REALITY_TARGET="$REALITY_TARGET_DEFAULT"
     REALITY_SERVER_NAMES="$REALITY_SERVER_NAMES_DEFAULT"
 
-    read -p "Enter a domain to probe with 'xray tls ping' (leave empty to keep defaults): " REALITY_DOMAIN
-    if [ -n "$REALITY_DOMAIN" ]; then
-        echo "Running xray tls ping for $REALITY_DOMAIN..."
-        PING_OUTPUT=$(sudo docker run --rm teddysun/xray:latest xray tls ping "$REALITY_DOMAIN" 2>&1)
+    while true; do
+        read -p "Enter a domain to probe with 'xray tls ping' (leave empty to keep defaults): " REALITY_DOMAIN
+        if [ -z "$REALITY_DOMAIN" ]; then
+            break
+        fi
 
-        PARSED_TARGET=$(echo "$PING_OUTPUT" | awk -F'Using IP:' '/Using IP:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
-        if [ -n "$PARSED_TARGET" ]; then
-            REALITY_TARGET="$PARSED_TARGET"
+        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN#http://}
+        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN_CLEAN#https://}
+        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN_CLEAN%%/*}
+        if [ -z "$REALITY_DOMAIN_CLEAN" ]; then
+            REALITY_DOMAIN_CLEAN="$REALITY_DOMAIN"
+        fi
+
+        PING_HOST=${REALITY_DOMAIN_CLEAN%%:*}
+        echo "Running xray tls ping for $PING_HOST..."
+        PING_OUTPUT=$(sudo docker run --rm teddysun/xray:latest xray tls ping "$PING_HOST" 2>&1)
+        echo "----- tls ping output -----"
+        echo "$PING_OUTPUT"
+        echo "---------------------------"
+
+        read -p "Use this domain and output? [Y/n]: " use_domain
+        if [[ "$use_domain" == "n" || "$use_domain" == "N" ]]; then
+            continue
+        fi
+
+        if [[ "$REALITY_DOMAIN_CLEAN" == *":"* ]]; then
+            REALITY_TARGET="$REALITY_DOMAIN_CLEAN"
         else
-            REALITY_TARGET="${REALITY_DOMAIN}:443"
+            REALITY_TARGET="${REALITY_DOMAIN_CLEAN}:443"
         fi
 
         PARSED_SERVER_NAMES=""
         ALLOWED_DOMAINS=$(echo "$PING_OUTPUT" | sed -nE "s/.*Cert's allowed domains: *\\[([^]]*)\\].*/\\1/p")
         if [ -n "$ALLOWED_DOMAINS" ]; then
             DROPPED_WILDCARDS=0
+            SEEN_DOMAINS=""
             for domain in $ALLOWED_DOMAINS; do
                 if [[ "$domain" == *"*"* ]]; then
                     DROPPED_WILDCARDS=1
                     continue
                 fi
+                if [[ " $SEEN_DOMAINS " == *" $domain "* ]]; then
+                    continue
+                fi
+                SEEN_DOMAINS+=" $domain"
                 if [ -n "$PARSED_SERVER_NAMES" ]; then
                     PARSED_SERVER_NAMES+=","
                 fi
@@ -317,7 +341,7 @@ install_xray() {
         if [ -n "$PARSED_SERVER_NAMES" ]; then
             REALITY_SERVER_NAMES="$PARSED_SERVER_NAMES"
         else
-            read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $REALITY_DOMAIN]: " SERVER_NAMES_INPUT
+            read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $PING_HOST]: " SERVER_NAMES_INPUT
             if [ -n "$SERVER_NAMES_INPUT" ]; then
                 REALITY_SERVER_NAMES=$(echo "$SERVER_NAMES_INPUT" | awk -F',' '{
                     for (i=1; i<=NF; i++) {
@@ -329,13 +353,14 @@ install_xray() {
                     print out
                 }')
                 if [ -z "$REALITY_SERVER_NAMES" ]; then
-                    REALITY_SERVER_NAMES="\"$REALITY_DOMAIN\""
+                    REALITY_SERVER_NAMES="\"$PING_HOST\""
                 fi
             else
-                REALITY_SERVER_NAMES="\"$REALITY_DOMAIN\""
+                REALITY_SERVER_NAMES="\"$PING_HOST\""
             fi
         fi
-    fi
+        break
+    done
 
     # Ask whether to enable IPv6 (dual-stack) listen
     read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6
@@ -450,15 +475,12 @@ EOL
     SNI_DOMAIN=$(awk '
         /"serverNames": *\[/ {flag=1; next}
         flag {
+            if (match($0, /"([^"]+)"/, m)) {
+                print m[1]
+                exit
+            }
             if ($0 ~ /\]/) {
-                flag=0
-            } else if ($0 ~ /"/) {
-                gsub(/[",]/, "", $0)
-                gsub(/^[ \t]+/, "", $0)
-                if ($0 != "") {
-                    print $0
-                    exit
-                }
+                exit
             }
         }
     ' server.jsonc)
