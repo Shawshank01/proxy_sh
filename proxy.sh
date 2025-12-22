@@ -523,6 +523,13 @@ install_shadowsocks() {
     read -p "Which port should Shadowsocks listen on? [Default: $DEFAULT_SS_PORT]: " ss_port
     ss_port=${ss_port:-$DEFAULT_SS_PORT}
 
+    read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ss_ipv6
+    if [[ "$enable_ss_ipv6" == "y" || "$enable_ss_ipv6" == "Y" ]]; then
+        SS_LISTEN_ADDR="::"
+    else
+        SS_LISTEN_ADDR="0.0.0.0"
+    fi
+
     SS_METHOD="2022-blake3-chacha20-poly1305"
     SERVER_PSK=$(openssl rand -base64 32)
 
@@ -568,7 +575,7 @@ EOL
     # Create server.json
     cat > server.json << EOL
 {
-  "server": "0.0.0.0",
+  "server": "$SS_LISTEN_ADDR",
   "server_port": $ss_port,
   "password": "$SERVER_PSK",
   "method": "$SS_METHOD",
@@ -806,7 +813,7 @@ echo "2) Install Xray (VLESS-XHTTP-Reality)"
 echo "3) Install Shadowsocks (ssserver-rust)"
 echo "4) Update existing container (Xray / Shadowsocks)"
 echo "5) Show VLESS links for current config"
-echo "6) Delete container and config (Xray or Shadowsocks)"
+echo "6) Delete container and config (Xray / Shadowsocks)"
 read -p "Enter your choice [0-6]: " choice
 
 case $choice in
