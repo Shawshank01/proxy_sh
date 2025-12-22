@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.6.0"
+SCRIPT_VERSION="2.6.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -842,7 +842,7 @@ fi
 # CHECK DEPENDENCIES NOW (Running as non-root, will use sudo inside)
 check_dependencies
 
-echo -e "${YELLOW}--- VLESS Proxy Installer v${SCRIPT_VERSION} ---${NC}"
+echo -e "${YELLOW}--- Proxy Installer v${SCRIPT_VERSION} ---${NC}"
 echo "Please choose an option:"
 echo "0) Update this script"
 echo "1) Environment Check (Check distro and install Docker)"
