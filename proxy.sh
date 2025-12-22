@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.3.0"
+SCRIPT_VERSION="2.3.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -559,6 +559,7 @@ services:
     container_name: ssserver
     restart: unless-stopped
     entrypoint: ["ssserver"]
+    network_mode: host
     ports:
       - "${ss_port}:${ss_port}/tcp"
       - "${ss_port}:${ss_port}/udp"
