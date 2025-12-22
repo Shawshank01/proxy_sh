@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -665,6 +665,31 @@ update_xray() {
     fi
 }
 
+# Function to update Shadowsocks
+update_shadowsocks() {
+    local CONTAINER_NAME="ssserver"
+
+    if ! sudo docker ps -a -q -f name="^/${CONTAINER_NAME}$" | grep -q .; then
+        echo -e "${RED}Container '${CONTAINER_NAME}' not found. Cannot update.${NC}"
+        return 1
+    fi
+
+    echo "Updating ${CONTAINER_NAME}..."
+
+    if sudo docker run --rm \
+      -e DOCKER_API_VERSION=1.44 \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      containrrr/watchtower \
+      --run-once \
+      -c \
+      "$CONTAINER_NAME"; then
+        echo -e "${GREEN}Update process finished successfully.${NC}"
+    else
+        echo -e "${RED}Watchtower failed to run.${NC}"
+        return 1
+    fi
+}
+
 # Function to check environment (distro and Docker)
 check_environment() {
     echo -e "${YELLOW}Checking environment...${NC}"
@@ -775,7 +800,7 @@ echo "0) Update this script"
 echo "1) Environment Check (Check distro and install Docker)"
 echo "2) Install Xray (VLESS-XHTTP-Reality)"
 echo "3) Install Shadowsocks (ssserver-rust)"
-echo "4) Update existing Xray container"
+echo "4) Update existing container (Xray / Shadowsocks)"
 echo "5) Show VLESS links for current config"
 echo "6) Delete Xray container and config"
 read -p "Enter your choice [0-6]: " choice
@@ -803,7 +828,26 @@ case $choice in
         if ! check_xray_requirements; then
             exit 1
         fi
-        update_xray
+        echo "Which container do you want to update?"
+        echo "1) Xray"
+        echo "2) Shadowsocks"
+        echo "3) Both"
+        read -p "Enter your choice [1-3]: " update_choice
+        case $update_choice in
+            1)
+                update_xray
+                ;;
+            2)
+                update_shadowsocks
+                ;;
+            3)
+                update_xray
+                update_shadowsocks
+                ;;
+            *)
+                echo -e "${RED}Invalid choice. Exiting.${NC}"
+                ;;
+        esac
         ;;
     5)
         show_links

@@ -42,7 +42,7 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
     -   Ask for the number of users and the listening port.
     -   Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
     -   Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
--   **4) Update existing Xray container**: Pulls the latest `teddysun/xray` Docker image and restarts the container using Watchtower.
+-   **4) Update existing container (Xray or Shadowsocks)**: Pulls the latest Docker image and restarts the selected container using Watchtower.
 -   **5) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
 -   **6) Delete Xray container and config**: Stops the Docker container, and deletes the `xray/` directory, including all configurations and link files.
 
