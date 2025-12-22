@@ -6,6 +6,7 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
 - **Automated Environment Check**: Installs Docker and Docker Compose if they are not present.
 - **Wide Distro Support**: Works with Debian, Ubuntu, Fedora, CentOS, RHEL, and Linux Mint.
 - **Interactive Installation**: Guides you through setting up an Xray VLESS-XHTTP-Reality proxy.
+- **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
 - **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
 - **Container Management**: Easy-to-use menu for updating, viewing links, or deleting the Xray container and its configuration.
@@ -35,9 +36,12 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
     -   Generate a single UUID and ask for the number of `shortIds`.
     -   Generate `docker-compose.yml` and `server.jsonc` in a new `xray/` directory.
     -   Ask for your server's IP/domain and a remarks name to generate VLESS links.
-    -   Save the links to `xray/vless_links.txt`.
+    -   Save the `vless://`links to `xray/vless_links.txt`.
     -   Start the Xray container.
--   **3) ss_2022**: (Coming soon)
+-   **3) Install Shadowsocks (ssserver-rust)**: Sets up a multi-user Shadowsocks 2022 server. It will:
+    -   Ask for the number of users and the listening port.
+    -   Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
+    -   Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
 -   **4) Update existing Xray container**: Pulls the latest `teddysun/xray` Docker image and restarts the container using Watchtower.
 -   **5) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
 -   **6) Delete Xray container and config**: Stops the Docker container, and deletes the `xray/` directory, including all configurations and link files.
@@ -62,10 +66,12 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
 ## Credits
 
 -   [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
+-   [Xray-examples](https://github.com/XTLS/Xray-examples) — Reference configurations and examples.
 -   [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
+-   [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Rust implementation for Shadowsocks 2022.
 -   [containrrr/watchtower](https://github.com/containrrr/watchtower) — Used for safely updating the container.
 
-Special thanks to the Xray Project and teddysun for their excellent work!
+Special thanks to them for their excellent work!
 
 ---
 

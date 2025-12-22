@@ -4,9 +4,11 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="2.0.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
+DEFAULT_SS_USERS=1
+DEFAULT_SS_PORT=80
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -502,6 +504,139 @@ EOL
     cd ..
 }
 
+# Function to install Shadowsocks (ssserver-rust)
+install_shadowsocks() {
+    echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
+
+    # Create directory
+    mkdir -p shadowsocks
+    cd shadowsocks || exit
+
+    # Pull Docker image
+    echo "Pulling ghcr.io/shadowsocks/ssserver-rust image..."
+    sudo docker pull ghcr.io/shadowsocks/ssserver-rust:latest
+
+    # Get user input for counts and port
+    read -p "How many users do you need? [Default: $DEFAULT_SS_USERS]: " num_users
+    num_users=${num_users:-$DEFAULT_SS_USERS}
+
+    read -p "Which port should Shadowsocks listen on? [Default: $DEFAULT_SS_PORT]: " ss_port
+    ss_port=${ss_port:-$DEFAULT_SS_PORT}
+
+    SS_METHOD="2022-blake3-chacha20-poly1305"
+    SERVER_PSK=$(openssl rand -base64 32)
+
+    CLIENTS_JSON=""
+    USER_PSKS=()
+    USER_LABELS=()
+    for i in $(seq 1 $num_users); do
+        user_psk=$(openssl rand -base64 32)
+        default_label="user${i}"
+        read -p "Enter a label for user ${i} [${default_label}]: " user_label
+        user_label=${user_label:-$default_label}
+        user_label=${user_label//\"/}
+
+        CLIENTS_JSON+="{\"password\": \"$user_psk\", \"email\": \"$user_label\"}"
+        if [ "$i" -lt "$num_users" ]; then
+            CLIENTS_JSON+=","
+        fi
+        USER_PSKS+=("$user_psk")
+        USER_LABELS+=("$user_label")
+    done
+
+    # Create docker-compose.yml (with logging options)
+    cat > docker-compose.yml << EOL
+services:
+  ssserver:
+    image: ghcr.io/shadowsocks/ssserver-rust:latest
+    container_name: ssserver
+    restart: unless-stopped
+    entrypoint: ["ssserver"]
+    ports:
+      - "${ss_port}:${ss_port}/tcp"
+      - "${ss_port}:${ss_port}/udp"
+    volumes:
+      - ./server.json:/etc/shadowsocks-rust/config.json:ro
+    command: ["-c", "/etc/shadowsocks-rust/config.json"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOL
+
+    # Create server.json
+    cat > server.json << EOL
+{
+  "inbounds": [
+    {
+      "port": $ss_port,
+      "protocol": "shadowsocks",
+      "settings": {
+        "method": "$SS_METHOD",
+        "password": "$SERVER_PSK",
+        "clients": [
+          $CLIENTS_JSON
+        ],
+        "network": "tcp,udp"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+EOL
+
+    echo -e "${GREEN}Configuration files created successfully!${NC}"
+    echo "--- docker-compose.yml ---"
+    cat docker-compose.yml
+    echo "--------------------------"
+    echo "--- server.json ---"
+    cat server.json
+    echo "-------------------"
+
+    # Prompt for server IP/domain and remarks
+    read -p "Enter your server IP address or domain: " SERVER_ADDR
+    read -p "Enter a remarks name for this server: " REMARKS
+    REMARKS=${REMARKS:-shadowsocks_rust}
+
+    read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
+    if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
+        if sudo $DOCKER_COMPOSE_CMD up -d; then
+            echo -e "${GREEN}Shadowsocks container has been started!${NC}"
+            echo "Remember to open port ${ss_port} (TCP & UDP) in your server's firewall."
+
+            echo -e "\n${GREEN}SS Links:${NC}"
+            LINKS=""
+            REMARKS_URL=${REMARKS// /%20}
+            for i in "${!USER_PSKS[@]}"; do
+                user_psk=${USER_PSKS[$i]}
+                user_label=${USER_LABELS[$i]}
+                user_label_url=${user_label// /%20}
+                PASSWORD="${SERVER_PSK}:${user_psk}"
+                BASE64=$(printf "%s" "${SS_METHOD}:${PASSWORD}" | base64 | tr -d '\n')
+                link="ss://${BASE64}@${SERVER_ADDR}:${ss_port}#${REMARKS_URL}-${user_label_url}"
+                echo "$link"
+                LINKS+="$link\n"
+            done
+
+            echo -e "\nSaving links to ss_links.txt..."
+            echo -e "$LINKS" > ss_links.txt
+            echo "Links saved successfully!"
+        else
+            echo -e "${RED}Failed to start Shadowsocks container.${NC}"
+        fi
+    else
+        echo -e "${RED}Container start cancelled.${NC}"
+    fi
+
+    # RETURN TO MAIN DIRECTORY
+    cd ..
+}
+
 # Function to update Xray
 update_xray() {
     local CONTAINER_NAME="xray_server"
@@ -639,7 +774,7 @@ echo "Please choose an option:"
 echo "0) Update this script"
 echo "1) Environment Check (Check distro and install Docker)"
 echo "2) Install Xray (VLESS-XHTTP-Reality)"
-echo "3) ss_2022 (coming soon)"
+echo "3) Install Shadowsocks (ssserver-rust)"
 echo "4) Update existing Xray container"
 echo "5) Show VLESS links for current config"
 echo "6) Delete Xray container and config"
@@ -659,7 +794,10 @@ case $choice in
         install_xray
         ;;
     3)
-        echo "This option is not yet available."
+        if ! check_xray_requirements; then
+            exit 1
+        fi
+        install_shadowsocks
         ;;
     4)
         if ! check_xray_requirements; then
