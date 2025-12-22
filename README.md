@@ -7,6 +7,7 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
 - **Wide Distro Support**: Works with Debian, Ubuntu, Fedora, CentOS, RHEL, and Linux Mint.
 - **Interactive Installation**: Guides you through setting up an Xray VLESS-XHTTP-Reality proxy.
 - **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
+- **IPv6 Support**: Optional dual-stack listening for both Xray and Shadowsocks.
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
 - **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
 - **Container Management**: Easy-to-use menu for updating, viewing links, or deleting the Xray container and its configuration.
