@@ -32,7 +32,7 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
 -   **0) Update this script**: Checks for a new version on GitHub and updates itself.
 -   **1) Environment Check**: Verifies the Linux distribution and installs Docker and Docker Compose if needed. Run this first if you are on a new server.
 -   **2) Install Xray (VLESS-XHTTP-Reality)**: The main installation process. It will:
-    -   Ask for the number of users (UUIDs) and `shortIds`.
+    -   Generate a single UUID and ask for the number of `shortIds`.
     -   Generate `docker-compose.yml` and `server.jsonc` in a new `xray/` directory.
     -   Ask for your server's IP/domain and a remarks name to generate VLESS links.
     -   Save the links to `xray/vless_links.txt`.
@@ -48,12 +48,12 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
     - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.
-    - `serverNames` should list the domains allowed by the target certificate. You can discover them with:
+    - The installer probes your chosen domain with:
       ```bash
       sudo docker run --rm teddysun/xray:latest xray tls ping <target-domain>
       ```
-      Copy the “Allowed domains” output into the script’s `serverNames` array.
-    - Update both `target` and `serverNames` in `proxy.sh` before running option 2 so the generated config and VLESS links match your environment.
+      and uses the result to fill `target` and `serverNames` automatically.
+    - Wildcards from the certificate are ignored (not supported by Xray). If only wildcards are present, the script will ask you for concrete hostnames.
 
 ## Notes
 - Remember to open port **443 (TCP & UDP)** in your server's firewall.

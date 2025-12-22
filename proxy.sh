@@ -4,9 +4,9 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 DEFAULT_UUIDS=1
-DEFAULT_SHORTIDS=9
+DEFAULT_SHORTIDS=3
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -225,9 +225,8 @@ install_xray() {
     echo "Pulling teddysun/xray image..."
     sudo docker pull teddysun/xray
 
-    # Get user input for counts
-    read -p "How many user UUIDs do you need? [Default: $DEFAULT_UUIDS]: " num_uuids
-    num_uuids=${num_uuids:-$DEFAULT_UUIDS}
+    # Generate a single user UUID
+    num_uuids=$DEFAULT_UUIDS
 
     read -p "How many shortIds do you need? [Default: $DEFAULT_SHORTIDS]: " num_shortids
     num_shortids=${num_shortids:-$DEFAULT_SHORTIDS}
@@ -472,16 +471,17 @@ EOL
         exit 1
     fi
 
-    # Parse UUIDs for vless link generation (one link per UUID)
+    # Parse UUIDs/shortIds for vless link generation (one link per shortId)
     echo -e "\n${GREEN}VLESS Links:${NC}"
-    # Get the first shortId
-    SHORTID=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | head -n1 | tr -d '"')
-    # Extract UUIDs from CLIENTS_JSON and print one link per UUID (split by comma)
+    SHORTIDS=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | tr -d '"')
+    UUIDS=$(echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/')
     LINKS=""
-    for uuid in $(echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/'); do
-        link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$SHORTID&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
-        echo "$link"
-        LINKS+="$link\n"
+    for uuid in $UUIDS; do
+        for shortid in $SHORTIDS; do
+            link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$shortid&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
+            echo "$link"
+            LINKS+="$link\n"
+        done
     done
 
     # Save links to file
