@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.6.1"
+SCRIPT_VERSION="2.7.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -186,15 +186,23 @@ install_docker_compose() {
                 sudo chmod a+r /etc/apt/keyrings/docker.gpg
                 
                 # Add the repository to Apt sources
-                # For Linux Mint, get the Ubuntu codename it's based on
                 if [ "$DISTRO" = "linuxmint" ]; then
                     UBUNTU_CODENAME=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
                     echo -e "${YELLOW}Linux Mint detected, using Ubuntu codename: $UBUNTU_CODENAME${NC}"
+                    REPO_URL="https://download.docker.com/linux/ubuntu"
+                    REPO_CODENAME="$UBUNTU_CODENAME"
+                elif [ "$DISTRO" = "debian" ]; then
+                    VER_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+                    REPO_URL="https://download.docker.com/linux/debian"
+                    REPO_CODENAME="$VER_CODENAME"
                 else
-                    UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+                    # Assume Ubuntu or compatible
+                    VER_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+                    REPO_URL="https://download.docker.com/linux/ubuntu"
+                    REPO_CODENAME="$VER_CODENAME"
                 fi
                 
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $UBUNTU_CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $REPO_URL $REPO_CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
                 
                 sudo apt-get update
                 if sudo apt-get install -y docker-compose-plugin; then
