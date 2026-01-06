@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.7.1"
+SCRIPT_VERSION="2.7.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -248,8 +248,8 @@ install_xray() {
     # Generate keys and IDs
     echo "Generating keys and IDs..."
     KEYS=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519)
-    PRIVATE_KEY=$(echo "$KEYS" | awk -F': *' 'BEGIN{IGNORECASE=1} /private[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
-    PUBLIC_KEY=$(echo "$KEYS" | awk -F': *' 'BEGIN{IGNORECASE=1} /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
+    PRIVATE_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /private[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
+    PUBLIC_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
 
     if [ -z "$PRIVATE_KEY" ]; then
         echo -e "${RED}Failed to parse x25519 private key. Command output:${NC}"
@@ -259,7 +259,7 @@ install_xray() {
 
     if [ -z "$PUBLIC_KEY" ]; then
         DERIVED=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$PRIVATE_KEY")
-        PUBLIC_KEY=$(echo "$DERIVED" | awk -F': *' 'BEGIN{IGNORECASE=1} /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
+        PUBLIC_KEY=$(echo "$DERIVED" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
     fi
 
     if [ -z "$PUBLIC_KEY" ]; then
