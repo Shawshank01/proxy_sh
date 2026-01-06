@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.7.0"
+SCRIPT_VERSION="2.7.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -203,6 +203,10 @@ install_docker_compose() {
                 fi
                 
                 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $REPO_URL $REPO_CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                
+                # Remove conflicting packages that might be installed from distro repos
+                echo -e "${YELLOW}Removing conflicting packages to avoid installation errors...${NC}"
+                sudo apt-get remove -y docker-buildx docker-compose docker-doc podman-docker || true
                 
                 sudo apt-get update
                 if sudo apt-get install -y docker-compose-plugin; then
