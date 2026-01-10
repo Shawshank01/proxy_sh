@@ -1,10 +1,11 @@
 #!/bin/bash
+set -euo pipefail
 #
 # proxy.sh: An automated script to install and manage an Xray proxy server.
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.8.0"
+SCRIPT_VERSION="2.9.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -233,7 +234,7 @@ install_xray() {
 
     # Create directory
     mkdir -p xray
-    cd xray || exit
+    cd xray || return 1
 
     # Pull Docker image
     echo "Pulling teddysun/xray image..."
@@ -289,6 +290,9 @@ install_xray() {
             SHORTIDS_JSON+="," 
         fi
     done
+
+    # Generate random XHTTP path for security
+    XHTTP_PATH=$(openssl rand -hex 4)
 
     REALITY_TARGET_DEFAULT="zum.com:443"
     REALITY_SERVER_NAMES_DEFAULT="\"m.zum.com\",\"www.zum.com\",\"zum.com\""
@@ -442,7 +446,7 @@ EOL
             "streamSettings": {
                 "network": "xhttp",
                 "xhttpSettings": {
-                    "path": "/xrayxskvhqoiwe"
+                    "path": "/$XHTTP_PATH"
                 },
                 "security": "reality",
                 "realitySettings": {
@@ -523,7 +527,7 @@ EOL
     LINKS=""
     for uuid in $UUIDS; do
         for shortid in $SHORTIDS; do
-            link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$shortid&type=xhttp&path=%2Fxrayxskvhqoiwe#$REMARKS"
+            link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$shortid&type=xhttp&path=%2F$XHTTP_PATH#$REMARKS"
             echo "$link"
             LINKS+="$link\n"
         done
@@ -536,7 +540,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        sudo $DOCKER_COMPOSE_CMD up -d
+        sudo "$DOCKER_COMPOSE_CMD" up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
     else
@@ -553,7 +557,7 @@ install_shadowsocks() {
 
     # Create directory
     mkdir -p shadowsocks
-    cd shadowsocks || exit
+    cd shadowsocks || return 1
 
     # Pull Docker image
     echo "Pulling ghcr.io/shadowsocks/ssserver-rust image..."
@@ -603,9 +607,6 @@ services:
     restart: unless-stopped
     entrypoint: ["ssserver"]
     network_mode: host
-    ports:
-      - "${ss_port}:${ss_port}/tcp"
-      - "${ss_port}:${ss_port}/udp"
     volumes:
       - ./server.json:/etc/shadowsocks-rust/config.json:ro
     command: ["-c", "/etc/shadowsocks-rust/config.json"]
@@ -645,7 +646,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        if sudo $DOCKER_COMPOSE_CMD up -d; then
+        if sudo "$DOCKER_COMPOSE_CMD" up -d; then
             echo -e "${GREEN}Shadowsocks container has been started!${NC}"
             echo "Remember to open port ${ss_port} (TCP & UDP) in your server's firewall."
 
@@ -804,8 +805,8 @@ delete_xray() {
         return
     fi
 
-    cd xray || exit
-    sudo $DOCKER_COMPOSE_CMD down
+    cd xray || return 1
+    sudo "$DOCKER_COMPOSE_CMD" down
     cd ..
     rm -rf xray
     echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
@@ -819,8 +820,8 @@ delete_shadowsocks() {
         return
     fi
 
-    cd shadowsocks || exit
-    sudo $DOCKER_COMPOSE_CMD down
+    cd shadowsocks || return 1
+    sudo "$DOCKER_COMPOSE_CMD" down
     cd ..
     rm -rf shadowsocks
     echo -e "${GREEN}Shadowsocks container and config deleted successfully!${NC}"

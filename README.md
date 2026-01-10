@@ -1,6 +1,6 @@
 # proxy_sh
 
-An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy server using Docker.
+An automated script to install and manage an Xray VLESS-XHTTP-Reality and a Shadowsocks 2022 proxy server using Docker.
 
 ## Features
 - **Automated Environment Check**: Installs Docker and Docker Compose if they are not present.
@@ -62,7 +62,7 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality proxy serv
     - Wildcards from the certificate are ignored (not supported by Xray). If only wildcards are present, the script will ask you for concrete hostnames.
 
 ## Notes
-- Remember to open port **443 (TCP & UDP)** in your server's firewall.
+- Remember to open port **80 & 443 (TCP & UDP)** in your server's firewall.
 - The script should not be run as the `root` user.
 
 ## Credits
