@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.9.2"
+SCRIPT_VERSION="2.9.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -829,7 +829,8 @@ delete_shadowsocks() {
 
 update_script() {
     echo -e "${YELLOW}Checking for updates...${NC}"
-    LATEST_VERSION=$(curl -s https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
+    CACHE_BUST="?$(date +%s)"
+    LATEST_VERSION=$(curl -s "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${CACHE_BUST}" | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
     if [ -z "$LATEST_VERSION" ]; then
         echo -e "${RED}Could not check for updates. Please check your internet connection or the repository URL.${NC}"
         return
@@ -848,7 +849,7 @@ update_script() {
     fi
 
     echo -e "${YELLOW}Updating script...${NC}"
-    curl -s https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh > proxy.sh
+    curl -s "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${CACHE_BUST}" > proxy.sh
     echo -e "${GREEN}Script updated successfully! Restarting...${NC}"
     exec bash "$0" "$@"
 }
