@@ -4,7 +4,7 @@
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.7.2"
+SCRIPT_VERSION="2.8.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -403,17 +403,26 @@ EOL
     cat > server.jsonc << EOL
 {
     "routing": {
-        "domainStrategy": "IPIfNonMatch",
+        "domainStrategy": "AsIs",
         "rules": [
             {
-                "ip": [
-                    "geoip:cn"
+                "type": "field",
+                "domain": [
+                    "geosite:google"
+                ],
+                "outboundTag": "direct"
+            },
+            {
+                "type": "field",
+                "domain": [
+                    "geosite:cn"
                 ],
                 "outboundTag": "block"
             },
             {
-                "domain": [
-                    "geosite:cn"
+                "type": "field",
+                "ip": [
+                    "geoip:cn"
                 ],
                 "outboundTag": "block"
             }
