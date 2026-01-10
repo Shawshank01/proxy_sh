@@ -53,7 +53,8 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality and a Shad
 - The configuration uses the Reality protocol for obfuscation.
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
-    - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.
+    - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.  
+    Example: `zum.com, www.ssg.com, www.jype.com`  
     - The installer probes your chosen domain with:
       ```bash
       sudo docker run --rm teddysun/xray:latest xray tls ping <target-domain>
