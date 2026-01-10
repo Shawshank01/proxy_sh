@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.9.0"
+SCRIPT_VERSION="2.9.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -841,16 +841,16 @@ update_script() {
     fi
 
     echo -e "${YELLOW}A new version of the script is available: $LATEST_VERSION${NC}"
-    read -p "Do you want to update? [y/N]: " update_confirm
-    if [[ "$update_confirm" != "y" && "$update_confirm" != "Y" ]]; then
+    read -p "Do you want to update? [Y/n]: " update_confirm
+    if [[ "$update_confirm" == "n" || "$update_confirm" == "N" ]]; then
         echo -e "${RED}Update cancelled.${NC}"
         return
     fi
 
     echo -e "${YELLOW}Updating script...${NC}"
     curl -s https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh > proxy.sh
-    echo -e "${GREEN}Script updated successfully! Please run the script again.${NC}"
-    exit 0
+    echo -e "${GREEN}Script updated successfully! Restarting...${NC}"
+    exec bash "$0" "$@"
 }
 
 # --- Main Script ---
