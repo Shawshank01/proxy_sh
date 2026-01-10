@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.9.1"
+SCRIPT_VERSION="2.9.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -540,7 +540,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        sudo "$DOCKER_COMPOSE_CMD" up -d
+        sudo $DOCKER_COMPOSE_CMD up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
     else
@@ -646,7 +646,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        if sudo "$DOCKER_COMPOSE_CMD" up -d; then
+        if sudo $DOCKER_COMPOSE_CMD up -d; then
             echo -e "${GREEN}Shadowsocks container has been started!${NC}"
             echo "Remember to open port ${ss_port} (TCP & UDP) in your server's firewall."
 
@@ -806,7 +806,7 @@ delete_xray() {
     fi
 
     cd xray || return 1
-    sudo "$DOCKER_COMPOSE_CMD" down
+    sudo $DOCKER_COMPOSE_CMD down
     cd ..
     rm -rf xray
     echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
@@ -821,7 +821,7 @@ delete_shadowsocks() {
     fi
 
     cd shadowsocks || return 1
-    sudo "$DOCKER_COMPOSE_CMD" down
+    sudo $DOCKER_COMPOSE_CMD down
     cd ..
     rm -rf shadowsocks
     echo -e "${GREEN}Shadowsocks container and config deleted successfully!${NC}"
