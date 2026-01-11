@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="2.9.3"
+SCRIPT_VERSION="3.0.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -313,11 +313,60 @@ install_xray() {
         fi
 
         PING_HOST=${REALITY_DOMAIN_CLEAN%%:*}
+
+        # Check for Chinese domains before probing
+        DOMAIN_WARNING=""
+        if [[ "$PING_HOST" == *.cn || "$PING_HOST" == *.com.cn || "$PING_HOST" == *.net.cn || "$PING_HOST" == *.org.cn || "$PING_HOST" == *.中国 || "$PING_HOST" == *.中國 ]]; then
+            DOMAIN_WARNING="${RED}⚠ WARNING: This appears to be a Chinese domain (.cn). Reality target must be a foreign website outside China!${NC}"
+        elif [[ "$PING_HOST" == *baidu.com || "$PING_HOST" == *qq.com || "$PING_HOST" == *taobao.com || "$PING_HOST" == *tmall.com || "$PING_HOST" == *jd.com || "$PING_HOST" == *163.com || "$PING_HOST" == *sina.com || "$PING_HOST" == *weibo.com || "$PING_HOST" == *alipay.com || "$PING_HOST" == *bilibili.com || "$PING_HOST" == *douyin.com || "$PING_HOST" == *tiktok.com ]]; then
+            DOMAIN_WARNING="${RED}⚠ WARNING: This appears to be a Chinese website. Reality target must be a foreign website outside China!${NC}"
+        fi
+
+        if [ -n "$DOMAIN_WARNING" ]; then
+            echo -e "$DOMAIN_WARNING"
+            read -p "Are you sure you want to continue with this domain? [y/N]: " china_confirm
+            if [[ "$china_confirm" != "y" && "$china_confirm" != "Y" ]]; then
+                continue
+            fi
+        fi
+
         echo "Running xray tls ping for $PING_HOST..."
         PING_OUTPUT=$(sudo docker run --rm teddysun/xray:latest xray tls ping "$PING_HOST" 2>&1)
         echo "----- tls ping output -----"
         echo "$PING_OUTPUT"
         echo "---------------------------"
+
+        # Validate TLS and HTTP/2 requirements
+        VALIDATION_ERRORS=0
+
+        # Check for TLSv1.3 support
+        if echo "$PING_OUTPUT" | grep -qi "TLS 1.3\|TLSv1.3\|Version:.*303"; then
+            echo -e "${GREEN}✓ TLSv1.3 supported${NC}"
+        else
+            echo -e "${RED}✗ TLSv1.3 NOT detected - Reality requires TLS 1.3${NC}"
+            VALIDATION_ERRORS=1
+        fi
+
+        # Check for HTTP/2 (H2) support
+        if echo "$PING_OUTPUT" | grep -qi "ALPN.*h2\|HTTP/2\|h2,"; then
+            echo -e "${GREEN}✓ HTTP/2 (H2) supported${NC}"
+        else
+            echo -e "${YELLOW}⚠ HTTP/2 (H2) not detected - Reality works best with H2${NC}"
+        fi
+
+        # Check for connection errors
+        if echo "$PING_OUTPUT" | grep -qi "error\|failed\|timeout\|refused"; then
+            echo -e "${RED}✗ Connection error detected - domain may be unreachable${NC}"
+            VALIDATION_ERRORS=1
+        fi
+
+        if [ "$VALIDATION_ERRORS" -eq 1 ]; then
+            echo -e "${YELLOW}This domain may not be suitable as a Reality target.${NC}"
+            read -p "Continue anyway? [y/N]: " force_continue
+            if [[ "$force_continue" != "y" && "$force_continue" != "Y" ]]; then
+                continue
+            fi
+        fi
 
         read -p "Use this domain and output? [Y/n]: " use_domain
         if [[ "$use_domain" == "n" || "$use_domain" == "N" ]]; then

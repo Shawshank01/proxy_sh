@@ -21,7 +21,7 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality and a Shad
     chmod +x proxy.sh
     ```
 
-2.  **Run the script (do NOT use `sudo`):**
+2.  **Run the script:**
     ```bash
     ./proxy.sh
     ```
@@ -60,6 +60,11 @@ An automated script to install and manage an Xray VLESS-XHTTP-Reality and a Shad
       sudo docker run --rm teddysun/xray:latest xray tls ping <target-domain>
       ```
       and uses the result to fill `target` and `serverNames` automatically.
+    - **Domain validation**: The script automatically checks:
+      - ⚠️ **Chinese domains**: Warns if the domain is `.cn`, `.com.cn`, or a known Chinese site (Baidu, QQ, Taobao, etc.)
+      - ✓ **TLSv1.3**: Verifies the target supports TLS 1.3 (required for Reality)
+      - ✓ **HTTP/2**: Checks for H2 support (recommended for best performance)
+      - ✗ **Connection errors**: Detects timeouts or connection failures
     - Wildcards from the certificate are ignored (not supported by Xray). If only wildcards are present, the script will ask you for concrete hostnames.
 
 ## Notes
