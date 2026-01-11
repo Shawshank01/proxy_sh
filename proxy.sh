@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.0.0"
+SCRIPT_VERSION="3.0.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -924,7 +924,8 @@ echo "4) Update existing container (Xray / Shadowsocks)"
 echo "5) Show VLESS links for current config"
 echo "6) Show SS links for current config"
 echo "7) Delete container and config (Xray / Shadowsocks)"
-read -p "Enter your choice [0-7]: " choice
+echo "8) Exit"
+read -p "Enter your choice [0-8]: " choice
 
 case $choice in
     0)
@@ -995,6 +996,10 @@ case $choice in
                 echo -e "${RED}Invalid choice. Exiting.${NC}"
                 ;;
         esac
+        ;;
+    8)
+        echo -e "${GREEN}Goodbye!${NC}"
+        exit 0
         ;;
     *)
         echo -e "${RED}Invalid choice. Exiting.${NC}"
