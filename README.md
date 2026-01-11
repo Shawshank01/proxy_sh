@@ -1,6 +1,8 @@
 # proxy_sh
 
-An automated script to install and manage an Xray VLESS-XHTTP-Reality and a Shadowsocks 2022 proxy server using Docker.
+**No need** to use your own domain name ;-)  
+An automated script to install an Xray VLESS-XHTTP-Reality and a Shadowsocks 2022 proxy server using Docker.  
+Supports IPv6.
 
 ## Features
 - **Automated Environment Check**: Installs Docker and Docker Compose if they are not present.
