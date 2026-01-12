@@ -1,8 +1,9 @@
 # proxy_sh
 
 **No need** to use your own domain name ;-)  
-An automated script to install an Xray VLESS-XHTTP-Reality and a Shadowsocks 2022 proxy server using Docker.  
-Supports IPv6.
+An automated shell script for effortlessly installing and managing Docker containers on Linux systems, thereby constructing encrypted traffic proxy servers for Xray (VLESS-XHTTP-REALITY) and Shadowsocks (2022).  
+Supports IPv6.  
+For the freedom of the internet!
 
 ## Features
 - **Automated Environment Check**: Installs Docker and Docker Compose if they are not present.
@@ -49,6 +50,14 @@ Supports IPv6.
 -   **5) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
 -   **6) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
 -   **7) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
+
+## Recommended Clients
+
+- **iOS / macOS**: [Shadowrocket](https://apps.apple.com/us/app/shadowrocket/id932747118)
+- **Android**: [v2rayNG](https://github.com/2dust/v2rayNG), [v2RayTun](https://v2raytun.com)
+- **Windows**: [v2rayN](https://github.com/2dust/v2rayN)
+
+Just copy the vless:/ss: link and paste it into the client and enjoy!
 
 ## Configuration Details
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
