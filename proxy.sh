@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.1.0"
+SCRIPT_VERSION="3.1.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -122,15 +122,44 @@ install_docker_packages() {
     echo "Installing Docker for ${DISTRO}..."
     case "$DISTRO" in
         ubuntu|debian|linuxmint)
+            # Install prerequisites
             sudo apt-get update
-            # Install Docker
-            if ! sudo apt-get install -y docker.io; then
+            if ! sudo apt-get install -y ca-certificates curl gnupg; then
+                echo -e "${RED}Failed to install prerequisites. Please install them manually.${NC}"
+                exit 1
+            fi
+
+            # Add Docker's official GPG key
+            sudo install -m 0755 -d /etc/apt/keyrings
+            
+            # Determine the correct Docker repo based on distro
+            if [ "$DISTRO" = "linuxmint" ]; then
+                UBUNTU_CODENAME=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
+                echo -e "${YELLOW}Linux Mint detected, using Ubuntu codename: $UBUNTU_CODENAME${NC}"
+                REPO_URL="https://download.docker.com/linux/ubuntu"
+                REPO_CODENAME="$UBUNTU_CODENAME"
+            elif [ "$DISTRO" = "debian" ]; then
+                REPO_URL="https://download.docker.com/linux/debian"
+                REPO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+            else
+                # Ubuntu or compatible
+                REPO_URL="https://download.docker.com/linux/ubuntu"
+                REPO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+            fi
+
+            # Download and install Docker's GPG key
+            curl -fsSL "${REPO_URL}/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+            sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+            # Add the Docker repository
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $REPO_URL $REPO_CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+            # Update and install Docker
+            sudo apt-get update
+            if ! sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
                 echo -e "${RED}Failed to install Docker. Please install it manually.${NC}"
                 exit 1
             fi
-            
-            # Install Docker Compose
-            install_docker_compose
             ;;
         centos|rhel|fedora)
             sudo dnf -y install dnf-plugins-core
