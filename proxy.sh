@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.0.1"
+SCRIPT_VERSION="3.1.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -903,6 +903,177 @@ update_script() {
     exec bash "$0" "$@"
 }
 
+# Function to restore deployment from existing config files
+restore_deployment() {
+    echo -e "${YELLOW}Restore Deployment - Re-deploy containers from existing config files${NC}"
+    echo -e "${YELLOW}Use this when Docker was reinstalled or containers were accidentally deleted.${NC}\n"
+
+    # Check for existing configurations
+    XRAY_CONFIG_EXISTS=false
+    SS_CONFIG_EXISTS=false
+
+    if [ -d "xray" ] && [ -f "xray/docker-compose.yml" ] && [ -f "xray/server.jsonc" ]; then
+        XRAY_CONFIG_EXISTS=true
+        echo -e "${GREEN}✓ Xray configuration found${NC}"
+        echo "  - xray/docker-compose.yml"
+        echo "  - xray/server.jsonc"
+        if [ -f "xray/vless_links.txt" ]; then
+            echo "  - xray/vless_links.txt"
+        fi
+    else
+        echo -e "${RED}✗ Xray configuration not found${NC}"
+    fi
+
+    if [ -d "shadowsocks" ] && [ -f "shadowsocks/docker-compose.yml" ] && [ -f "shadowsocks/server.json" ]; then
+        SS_CONFIG_EXISTS=true
+        echo -e "${GREEN}✓ Shadowsocks configuration found${NC}"
+        echo "  - shadowsocks/docker-compose.yml"
+        echo "  - shadowsocks/server.json"
+        if [ -f "shadowsocks/ss_links.txt" ]; then
+            echo "  - shadowsocks/ss_links.txt"
+        fi
+    else
+        echo -e "${RED}✗ Shadowsocks configuration not found${NC}"
+    fi
+
+    echo ""
+
+    if [ "$XRAY_CONFIG_EXISTS" = false ] && [ "$SS_CONFIG_EXISTS" = false ]; then
+        echo -e "${RED}No existing configurations found. Please install using options 2 or 3.${NC}"
+        return 1
+    fi
+
+    echo "Which deployment do you want to restore?"
+    if [ "$XRAY_CONFIG_EXISTS" = true ]; then
+        echo "1) Xray (VLESS-XHTTP-Reality)"
+    fi
+    if [ "$SS_CONFIG_EXISTS" = true ]; then
+        echo "2) Shadowsocks (ssserver-rust)"
+    fi
+    if [ "$XRAY_CONFIG_EXISTS" = true ] && [ "$SS_CONFIG_EXISTS" = true ]; then
+        echo "3) Both"
+    fi
+    echo "0) Cancel"
+    read -p "Enter your choice: " restore_choice
+
+    case $restore_choice in
+        1)
+            if [ "$XRAY_CONFIG_EXISTS" = true ]; then
+                restore_xray
+            else
+                echo -e "${RED}Xray configuration not available.${NC}"
+            fi
+            ;;
+        2)
+            if [ "$SS_CONFIG_EXISTS" = true ]; then
+                restore_shadowsocks
+            else
+                echo -e "${RED}Shadowsocks configuration not available.${NC}"
+            fi
+            ;;
+        3)
+            if [ "$XRAY_CONFIG_EXISTS" = true ] && [ "$SS_CONFIG_EXISTS" = true ]; then
+                restore_xray
+                restore_shadowsocks
+            else
+                echo -e "${RED}Both configurations are not available.${NC}"
+            fi
+            ;;
+        0)
+            echo -e "${YELLOW}Restore cancelled.${NC}"
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            ;;
+    esac
+}
+
+# Function to restore Xray container
+restore_xray() {
+    echo -e "\n${YELLOW}Restoring Xray deployment...${NC}"
+    
+    # Check if container already exists
+    if sudo docker ps -a -q -f name="^/xray_server$" | grep -q .; then
+        echo -e "${YELLOW}Xray container already exists. Checking status...${NC}"
+        if sudo docker ps -q -f name="^/xray_server$" | grep -q .; then
+            echo -e "${GREEN}Xray container is already running!${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
+            cd xray || return 1
+            sudo $DOCKER_COMPOSE_CMD start
+            cd ..
+            echo -e "${GREEN}Xray container started successfully!${NC}"
+            return 0
+        fi
+    fi
+
+    # Pull image and start container
+    echo "Pulling teddysun/xray image..."
+    sudo docker pull teddysun/xray
+
+    cd xray || return 1
+    
+    echo -e "${YELLOW}Starting Xray container...${NC}"
+    if sudo $DOCKER_COMPOSE_CMD up -d; then
+        echo -e "${GREEN}Xray container has been restored and started!${NC}"
+        echo "Your existing configuration and links are preserved."
+        if [ -f "vless_links.txt" ]; then
+            echo -e "\n${GREEN}Your VLESS links:${NC}"
+            cat vless_links.txt
+        fi
+    else
+        echo -e "${RED}Failed to start Xray container.${NC}"
+        cd ..
+        return 1
+    fi
+    
+    cd ..
+}
+
+# Function to restore Shadowsocks container
+restore_shadowsocks() {
+    echo -e "\n${YELLOW}Restoring Shadowsocks deployment...${NC}"
+    
+    # Check if container already exists
+    if sudo docker ps -a -q -f name="^/ssserver$" | grep -q .; then
+        echo -e "${YELLOW}Shadowsocks container already exists. Checking status...${NC}"
+        if sudo docker ps -q -f name="^/ssserver$" | grep -q .; then
+            echo -e "${GREEN}Shadowsocks container is already running!${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
+            cd shadowsocks || return 1
+            sudo $DOCKER_COMPOSE_CMD start
+            cd ..
+            echo -e "${GREEN}Shadowsocks container started successfully!${NC}"
+            return 0
+        fi
+    fi
+
+    # Pull image and start container
+    echo "Pulling ghcr.io/shadowsocks/ssserver-rust image..."
+    sudo docker pull ghcr.io/shadowsocks/ssserver-rust:latest
+
+    cd shadowsocks || return 1
+    
+    echo -e "${YELLOW}Starting Shadowsocks container...${NC}"
+    if sudo $DOCKER_COMPOSE_CMD up -d; then
+        echo -e "${GREEN}Shadowsocks container has been restored and started!${NC}"
+        echo "Your existing configuration and links are preserved."
+        if [ -f "ss_links.txt" ]; then
+            echo -e "\n${GREEN}Your SS links:${NC}"
+            cat ss_links.txt
+        fi
+    else
+        echo -e "${RED}Failed to start Shadowsocks container.${NC}"
+        cd ..
+        return 1
+    fi
+    
+    cd ..
+}
+
 # --- Main Script ---
 
 # Make sure the script is not run as root
@@ -921,11 +1092,12 @@ echo "1) Environment Check (Check distro and install Docker)"
 echo "2) Install Xray (VLESS-XHTTP-Reality)"
 echo "3) Install Shadowsocks (ssserver-rust)"
 echo "4) Update existing container (Xray / Shadowsocks)"
-echo "5) Show VLESS links for current config"
-echo "6) Show SS links for current config"
-echo "7) Delete container and config (Xray / Shadowsocks)"
-echo "8) Exit"
-read -p "Enter your choice [0-8]: " choice
+echo "5) Restore deployment from existing config"
+echo "6) Show VLESS links for current config"
+echo "7) Show SS links for current config"
+echo "8) Delete container and config (Xray / Shadowsocks)"
+echo "9) Exit"
+read -p "Enter your choice [0-9]: " choice
 
 case $choice in
     0)
@@ -972,12 +1144,18 @@ case $choice in
         esac
         ;;
     5)
-        show_links
+        if ! check_xray_requirements; then
+            exit 1
+        fi
+        restore_deployment
         ;;
     6)
-        show_ss_links
+        show_links
         ;;
     7)
+        show_ss_links
+        ;;
+    8)
         if ! check_xray_requirements; then
             exit 1
         fi
@@ -997,7 +1175,7 @@ case $choice in
                 ;;
         esac
         ;;
-    8)
+    9)
         echo -e "${GREEN}Goodbye!${NC}"
         exit 0
         ;;
