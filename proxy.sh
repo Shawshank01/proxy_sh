@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.1.1"
+SCRIPT_VERSION="3.1.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1191,12 +1191,17 @@ case $choice in
         echo "Which container do you want to delete?"
         echo "1) Xray"
         echo "2) Shadowsocks"
-        read -p "Enter your choice [1-2]: " delete_choice
+        echo "3) Both"
+        read -p "Enter your choice [1-3]: " delete_choice
         case $delete_choice in
             1)
                 delete_xray
                 ;;
             2)
+                delete_shadowsocks
+                ;;
+            3)
+                delete_xray
                 delete_shadowsocks
                 ;;
             *)
