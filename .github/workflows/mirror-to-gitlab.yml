@@ -1,0 +1,19 @@
+name: Mirror to GitLab
+
+on:
+  push:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Push to GitLab
+        run: |
+          git remote add gitlab https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/michifumi/proxy_sh.git
+          git push gitlab --force --prune 'refs/remotes/origin/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
