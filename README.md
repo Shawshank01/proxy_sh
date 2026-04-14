@@ -1,7 +1,7 @@
 # proxy_sh
 
 **No need** to use your own domain name ;-)  
-An automated shell script for effortlessly installing and managing Docker containers on Linux systems, thereby constructing encrypted traffic proxy servers for Xray (VLESS-XHTTP-REALITY) and Shadowsocks (2022).  
+This is an automated shell script that effortlessly installs and manages Docker containers on GNU/Linux systems. It can be used to construct encrypted and obfuscated traffic proxy servers using Xray (VLESS-XHTTP-REALITY) and Shadowsocks (2022).  
 Supports IPv6.  
 For the freedom of the internet!
 
