@@ -9,6 +9,9 @@ For the freedom of the internet!
 - **Automated Environment Check**: Installs Docker and Docker Compose if they are not present.
 - **Wide Distro Support**: Works with Debian, Ubuntu, Fedora, CentOS, RHEL, and Linux Mint.
 - **Interactive Installation**: Guides you through setting up an Xray VLESS-XHTTP-Reality proxy.
+- **Xray Per-User Monthly Quotas**: Optional per-user MB limits with automatic suspension when a limit is reached.
+- **Per-User Anniversary Billing Cycle**: Each user cycle starts from their account creation timestamp and rolls monthly (with end-of-month clamping).
+- **Quota Management Menu**: Check/apply quotas, reset user usage, and change user limits later without recreating users.
 - **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
 - **IPv6 Support**: Optional dual-stack listening for both Xray and Shadowsocks.
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
@@ -37,19 +40,27 @@ For the freedom of the internet!
 -   **0) Update this script**: Checks for a new version on GitHub and updates itself.
 -   **1) Environment Check**: Verifies the Linux distribution and installs Docker and Docker Compose if needed. Run this first if you are on a new server.
 -   **2) Install Xray (VLESS-XHTTP-Reality)**: The main installation process. It will:
-    -   Generate a single UUID and ask for the number of `shortIds`.
-    -   Generate `docker-compose.yml` and `server.jsonc` in a new `xray/` directory.
+    -   Ask for the number of users and `shortIds`.
+    -   Prompt for each user's label/email and optional monthly MB limit.
+    -   Generate `docker-compose.yml`, `server.jsonc`, `user_limits.conf`, and `user_limits.db` in `xray/`.
     -   Ask for your server's IP/domain and a remarks name to generate VLESS links.
-    -   Save the `vless://`links to `xray/vless_links.txt`.
+    -   Save the `vless://` links to `xray/vless_links.txt`.
     -   Start the Xray container.
 -   **3) Install Shadowsocks (ssserver-rust)**: Sets up a multi-user Shadowsocks 2022 server. It will:
     -   Ask for the number of users and the listening port.
     -   Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
     -   Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
 -   **4) Update existing container (Xray or Shadowsocks)**: Pulls the latest Docker image and restarts the selected container using Watchtower.
--   **5) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
--   **6) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
--   **7) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
+-   **5) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
+-   **6) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
+-   **7) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
+-   **8) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
+-   **9) Manage Xray per-user data quotas**:
+    -   Show quota status
+    -   Check/apply quota suspension and automatic re-enable on next user cycle
+    -   Reset one user's current-cycle usage
+    -   Change one user's monthly limit
+-   **10) Exit**
 
 ## Recommended Clients
 
@@ -62,6 +73,11 @@ Just copy the vless:/ss: link and paste it into the client and enjoy!
 ## Configuration Details
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
 - The configuration uses the Reality protocol for obfuscation.
+- Xray per-user quota enforcement uses Xray user traffic stats (`StatsService`) and stores state in:
+  - `xray/user_limits.conf` (timezone)
+  - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
+- Billing cycle is per-user **anniversary monthly** (from account creation timestamp to next month same local time, clamped to month-end when needed).
+- Quota checks run when you execute menu option `9 -> 2` (recommended to automate with cron for timely suspension/re-enable).
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
     - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.  

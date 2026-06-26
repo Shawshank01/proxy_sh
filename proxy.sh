@@ -5,11 +5,12 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.1.2"
+SCRIPT_VERSION="3.2.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
 DEFAULT_SS_PORT=80
+DEFAULT_QUOTA_TIMEZONE="UTC"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -35,7 +36,7 @@ check_dependencies() {
     if [ ${#missing_deps[@]} -ne 0 ]; then
         echo -e "${YELLOW}Missing dependencies: ${missing_deps[*]}${NC}"
         echo -e "${YELLOW}Attempting to install them...${NC}"
-        
+
         # Detect package manager
         if command -v apt-get &> /dev/null; then
             sudo apt-get update && sudo apt-get install -y "${missing_deps[@]}"
@@ -47,7 +48,7 @@ check_dependencies() {
             echo -e "${RED}Could not detect package manager. Please install manually: ${missing_deps[*]}${NC}"
             exit 1
         fi
-        
+
         # Verify installation
         for cmd in "${missing_deps[@]}"; do
             if ! command -v $cmd &> /dev/null; then
@@ -131,7 +132,7 @@ install_docker_packages() {
 
             # Add Docker's official GPG key
             sudo install -m 0755 -d /etc/apt/keyrings
-            
+
             # Determine the correct Docker repo based on distro
             if [ "$DISTRO" = "linuxmint" ]; then
                 UBUNTU_CODENAME=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
@@ -178,13 +179,13 @@ install_docker_packages() {
     else
         echo -e "${YELLOW}Could not start Docker service. You may need to start it manually.${NC}"
     fi
-    
+
     if sudo systemctl enable docker 2>/dev/null; then
         echo -e "${GREEN}Docker service enabled for auto-start.${NC}"
     else
         echo -e "${YELLOW}Could not enable Docker service. You may need to enable it manually.${NC}"
     fi
-    
+
     # Verify Docker installation
     if command -v docker &> /dev/null; then
         echo -e "${GREEN}Docker has been installed successfully.${NC}"
@@ -209,12 +210,12 @@ install_docker_compose() {
                     echo -e "${RED}Failed to install prerequisites for Docker Compose.${NC}"
                     exit 1
                 fi
-                
+
                 # Add Docker's official GPG key
                 sudo install -m 0755 -d /etc/apt/keyrings
                 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
                 sudo chmod a+r /etc/apt/keyrings/docker.gpg
-                
+
                 # Add the repository to Apt sources
                 if [ "$DISTRO" = "linuxmint" ]; then
                     UBUNTU_CODENAME=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
@@ -231,13 +232,13 @@ install_docker_compose() {
                     REPO_URL="https://download.docker.com/linux/ubuntu"
                     REPO_CODENAME="$VER_CODENAME"
                 fi
-                
+
                 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $REPO_URL $REPO_CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-                
+
                 # Remove conflicting packages that might be installed from distro repos
                 echo -e "${YELLOW}Removing conflicting packages to avoid installation errors...${NC}"
                 sudo apt-get remove -y docker-buildx docker-compose docker-doc podman-docker || true
-                
+
                 sudo apt-get update
                 if sudo apt-get install -y docker-compose-plugin; then
                     echo -e "${GREEN}Docker Compose plugin installed successfully from Docker repository.${NC}"
@@ -269,11 +270,30 @@ install_xray() {
     echo "Pulling teddysun/xray image..."
     sudo docker pull teddysun/xray
 
-    # Generate a single user UUID
-    num_uuids=$DEFAULT_UUIDS
+    read -p "How many users do you need? [Default: $DEFAULT_UUIDS]: " num_uuids
+    num_uuids=${num_uuids:-$DEFAULT_UUIDS}
+
+    if ! [[ "$num_uuids" =~ ^[0-9]+$ ]] || [ "$num_uuids" -lt 1 ]; then
+        echo -e "${RED}User count must be a positive integer.${NC}"
+        cd ..
+        return 1
+    fi
 
     read -p "How many shortIds do you need? [Default: $DEFAULT_SHORTIDS]: " num_shortids
     num_shortids=${num_shortids:-$DEFAULT_SHORTIDS}
+
+    if ! [[ "$num_shortids" =~ ^[0-9]+$ ]] || [ "$num_shortids" -lt 1 ]; then
+        echo -e "${RED}shortId count must be a positive integer.${NC}"
+        cd ..
+        return 1
+    fi
+
+    read -p "Timezone for quota billing cycles [Default: $DEFAULT_QUOTA_TIMEZONE]: " QUOTA_TIMEZONE
+    QUOTA_TIMEZONE=${QUOTA_TIMEZONE:-$DEFAULT_QUOTA_TIMEZONE}
+    if ! TZ="$QUOTA_TIMEZONE" date +%s >/dev/null 2>&1; then
+        echo -e "${YELLOW}Invalid timezone. Falling back to ${DEFAULT_QUOTA_TIMEZONE}.${NC}"
+        QUOTA_TIMEZONE="$DEFAULT_QUOTA_TIMEZONE"
+    fi
 
     # Generate keys and IDs
     echo "Generating keys and IDs..."
@@ -303,11 +323,51 @@ install_xray() {
     fi
 
     CLIENTS_JSON=""
+    QUOTA_DB_LINES=""
+    declare -A USED_EMAILS
+
     for i in $(seq 1 $num_uuids); do
         uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray uuid)
-        CLIENTS_JSON+="{\"id\": \"$uuid\", \"flow\": \"\"}"
+
+        default_label="user${i}"
+        read -p "Enter label/email for user ${i} [${default_label}]: " user_label
+        user_label=${user_label:-$default_label}
+        user_email=$(echo "$user_label" | tr '[:upper:]' '[:lower:]' | sed -E 's/[[:space:]]+/_/g; s/[^a-z0-9_.-]//g')
+        if [ -z "$user_email" ]; then
+            user_email="$default_label"
+        fi
+
+        base_email="$user_email"
+        suffix=2
+        while [ -n "${USED_EMAILS[$user_email]:-}" ]; do
+            user_email="${base_email}_${suffix}"
+            suffix=$((suffix + 1))
+        done
+        USED_EMAILS[$user_email]=1
+
+        read -p "Set monthly data limit for ${user_email}? [y/N]: " set_limit
+        user_limit_mb=0
+        if [[ "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
+            while true; do
+                read -p "Enter monthly limit for ${user_email} in MB: " user_limit_mb
+                if [[ "$user_limit_mb" =~ ^[0-9]+$ ]] && [ "$user_limit_mb" -gt 0 ]; then
+                    break
+                fi
+                echo -e "${RED}Please enter a positive integer MB value.${NC}"
+            done
+        fi
+
+        user_anchor_now=$(date +%s)
+        calculate_cycle_bounds "$user_anchor_now" "$user_anchor_now" "$QUOTA_TIMEZONE"
+
+        CLIENTS_JSON+="{\"id\": \"$uuid\", \"flow\": \"\", \"email\": \"$user_email\"}"
         if [ "$i" -lt "$num_uuids" ]; then
-            CLIENTS_JSON+="," 
+            CLIENTS_JSON+=","
+        fi
+
+        QUOTA_DB_LINES+="${user_email}|${uuid}|${user_limit_mb}|${user_anchor_now}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active"
+        if [ "$i" -lt "$num_uuids" ]; then
+            QUOTA_DB_LINES+=$'\n'
         fi
     done
 
@@ -316,7 +376,7 @@ install_xray() {
         shortid=$(openssl rand -hex 4) # Generates 8 characters
         SHORTIDS_JSON+="\"$shortid\""
         if [ "$i" -lt "$num_shortids" ]; then
-            SHORTIDS_JSON+="," 
+            SHORTIDS_JSON+=","
         fi
     done
 
@@ -484,9 +544,37 @@ EOL
     # Create server.jsonc (with routing, sniffing, two outbounds, and all serverNames)
     cat > server.jsonc << EOL
 {
+    "stats": {},
+    "api": {
+        "tag": "api",
+        "services": [
+            "StatsService"
+        ]
+    },
+    "policy": {
+        "levels": {
+            "0": {
+                "statsUserUplink": true,
+                "statsUserDownlink": true
+            }
+        },
+        "system": {
+            "statsInboundUplink": true,
+            "statsInboundDownlink": true,
+            "statsOutboundUplink": true,
+            "statsOutboundDownlink": true
+        }
+    },
     "routing": {
         "domainStrategy": "AsIs",
         "rules": [
+            {
+                "type": "field",
+                "inboundTag": [
+                    "api"
+                ],
+                "outboundTag": "api"
+            },
             {
                 "type": "field",
                 "domain": [
@@ -546,12 +634,25 @@ EOL
                     "quic"
                 ]
             }
+        },
+        {
+            "listen": "127.0.0.1",
+            "port": 10085,
+            "protocol": "dokodemo-door",
+            "settings": {
+                "address": "127.0.0.1"
+            },
+            "tag": "api"
         }
     ],
     "outbounds": [
         {
             "protocol": "freedom",
             "tag": "direct"
+        },
+        {
+            "protocol": "freedom",
+            "tag": "api"
         },
         {
             "protocol": "blackhole",
@@ -615,6 +716,18 @@ EOL
     echo -e "\nSaving links to vless_links.txt..."
     echo -e "$LINKS" > vless_links.txt
     echo "Links saved successfully!"
+
+    # Save per-user quota metadata
+    cat > user_limits.conf << EOL
+TIMEZONE=$QUOTA_TIMEZONE
+EOL
+
+    cat > user_limits.db << EOL
+# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status
+$QUOTA_DB_LINES
+EOL
+
+    echo -e "${GREEN}Saved quota metadata:${NC} xray/user_limits.conf, xray/user_limits.db"
 
     read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
     if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
@@ -824,7 +937,7 @@ check_xray_requirements() {
         return 1
     fi
     echo -e "${YELLOW}Checking Docker Compose availability...${NC}"
-    
+
     # Check for both docker-compose (hyphen) and docker compose (space) versions
     # Prioritize the newer 'docker compose' version (with space)
     if docker compose version &> /dev/null 2>&1; then
@@ -844,6 +957,529 @@ check_xray_requirements() {
         return 1
     fi
     return 0
+}
+
+# ----- Xray quota helpers -----
+
+days_in_month() {
+    local year=$1
+    local month=$2
+    date -d "${year}-$(printf "%02d" "$month")-01 +1 month -1 day" +%d
+}
+
+add_months_clamped_epoch() {
+    local anchor_epoch=$1
+    local add_months=$2
+    local timezone=$3
+
+    local ay am ad ah amin asec
+    ay=$(TZ="$timezone" date -d "@$anchor_epoch" +%Y)
+    am=$(TZ="$timezone" date -d "@$anchor_epoch" +%m)
+    ad=$(TZ="$timezone" date -d "@$anchor_epoch" +%d)
+    ah=$(TZ="$timezone" date -d "@$anchor_epoch" +%H)
+    amin=$(TZ="$timezone" date -d "@$anchor_epoch" +%M)
+    asec=$(TZ="$timezone" date -d "@$anchor_epoch" +%S)
+
+    local total_months=$((10#$ay * 12 + 10#$am - 1 + add_months))
+    local ny=$((total_months / 12))
+    local nm=$((total_months % 12 + 1))
+
+    local dim
+    dim=$(days_in_month "$ny" "$nm")
+
+    local nd=$((10#$ad))
+    if [ "$nd" -gt "$dim" ]; then
+        nd=$dim
+    fi
+
+    TZ="$timezone" date -d "$(printf "%04d-%02d-%02d %02d:%02d:%02d" "$ny" "$nm" "$nd" "$ah" "$amin" "$asec")" +%s
+}
+
+calculate_cycle_bounds() {
+    local anchor_epoch=$1
+    local now_epoch=$2
+    local timezone=$3
+
+    local month_offset=0
+    local start_epoch next_epoch
+    start_epoch=$(add_months_clamped_epoch "$anchor_epoch" "$month_offset" "$timezone")
+
+    # Safety for unusual clock/timezone conditions
+    if [ "$start_epoch" -gt "$now_epoch" ]; then
+        CYCLE_START_EPOCH=$start_epoch
+        CYCLE_END_EPOCH=$(add_months_clamped_epoch "$anchor_epoch" $((month_offset + 1)) "$timezone")
+        return
+    fi
+
+    while true; do
+        next_epoch=$(add_months_clamped_epoch "$anchor_epoch" $((month_offset + 1)) "$timezone")
+        if [ "$now_epoch" -lt "$next_epoch" ]; then
+            CYCLE_START_EPOCH=$start_epoch
+            CYCLE_END_EPOCH=$next_epoch
+            return
+        fi
+        month_offset=$((month_offset + 1))
+        start_epoch=$next_epoch
+    done
+}
+
+read_xray_quota_timezone() {
+    local conf_file="xray/user_limits.conf"
+    local tz="$DEFAULT_QUOTA_TIMEZONE"
+
+    if [ -f "$conf_file" ]; then
+        local parsed_tz
+        parsed_tz=$(grep -E '^TIMEZONE=' "$conf_file" | tail -n1 | cut -d'=' -f2-)
+        if [ -n "$parsed_tz" ]; then
+            tz="$parsed_tz"
+        fi
+    fi
+
+    if ! TZ="$tz" date +%s >/dev/null 2>&1; then
+        tz="$DEFAULT_QUOTA_TIMEZONE"
+    fi
+
+    echo "$tz"
+}
+
+sync_xray_clients_from_quota_db() {
+    local db_file="xray/user_limits.db"
+    local config_file="xray/server.jsonc"
+
+    if [ ! -f "$db_file" ] || [ ! -f "$config_file" ]; then
+        echo -e "${RED}Quota database or Xray config not found.${NC}"
+        return 1
+    fi
+
+    local clients_json=""
+    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+        [ -z "$email" ] && continue
+        [ "$email" = "#" ] && continue
+        if [ "$status" != "active" ]; then
+            continue
+        fi
+
+        local entry="                    {\"id\": \"$uuid\", \"flow\": \"\", \"email\": \"$email\"}"
+        if [ -n "$clients_json" ]; then
+            clients_json+=$'\n'
+            clients_json+="${entry},"
+        else
+            clients_json+="${entry},"
+        fi
+    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+
+    if [ -n "$clients_json" ]; then
+        clients_json=${clients_json%,}
+    else
+        clients_json="                    "
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp)
+
+    awk -v clients="$clients_json" '
+        BEGIN { in_clients = 0 }
+        {
+            if ($0 ~ /"clients"[[:space:]]*:[[:space:]]*\[/) {
+                print
+                print clients
+                in_clients = 1
+                next
+            }
+            if (in_clients == 1) {
+                if ($0 ~ /^[[:space:]]*\][[:space:]]*,[[:space:]]*$/) {
+                    print
+                    in_clients = 0
+                }
+                next
+            }
+            print
+        }
+    ' "$config_file" > "$tmp_file"
+
+    mv "$tmp_file" "$config_file"
+    echo -e "${GREEN}Updated Xray clients list from quota database.${NC}"
+}
+
+reload_xray_container() {
+    if [ ! -d "xray" ] || [ ! -f "xray/docker-compose.yml" ]; then
+        echo -e "${RED}xray/docker-compose.yml not found.${NC}"
+        return 1
+    fi
+
+    if [ -z "$DOCKER_COMPOSE_CMD" ]; then
+        if ! check_xray_requirements; then
+            return 1
+        fi
+    fi
+
+    cd xray || return 1
+    if sudo $DOCKER_COMPOSE_CMD restart xray; then
+        cd .. || true
+        echo -e "${GREEN}Xray container reloaded successfully.${NC}"
+        return 0
+    else
+        cd .. || true
+        echo -e "${RED}Failed to reload Xray container.${NC}"
+        return 1
+    fi
+}
+
+collect_xray_user_stats() {
+    local map_file=$1
+
+    : > "$map_file"
+
+    if ! sudo docker ps -q -f name="^/xray_server$" | grep -q .; then
+        return 0
+    fi
+
+    local raw_stats
+    raw_stats=$(sudo docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>/dev/null || true)
+
+    if [ -z "$raw_stats" ]; then
+        return 0
+    fi
+
+    echo "$raw_stats" | awk '
+        /name: "user>>>.*>>>traffic>>>(uplink|downlink)"/ {
+            line = $0
+            sub(/^.*name: "user>>>/, "", line)
+            split(line, pair, ">>>traffic>>>")
+            user = pair[1]
+            dir = pair[2]
+            sub(/".*$/, "", dir)
+
+            if ($0 ~ /value:[[:space:]]*[0-9]+/) {
+                val = $0
+                sub(/^.*value:[[:space:]]*/, "", val)
+                sub(/[^0-9].*$/, "", val)
+                print user "|" dir "|" val
+                pending_user = ""
+                pending_dir = ""
+            } else {
+                pending_user = user
+                pending_dir = dir
+            }
+            next
+        }
+
+        pending_user != "" && /value:[[:space:]]*[0-9]+/ {
+            val = $0
+            sub(/^.*value:[[:space:]]*/, "", val)
+            sub(/[^0-9].*$/, "", val)
+            print pending_user "|" pending_dir "|" val
+            pending_user = ""
+            pending_dir = ""
+        }
+    ' > "$map_file"
+}
+
+check_and_apply_xray_quotas() {
+    local db_file="xray/user_limits.db"
+    local conf_file="xray/user_limits.conf"
+
+    if [ ! -f "$db_file" ] || [ ! -f "$conf_file" ]; then
+        echo -e "${RED}Quota files not found. Install Xray with quotas first.${NC}"
+        return 1
+    fi
+
+    local timezone
+    timezone=$(read_xray_quota_timezone)
+
+    local now_epoch
+    now_epoch=$(date +%s)
+
+    local stats_map_file
+    stats_map_file=$(mktemp)
+    collect_xray_user_stats "$stats_map_file"
+
+    declare -A uplink_map
+    declare -A downlink_map
+
+    while IFS='|' read -r email dir value; do
+        [ -z "$email" ] && continue
+        value=${value:-0}
+        if [ "$dir" = "uplink" ]; then
+            uplink_map["$email"]=$value
+        elif [ "$dir" = "downlink" ]; then
+            downlink_map["$email"]=$value
+        fi
+    done < "$stats_map_file"
+
+    rm -f "$stats_map_file"
+
+    local tmp_db
+    tmp_db=$(mktemp)
+    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+
+    local config_changed=0
+    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+        [ -z "$email" ] && continue
+
+        calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone"
+
+        local cycle_rotated=0
+        if [ "$cycle_start" != "$CYCLE_START_EPOCH" ] || [ "$cycle_end" != "$CYCLE_END_EPOCH" ]; then
+            cycle_usage=0
+            cycle_start=$CYCLE_START_EPOCH
+            cycle_end=$CYCLE_END_EPOCH
+            cycle_rotated=1
+            if [ "$status" = "suspended" ]; then
+                status="active"
+                config_changed=1
+                echo -e "${GREEN}Re-enabled user ${email} for new cycle.${NC}"
+            fi
+        fi
+
+        local current_total=$last_total
+        if [ -n "${uplink_map[$email]+set}" ] || [ -n "${downlink_map[$email]+set}" ]; then
+            local current_uplink=${uplink_map["$email"]:-0}
+            local current_downlink=${downlink_map["$email"]:-0}
+            current_total=$((current_uplink + current_downlink))
+        fi
+
+        local delta
+        if [ "$cycle_rotated" -eq 1 ]; then
+            delta=0
+        else
+            delta=$((current_total - last_total))
+            if [ "$delta" -lt 0 ]; then
+                delta=$current_total
+            fi
+        fi
+
+        cycle_usage=$((cycle_usage + delta))
+        last_total=$current_total
+
+        if [ "$limit_mb" -gt 0 ]; then
+            local limit_bytes=$((limit_mb * 1024 * 1024))
+            if [ "$cycle_usage" -ge "$limit_bytes" ] && [ "$status" != "suspended" ]; then
+                status="suspended"
+                config_changed=1
+                echo -e "${YELLOW}User ${email} reached quota (${limit_mb} MB). Suspended.${NC}"
+            fi
+        fi
+
+        echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+
+    mv "$tmp_db" "$db_file"
+
+    if [ "$config_changed" -eq 1 ]; then
+        sync_xray_clients_from_quota_db
+        reload_xray_container
+    fi
+
+    echo -e "${GREEN}Quota check complete.${NC}"
+}
+
+show_xray_quota_status() {
+    local db_file="xray/user_limits.db"
+
+    if [ ! -f "$db_file" ]; then
+        echo -e "${RED}Quota database not found.${NC}"
+        return 1
+    fi
+
+    local timezone
+    timezone=$(read_xray_quota_timezone)
+
+    echo -e "${YELLOW}Timezone:${NC} ${timezone}"
+    echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
+
+    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+        [ -z "$email" ] && continue
+
+        local usage_mb=$((cycle_usage / 1024 / 1024))
+        local cycle_start_h cycle_end_h
+        cycle_start_h=$(TZ="$timezone" date -d "@${cycle_start}" "+%Y-%m-%d %H:%M:%S")
+        cycle_end_h=$(TZ="$timezone" date -d "@${cycle_end}" "+%Y-%m-%d %H:%M:%S")
+
+        if [ "$limit_mb" -gt 0 ]; then
+            local percent=$((cycle_usage * 100 / (limit_mb * 1024 * 1024)))
+            echo "- ${email} | status=${status} | usage=${usage_mb}MB / ${limit_mb}MB (${percent}%) | cycle=${cycle_start_h} -> ${cycle_end_h}"
+        else
+            echo "- ${email} | status=${status} | usage=${usage_mb}MB / unlimited | cycle=${cycle_start_h} -> ${cycle_end_h}"
+        fi
+    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+}
+
+select_quota_user() {
+    local db_file="xray/user_limits.db"
+    if [ ! -f "$db_file" ]; then
+        echo -e "${RED}Quota database not found.${NC}"
+        return 1
+    fi
+
+    QUOTA_SELECTION_EMAIL=""
+
+    local idx=1
+    local lines=()
+    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+        [ -z "$email" ] && continue
+        lines+=("$email|$uuid|$limit_mb|$anchor_epoch|$cycle_start|$cycle_end|$cycle_usage|$last_total|$status")
+        echo "${idx}) ${email} (status: ${status}, limit: ${limit_mb} MB)"
+        idx=$((idx + 1))
+    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+
+    if [ ${#lines[@]} -eq 0 ]; then
+        echo -e "${RED}No users found in quota database.${NC}"
+        return 1
+    fi
+
+    read -p "Select user [1-${#lines[@]}]: " select_idx
+    if ! [[ "$select_idx" =~ ^[0-9]+$ ]] || [ "$select_idx" -lt 1 ] || [ "$select_idx" -gt ${#lines[@]} ]; then
+        echo -e "${RED}Invalid selection.${NC}"
+        return 1
+    fi
+
+    local selected="${lines[$((select_idx - 1))]}"
+    QUOTA_SELECTION_EMAIL=$(echo "$selected" | cut -d'|' -f1)
+    return 0
+}
+
+reset_xray_user_usage() {
+    if ! select_quota_user; then
+        return 1
+    fi
+
+    local target_email="$QUOTA_SELECTION_EMAIL"
+    local db_file="xray/user_limits.db"
+
+    local stats_map_file
+    stats_map_file=$(mktemp)
+    collect_xray_user_stats "$stats_map_file"
+
+    local current_total=0
+    while IFS='|' read -r email dir value; do
+        [ "$email" != "$target_email" ] && continue
+        value=${value:-0}
+        current_total=$((current_total + value))
+    done < "$stats_map_file"
+    rm -f "$stats_map_file"
+
+    local tmp_db
+    tmp_db=$(mktemp)
+    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+
+    local config_changed=0
+    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+        [ -z "$email" ] && continue
+
+        if [ "$email" = "$target_email" ]; then
+            cycle_usage=0
+            last_total=$current_total
+            if [ "$status" = "suspended" ]; then
+                read -p "User is suspended. Re-enable now? [Y/n]: " reenable
+                if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
+                    status="active"
+                    config_changed=1
+                fi
+            fi
+            echo -e "${GREEN}Usage reset for ${email}.${NC}"
+        fi
+
+        echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+
+    mv "$tmp_db" "$db_file"
+
+    if [ "$config_changed" -eq 1 ]; then
+        sync_xray_clients_from_quota_db
+        reload_xray_container
+    fi
+}
+
+change_xray_user_limit() {
+    if ! select_quota_user; then
+        return 1
+    fi
+
+    local target_email="$QUOTA_SELECTION_EMAIL"
+    local db_file="xray/user_limits.db"
+
+    read -p "Enter new monthly limit in MB (0 = unlimited): " new_limit_mb
+    if ! [[ "$new_limit_mb" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Limit must be a non-negative integer.${NC}"
+        return 1
+    fi
+
+    local tmp_db
+    tmp_db=$(mktemp)
+    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+
+    local config_changed=0
+    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+        [ -z "$email" ] && continue
+
+        if [ "$email" = "$target_email" ]; then
+            limit_mb=$new_limit_mb
+            if [ "$status" = "suspended" ]; then
+                local should_reenable=0
+                if [ "$limit_mb" -eq 0 ]; then
+                    should_reenable=1
+                else
+                    local limit_bytes=$((limit_mb * 1024 * 1024))
+                    if [ "$cycle_usage" -lt "$limit_bytes" ]; then
+                        should_reenable=1
+                    fi
+                fi
+
+                if [ "$should_reenable" -eq 1 ]; then
+                    read -p "New limit allows usage. Re-enable now? [Y/n]: " reenable
+                    if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
+                        status="active"
+                        config_changed=1
+                    fi
+                fi
+            fi
+            echo -e "${GREEN}Updated limit for ${email} to ${limit_mb} MB.${NC}"
+        fi
+
+        echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+
+    mv "$tmp_db" "$db_file"
+
+    if [ "$config_changed" -eq 1 ]; then
+        sync_xray_clients_from_quota_db
+        reload_xray_container
+    fi
+}
+
+manage_xray_quotas() {
+    while true; do
+        echo ""
+        echo -e "${YELLOW}--- Xray Per-User Quota Management ---${NC}"
+        echo "1) Show quota status"
+        echo "2) Check/apply quotas now"
+        echo "3) Reset one user's current cycle usage"
+        echo "4) Change one user's monthly limit"
+        echo "0) Back"
+        read -p "Enter your choice [0-4]: " quota_choice
+
+        case $quota_choice in
+            1)
+                show_xray_quota_status
+                ;;
+            2)
+                check_and_apply_xray_quotas
+                ;;
+            3)
+                reset_xray_user_usage
+                ;;
+            4)
+                change_xray_user_limit
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid choice.${NC}"
+                ;;
+        esac
+    done
 }
 
 show_links() {
@@ -876,7 +1512,7 @@ show_ss_links() {
 
 delete_xray() {
     echo -e "${YELLOW}Deleting Xray container and config...${NC}"
-    
+
     # SAFETY CHECK: Only try to enter/delete if directory exists
     if [ ! -d "xray" ]; then
         echo -e "${RED}Directory 'xray' not found. Nothing to delete.${NC}"
@@ -1020,7 +1656,7 @@ restore_deployment() {
 # Function to restore Xray container
 restore_xray() {
     echo -e "\n${YELLOW}Restoring Xray deployment...${NC}"
-    
+
     # Check if container already exists
     if sudo docker ps -a -q -f name="^/xray_server$" | grep -q .; then
         echo -e "${YELLOW}Xray container already exists. Checking status...${NC}"
@@ -1042,7 +1678,7 @@ restore_xray() {
     sudo docker pull teddysun/xray
 
     cd xray || return 1
-    
+
     echo -e "${YELLOW}Starting Xray container...${NC}"
     if sudo $DOCKER_COMPOSE_CMD up -d; then
         echo -e "${GREEN}Xray container has been restored and started!${NC}"
@@ -1056,14 +1692,14 @@ restore_xray() {
         cd ..
         return 1
     fi
-    
+
     cd ..
 }
 
 # Function to restore Shadowsocks container
 restore_shadowsocks() {
     echo -e "\n${YELLOW}Restoring Shadowsocks deployment...${NC}"
-    
+
     # Check if container already exists
     if sudo docker ps -a -q -f name="^/ssserver$" | grep -q .; then
         echo -e "${YELLOW}Shadowsocks container already exists. Checking status...${NC}"
@@ -1085,7 +1721,7 @@ restore_shadowsocks() {
     sudo docker pull ghcr.io/shadowsocks/ssserver-rust:latest
 
     cd shadowsocks || return 1
-    
+
     echo -e "${YELLOW}Starting Shadowsocks container...${NC}"
     if sudo $DOCKER_COMPOSE_CMD up -d; then
         echo -e "${GREEN}Shadowsocks container has been restored and started!${NC}"
@@ -1099,7 +1735,7 @@ restore_shadowsocks() {
         cd ..
         return 1
     fi
-    
+
     cd ..
 }
 
@@ -1125,8 +1761,9 @@ echo "5) Restore deployment from existing config"
 echo "6) Show VLESS links for current config"
 echo "7) Show SS links for current config"
 echo "8) Delete container and config (Xray / Shadowsocks)"
-echo "9) Exit"
-read -p "Enter your choice [0-9]: " choice
+echo "9) Manage Xray per-user data quotas"
+echo "10) Exit"
+read -p "Enter your choice [0-10]: " choice
 
 case $choice in
     0)
@@ -1210,6 +1847,12 @@ case $choice in
         esac
         ;;
     9)
+        if ! check_xray_requirements; then
+            exit 1
+        fi
+        manage_xray_quotas
+        ;;
+    10)
         echo -e "${GREEN}Goodbye!${NC}"
         exit 0
         ;;
