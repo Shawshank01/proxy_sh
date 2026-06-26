@@ -5,12 +5,13 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.3.1"
+SCRIPT_VERSION="3.3.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
 DEFAULT_SS_PORT=80
 DEFAULT_QUOTA_TIMEZONE="UTC"
+DEFAULT_USER_LIMIT_MB=204800
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -279,11 +280,11 @@ install_xray() {
         return 1
     fi
 
-    read -p "How many shortIds do you need? [Default: $DEFAULT_SHORTIDS]: " num_shortids
-    num_shortids=${num_shortids:-$DEFAULT_SHORTIDS}
+    read -p "Default shortIds per user for generated links [Default: 1]: " default_shortids_per_user
+    default_shortids_per_user=${default_shortids_per_user:-1}
 
-    if ! [[ "$num_shortids" =~ ^[0-9]+$ ]] || [ "$num_shortids" -lt 1 ]; then
-        echo -e "${RED}shortId count must be a positive integer.${NC}"
+    if ! [[ "$default_shortids_per_user" =~ ^[0-9]+$ ]] || [ "$default_shortids_per_user" -lt 1 ]; then
+        echo -e "${RED}Default shortIds per user must be a positive integer.${NC}"
         cd ..
         return 1
     fi
@@ -324,7 +325,12 @@ install_xray() {
 
     CLIENTS_JSON=""
     QUOTA_DB_LINES=""
+    SHORTIDS_JSON=""
     declare -A USED_EMAILS
+    declare -A USED_SHORTIDS
+    USER_UUIDS=()
+    USER_EMAILS=()
+    USER_SHORTIDS=()
 
     for i in $(seq 1 $num_uuids); do
         uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray uuid)
@@ -345,7 +351,48 @@ install_xray() {
         done
         USED_EMAILS[$user_email]=1
 
+        read -p "How many shortIds for generated links of ${user_email}? [Default: ${default_shortids_per_user}]: " user_shortids_count
+        user_shortids_count=${user_shortids_count:-$default_shortids_per_user}
+        if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]] || [ "$user_shortids_count" -lt 1 ]; then
+            echo -e "${RED}shortId count for ${user_email} must be a positive integer.${NC}"
+            cd ..
+            return 1
+        fi
+
+        user_shortids_csv=""
+        for sid_idx in $(seq 1 $user_shortids_count); do
+            while true; do
+                shortid=$(openssl rand -hex 4) # Generates 8 characters
+                if [ -z "${USED_SHORTIDS[$shortid]:-}" ]; then
+                    USED_SHORTIDS[$shortid]=1
+                    break
+                fi
+            done
+
+            if [ -n "$SHORTIDS_JSON" ]; then
+                SHORTIDS_JSON+=","
+            fi
+            SHORTIDS_JSON+="\"$shortid\""
+
+            if [ -n "$user_shortids_csv" ]; then
+                user_shortids_csv+=","
+            fi
+            user_shortids_csv+="$shortid"
+        done
+
         read -p "Set monthly data limit for ${user_email}? [y/N]: " set_limit
+         user_limit_mb=0
+         if [[ "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
+             while true; do
+-                read -p "Enter monthly limit for ${user_email} in MB: " user_limit_mb
++                read -p "Enter monthly limit for ${user_email} in MB [Default: ${DEFAULT_USER_LIMIT_MB}]: " user_limit_mb
++                user_limit_mb=${user_limit_mb:-$DEFAULT_USER_LIMIT_MB}
+                 if [[ "$user_limit_mb" =~ ^[0-9]+$ ]] && [ "$user_limit_mb" -gt 0 ]; then
+                     break
+                 fi
+                 echo -e "${RED}Please enter a positive integer MB value.${NC}"
+             done
+         fi
         user_limit_mb=0
         if [[ "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
             while true; do
@@ -369,15 +416,10 @@ install_xray() {
         if [ "$i" -lt "$num_uuids" ]; then
             QUOTA_DB_LINES+=$'\n'
         fi
-    done
 
-    SHORTIDS_JSON=""
-    for i in $(seq 1 $num_shortids); do
-        shortid=$(openssl rand -hex 4) # Generates 8 characters
-        SHORTIDS_JSON+="\"$shortid\""
-        if [ "$i" -lt "$num_shortids" ]; then
-            SHORTIDS_JSON+=","
-        fi
+        USER_UUIDS+=("$uuid")
+        USER_EMAILS+=("$user_email")
+        USER_SHORTIDS+=("$user_shortids_csv")
     done
 
     # Generate random XHTTP path for security
@@ -699,14 +741,19 @@ EOL
         exit 1
     fi
 
-    # Parse UUIDs/shortIds for vless link generation (one link per shortId)
+    # Generate links using each user's assigned shortIds only
     echo -e "\n${GREEN}VLESS Links:${NC}"
-    SHORTIDS=$(echo -e "$SHORTIDS_JSON" | grep -oE '"[a-f0-9]+"' | tr -d '"')
-    UUIDS=$(echo "$CLIENTS_JSON" | tr ',' '\n' | grep -oE '"id": "[a-f0-9\-]{36}"' | sed 's/"id": "\([a-f0-9\-]\{36\}\)"/\1/')
     LINKS=""
-    for uuid in $UUIDS; do
-        for shortid in $SHORTIDS; do
-            link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$shortid&type=xhttp&path=%2F$XHTTP_PATH#$REMARKS"
+    REMARKS_URL=${REMARKS// /%20}
+
+    for idx in "${!USER_UUIDS[@]}"; do
+        uuid=${USER_UUIDS[$idx]}
+        user_email=${USER_EMAILS[$idx]}
+        user_email_url=${user_email// /%20}
+
+        IFS=',' read -r -a sid_list <<< "${USER_SHORTIDS[$idx]}"
+        for shortid in "${sid_list[@]}"; do
+            link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$shortid&type=xhttp&path=%2F$XHTTP_PATH#${REMARKS_URL}-${user_email_url}"
             echo "$link"
             LINKS+="$link\n"
         done
