@@ -23,8 +23,7 @@ For the freedom of the internet!
 
 1.  **Download and execute the script:**
     ```bash
-    wget https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh
-    chmod +x proxy.sh
+    wget https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh && chmod +x proxy.sh
     ```
 
 2.  **Run the script:**
