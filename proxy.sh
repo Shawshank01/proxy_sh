@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.3.3"
+SCRIPT_VERSION="3.3.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -371,9 +371,9 @@ install_xray() {
             user_shortids_csv+="$shortid"
         done
 
-        read -p "Set monthly data limit for ${user_email}? [y/N]: " set_limit
+        read -p "Set monthly data limit for ${user_email}? [Y/n]: " set_limit
         user_limit_mb=0
-        if [[ "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
+        if [[ -z "$set_limit" || "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
             while true; do
                 read -p "Enter monthly limit for ${user_email} in MB [Default: ${DEFAULT_USER_LIMIT_MB}]: " user_limit_mb
                 user_limit_mb=${user_limit_mb:-$DEFAULT_USER_LIMIT_MB}
@@ -756,8 +756,8 @@ EOL
 
     echo -e "${GREEN}Saved quota metadata:${NC} xray/user_limits.conf, xray/user_limits.db"
 
-    read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
-    if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
+    read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm
+    if [[ -z "$start_confirm" || "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
         sudo $DOCKER_COMPOSE_CMD up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
@@ -862,8 +862,8 @@ EOL
     read -p "Enter a remarks name for this server: " REMARKS
     REMARKS=${REMARKS:-shadowsocks_rust}
 
-    read -p "Is the configuration correct? Do you want to start the container? [y/N]: " start_confirm
-    if [[ "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
+    read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm
+    if [[ -z "$start_confirm" || "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
         if sudo $DOCKER_COMPOSE_CMD up -d; then
             echo -e "${GREEN}Shadowsocks container has been started!${NC}"
             echo "Remember to open port ${ss_port} (TCP & UDP) in your server's firewall."
