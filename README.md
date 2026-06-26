@@ -35,6 +35,18 @@ For the freedom of the internet!
 
 3.  **Choose an option from the menu.**
 
+## Root User Handling
+
+This script is designed to run as a **non-root** user.
+
+- If you run it as `root`, it will warn and offer to help you create or reuse a non-root account.
+- If you accept, it can:
+  - create the user (if needed),
+  - prompt for that user's password,
+  - add the user to `sudo` (or `wheel`) group when available,
+  - relaunch the script as that non-root user automatically.
+- If you decline, the script exits.
+
 ## Menu Options
 
 -   **0) Update this script**: Checks for a new version on GitHub and updates itself.

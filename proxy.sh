@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="3.3.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1741,10 +1741,67 @@ restore_shadowsocks() {
 
 # --- Main Script ---
 
+handle_root_user_flow() {
+    echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
+    read -p "Do you want to create/use a non-root user now and relaunch the script? [y/N]: " root_flow_confirm
+    if [[ "$root_flow_confirm" != "y" && "$root_flow_confirm" != "Y" ]]; then
+        exit 1
+    fi
+
+    if ! command -v useradd >/dev/null 2>&1; then
+        echo -e "${RED}'useradd' command not found. Please create a non-root user manually, then run this script as that user.${NC}"
+        exit 1
+    fi
+
+    read -p "Enter non-root username to use/create: " new_username
+    if [ -z "$new_username" ]; then
+        echo -e "${RED}Username cannot be empty.${NC}"
+        exit 1
+    fi
+
+    if ! [[ "$new_username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+        echo -e "${RED}Invalid username. Use lowercase letters, numbers, '_' or '-' and start with a letter or '_'.${NC}"
+        exit 1
+    fi
+
+    if id "$new_username" >/dev/null 2>&1; then
+        echo -e "${YELLOW}User '$new_username' already exists. Reusing it.${NC}"
+    else
+        echo -e "${YELLOW}Creating user '$new_username'...${NC}"
+        useradd -m -s /bin/bash "$new_username"
+        echo -e "${YELLOW}Set a password for '$new_username':${NC}"
+        passwd "$new_username"
+    fi
+
+    if getent group sudo >/dev/null 2>&1; then
+        usermod -aG sudo "$new_username"
+        echo -e "${GREEN}Added '$new_username' to sudo group.${NC}"
+    elif getent group wheel >/dev/null 2>&1; then
+        usermod -aG wheel "$new_username"
+        echo -e "${GREEN}Added '$new_username' to wheel group.${NC}"
+    else
+        echo -e "${YELLOW}Could not detect sudo/wheel group automatically.${NC}"
+        echo -e "${YELLOW}Please grant sudo privileges manually if needed.${NC}"
+    fi
+
+    local current_dir script_path escaped_dir escaped_script
+    current_dir=$(pwd)
+    script_path="$0"
+
+    if command -v realpath >/dev/null 2>&1; then
+        script_path=$(realpath "$0" 2>/dev/null || echo "$0")
+    fi
+
+    printf -v escaped_dir '%q' "$current_dir"
+    printf -v escaped_script '%q' "$script_path"
+
+    echo -e "${GREEN}Relaunching as '$new_username'...${NC}"
+    exec su - "$new_username" -c "cd $escaped_dir && bash $escaped_script"
+}
+
 # Make sure the script is not run as root
 if [ "$EUID" -eq 0 ]; then
-  echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
-  exit 1
+  handle_root_user_flow
 fi
 
 # CHECK DEPENDENCIES NOW (Running as non-root, will use sudo inside)
