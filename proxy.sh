@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.3.0"
+SCRIPT_VERSION="3.3.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1784,19 +1784,35 @@ handle_root_user_flow() {
         echo -e "${YELLOW}Please grant sudo privileges manually if needed.${NC}"
     fi
 
-    local current_dir script_path escaped_dir escaped_script
-    current_dir=$(pwd)
+    local script_path target_home launch_script escaped_launch_script escaped_probe_path
     script_path="$0"
 
     if command -v realpath >/dev/null 2>&1; then
         script_path=$(realpath "$0" 2>/dev/null || echo "$0")
     fi
 
-    printf -v escaped_dir '%q' "$current_dir"
-    printf -v escaped_script '%q' "$script_path"
+    target_home=$(getent passwd "$new_username" | cut -d: -f6)
+    if [ -z "$target_home" ]; then
+        target_home="/home/$new_username"
+    fi
+
+    launch_script="$script_path"
+
+    # If the target user cannot read the current script path (e.g. /root/proxy.sh),
+    # copy it to the target user's home and run from there.
+    printf -v escaped_probe_path '%q' "$script_path"
+    if [ ! -r "$script_path" ] || ! su - "$new_username" -c "test -r $escaped_probe_path" >/dev/null 2>&1; then
+        launch_script="$target_home/proxy.sh"
+        cp "$script_path" "$launch_script"
+        chown "$new_username":"$new_username" "$launch_script"
+        chmod 700 "$launch_script"
+        echo -e "${YELLOW}Current script path is not readable by '$new_username'. Copied launcher to ${launch_script}.${NC}"
+    fi
+
+    printf -v escaped_launch_script '%q' "$launch_script"
 
     echo -e "${GREEN}Relaunching as '$new_username'...${NC}"
-    exec su - "$new_username" -c "cd $escaped_dir && bash $escaped_script"
+    exec su - "$new_username" -c "bash $escaped_launch_script"
 }
 
 # Make sure the script is not run as root
