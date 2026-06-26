@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.3.2"
+SCRIPT_VERSION="3.3.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -280,15 +280,6 @@ install_xray() {
         return 1
     fi
 
-    read -p "Default shortIds per user for generated links [Default: 1]: " default_shortids_per_user
-    default_shortids_per_user=${default_shortids_per_user:-1}
-
-    if ! [[ "$default_shortids_per_user" =~ ^[0-9]+$ ]] || [ "$default_shortids_per_user" -lt 1 ]; then
-        echo -e "${RED}Default shortIds per user must be a positive integer.${NC}"
-        cd ..
-        return 1
-    fi
-
     read -p "Timezone for quota billing cycles [Default: $DEFAULT_QUOTA_TIMEZONE]: " QUOTA_TIMEZONE
     QUOTA_TIMEZONE=${QUOTA_TIMEZONE:-$DEFAULT_QUOTA_TIMEZONE}
     if ! TZ="$QUOTA_TIMEZONE" date +%s >/dev/null 2>&1; then
@@ -351,8 +342,8 @@ install_xray() {
         done
         USED_EMAILS[$user_email]=1
 
-        read -p "How many shortIds for generated links of ${user_email}? [Default: ${default_shortids_per_user}]: " user_shortids_count
-        user_shortids_count=${user_shortids_count:-$default_shortids_per_user}
+        read -p "How many shortIds for generated links of ${user_email}? [Default: 1]: " user_shortids_count
+        user_shortids_count=${user_shortids_count:-1}
         if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]] || [ "$user_shortids_count" -lt 1 ]; then
             echo -e "${RED}shortId count for ${user_email} must be a positive integer.${NC}"
             cd ..
@@ -381,22 +372,11 @@ install_xray() {
         done
 
         read -p "Set monthly data limit for ${user_email}? [y/N]: " set_limit
-         user_limit_mb=0
-         if [[ "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
-             while true; do
--                read -p "Enter monthly limit for ${user_email} in MB: " user_limit_mb
-+                read -p "Enter monthly limit for ${user_email} in MB [Default: ${DEFAULT_USER_LIMIT_MB}]: " user_limit_mb
-+                user_limit_mb=${user_limit_mb:-$DEFAULT_USER_LIMIT_MB}
-                 if [[ "$user_limit_mb" =~ ^[0-9]+$ ]] && [ "$user_limit_mb" -gt 0 ]; then
-                     break
-                 fi
-                 echo -e "${RED}Please enter a positive integer MB value.${NC}"
-             done
-         fi
         user_limit_mb=0
         if [[ "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
             while true; do
-                read -p "Enter monthly limit for ${user_email} in MB: " user_limit_mb
+                read -p "Enter monthly limit for ${user_email} in MB [Default: ${DEFAULT_USER_LIMIT_MB}]: " user_limit_mb
+                user_limit_mb=${user_limit_mb:-$DEFAULT_USER_LIMIT_MB}
                 if [[ "$user_limit_mb" =~ ^[0-9]+$ ]] && [ "$user_limit_mb" -gt 0 ]; then
                     break
                 fi

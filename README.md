@@ -52,7 +52,7 @@ This script is designed to run as a **non-root** user.
 -   **0) Update this script**: Checks for a new version on GitHub and updates itself.
 -   **1) Environment Check**: Verifies the Linux distribution and installs Docker and Docker Compose if needed. Run this first if you are on a new server.
 -   **2) Install Xray (VLESS-XHTTP-Reality)**: The main installation process. It will:
-    -   Ask for the number of users and default `shortIds` per user, then allows per-user `shortIds` count.
+    -   Ask for the number of users, then allows setting per-user `shortIds` count.
     -   Prompt for each user's label/email and optional monthly MB limit.
     -   Generate `docker-compose.yml`, `server.jsonc`, `user_limits.conf`, and `user_limits.db` in `xray/`.
     -   Ask for your server's IP/domain and a remarks name to generate VLESS links.
