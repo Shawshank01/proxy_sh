@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.3.4"
+SCRIPT_VERSION="3.4.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -326,21 +326,14 @@ install_xray() {
     for i in $(seq 1 $num_uuids); do
         uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray uuid)
 
-        default_label="user${i}"
-        read -p "Enter label/email for user ${i} [${default_label}]: " user_label
-        user_label=${user_label:-$default_label}
-        user_email=$(echo "$user_label" | tr '[:upper:]' '[:lower:]' | sed -E 's/[[:space:]]+/_/g; s/[^a-z0-9_.-]//g')
-        if [ -z "$user_email" ]; then
-            user_email="$default_label"
-        fi
-
-        base_email="$user_email"
-        suffix=2
-        while [ -n "${USED_EMAILS[$user_email]:-}" ]; do
-            user_email="${base_email}_${suffix}"
-            suffix=$((suffix + 1))
+        while true; do
+            user_email="u$(openssl rand -hex 8)"
+            if [ -z "${USED_EMAILS[$user_email]:-}" ]; then
+                USED_EMAILS[$user_email]=1
+                break
+            fi
         done
-        USED_EMAILS[$user_email]=1
+        echo "Generated user ID for user ${i}: ${user_email}"
 
         read -p "How many shortIds for generated links of ${user_email}? [Default: 1]: " user_shortids_count
         user_shortids_count=${user_shortids_count:-1}
@@ -1156,50 +1149,59 @@ collect_xray_user_stats() {
     local map_file=$1
 
     : > "$map_file"
+    COLLECTED_STATS_COUNT=0
+    XRAY_STATS_LAST_ERROR=""
 
     if ! sudo docker ps -q -f name="^/xray_server$" | grep -q .; then
         return 0
     fi
 
     local raw_stats
-    raw_stats=$(sudo docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>/dev/null || true)
+    raw_stats=$(sudo docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
 
     if [ -z "$raw_stats" ]; then
+        XRAY_STATS_LAST_ERROR="empty statsquery output"
         return 0
     fi
 
-    echo "$raw_stats" | awk '
-        /name: "user>>>.*>>>traffic>>>(uplink|downlink)"/ {
-            line = $0
-            sub(/^.*name: "user>>>/, "", line)
-            split(line, pair, ">>>traffic>>>")
-            user = pair[1]
-            dir = pair[2]
-            sub(/".*$/, "", dir)
+    if echo "$raw_stats" | grep -qiE "failed|error|unavailable|connection refused"; then
+        XRAY_STATS_LAST_ERROR=$(echo "$raw_stats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+    fi
 
-            if ($0 ~ /value:[[:space:]]*[0-9]+/) {
-                val = $0
-                sub(/^.*value:[[:space:]]*/, "", val)
-                sub(/[^0-9].*$/, "", val)
-                print user "|" dir "|" val
-                pending_user = ""
-                pending_dir = ""
-            } else {
-                pending_user = user
-                pending_dir = dir
-            }
-            next
-        }
+    local pending_user=""
+    local pending_dir=""
+    local line name_info value_info user dir value
 
-        pending_user != "" && /value:[[:space:]]*[0-9]+/ {
-            val = $0
-            sub(/^.*value:[[:space:]]*/, "", val)
-            sub(/[^0-9].*$/, "", val)
-            print pending_user "|" pending_dir "|" val
-            pending_user = ""
-            pending_dir = ""
-        }
-    ' > "$map_file"
+    while IFS= read -r line; do
+        name_info=$(echo "$line" | sed -nE 's/.*user>>>([^>"]+)>>>traffic>>>(uplink|downlink).*/\1|\2/p')
+        if [ -n "$name_info" ]; then
+            user=${name_info%%|*}
+            dir=${name_info##*|}
+            pending_user="$user"
+            pending_dir="$dir"
+
+            value_info=$(echo "$line" | sed -nE 's/.*["[:space:]]value["[:space:]]*:[[:space:]]*"?([0-9]+)"?.*/\1/p')
+            if [ -n "$value_info" ]; then
+                echo "${pending_user}|${pending_dir}|${value_info}" >> "$map_file"
+                pending_user=""
+                pending_dir=""
+            fi
+            continue
+        fi
+
+        if [ -n "$pending_user" ]; then
+            value=$(echo "$line" | sed -nE 's/.*["[:space:]]value["[:space:]]*:[[:space:]]*"?([0-9]+)"?.*/\1/p')
+            if [ -n "$value" ]; then
+                echo "${pending_user}|${pending_dir}|${value}" >> "$map_file"
+                pending_user=""
+                pending_dir=""
+            fi
+        fi
+    done <<< "$raw_stats"
+
+    if [ -s "$map_file" ]; then
+        COLLECTED_STATS_COUNT=$(wc -l < "$map_file" | tr -d ' ')
+    fi
 }
 
 check_and_apply_xray_quotas() {
@@ -1220,6 +1222,14 @@ check_and_apply_xray_quotas() {
     local stats_map_file
     stats_map_file=$(mktemp)
     collect_xray_user_stats "$stats_map_file"
+
+    if [ "${COLLECTED_STATS_COUNT:-0}" -eq 0 ]; then
+        echo -e "${YELLOW}Warning: no per-user traffic stats were collected from Xray.${NC}"
+        if [ -n "${XRAY_STATS_LAST_ERROR:-}" ]; then
+            echo -e "${YELLOW}Xray stats response:${NC} ${XRAY_STATS_LAST_ERROR}"
+        fi
+        echo -e "${YELLOW}Usage values may remain unchanged until stats become available.${NC}"
+    fi
 
     declare -A uplink_map
     declare -A downlink_map
@@ -1475,6 +1485,73 @@ change_xray_user_limit() {
     fi
 }
 
+configure_xray_quota_auto_check() {
+    local script_path
+    script_path="$0"
+
+    if command -v realpath >/dev/null 2>&1; then
+        script_path=$(realpath "$0" 2>/dev/null || echo "$0")
+    fi
+
+    if [ ! -f "$script_path" ]; then
+        echo -e "${RED}Cannot determine script path for cron setup.${NC}"
+        return 1
+    fi
+
+    local cron_cmd cron_expr
+    cron_cmd="bash $(printf '%q' "$script_path") --quota-check"
+
+    echo ""
+    echo "Set automatic quota check interval:"
+    echo "1) Every 1 minute"
+    echo "2) Every 2 minutes"
+    echo "3) Every 5 minutes"
+    echo "4) Disable auto quota check"
+    read -p "Enter your choice [1-4]: " auto_choice
+
+    case $auto_choice in
+        1)
+            cron_expr="* * * * *"
+            ;;
+        2)
+            cron_expr="*/2 * * * *"
+            ;;
+        3)
+            cron_expr="*/5 * * * *"
+            ;;
+        4)
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            return 1
+            ;;
+    esac
+
+    local current_cron
+    current_cron=$(crontab -l 2>/dev/null || true)
+    current_cron=$(echo "$current_cron" | grep -v "--quota-check" || true)
+
+    if [ "$auto_choice" = "4" ]; then
+        if [ -n "$current_cron" ]; then
+            printf "%s\n" "$current_cron" | crontab -
+        else
+            crontab -r 2>/dev/null || true
+        fi
+        echo -e "${GREEN}Automatic quota check disabled.${NC}"
+        return 0
+    fi
+
+    local new_entry="${cron_expr} ${cron_cmd} >/dev/null 2>&1"
+    if [ -n "$current_cron" ]; then
+        printf "%s\n%s\n" "$current_cron" "$new_entry" | crontab -
+    else
+        printf "%s\n" "$new_entry" | crontab -
+    fi
+
+    echo -e "${GREEN}Automatic quota check enabled:${NC} ${cron_expr}"
+    echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
+}
+
 manage_xray_quotas() {
     while true; do
         echo ""
@@ -1483,8 +1560,9 @@ manage_xray_quotas() {
         echo "2) Check/apply quotas now"
         echo "3) Reset one user's current cycle usage"
         echo "4) Change one user's monthly limit"
+        echo "5) Configure automatic quota checks (cron)"
         echo "0) Back"
-        read -p "Enter your choice [0-4]: " quota_choice
+        read -p "Enter your choice [0-5]: " quota_choice
 
         case $quota_choice in
             1)
@@ -1498,6 +1576,9 @@ manage_xray_quotas() {
                 ;;
             4)
                 change_xray_user_limit
+                ;;
+            5)
+                configure_xray_quota_auto_check
                 ;;
             0)
                 break
@@ -1845,6 +1926,14 @@ handle_root_user_flow() {
 # Make sure the script is not run as root
 if [ "$EUID" -eq 0 ]; then
   handle_root_user_flow
+fi
+
+# Non-interactive mode for cron-based quota checks
+if [ "${1:-}" = "--quota-check" ]; then
+    if check_xray_requirements; then
+        check_and_apply_xray_quotas
+    fi
+    exit 0
 fi
 
 # CHECK DEPENDENCIES NOW (Running as non-root, will use sudo inside)
