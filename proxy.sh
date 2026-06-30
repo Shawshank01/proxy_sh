@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.4.0"
+SCRIPT_VERSION="3.4.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1939,113 +1939,117 @@ fi
 # CHECK DEPENDENCIES NOW (Running as non-root, will use sudo inside)
 check_dependencies
 
-echo -e "${YELLOW}--- Proxy Installer v${SCRIPT_VERSION} ---${NC}"
-echo "Please choose an option:"
-echo "0) Update this script"
-echo "1) Environment Check (Check distro and install Docker)"
-echo "2) Install Xray (VLESS-XHTTP-Reality)"
-echo "3) Install Shadowsocks (ssserver-rust)"
-echo "4) Update existing container (Xray / Shadowsocks)"
-echo "5) Restore deployment from existing config"
-echo "6) Show VLESS links for current config"
-echo "7) Show SS links for current config"
-echo "8) Delete container and config (Xray / Shadowsocks)"
-echo "9) Manage Xray per-user data quotas"
-echo "10) Exit"
-read -p "Enter your choice [0-10]: " choice
+while true; do
+    echo -e "${YELLOW}--- Proxy Installer v${SCRIPT_VERSION} ---${NC}"
+    echo "Please choose an option:"
+    echo "0) Update this script"
+    echo "1) Environment Check (Check distro and install Docker)"
+    echo "2) Install Xray (VLESS-XHTTP-Reality)"
+    echo "3) Install Shadowsocks (ssserver-rust)"
+    echo "4) Update existing container (Xray / Shadowsocks)"
+    echo "5) Restore deployment from existing config"
+    echo "6) Show VLESS links for current config"
+    echo "7) Show SS links for current config"
+    echo "8) Delete container and config (Xray / Shadowsocks)"
+    echo "9) Manage Xray per-user data quotas"
+    echo "10) Exit"
+    read -p "Enter your choice [0-10]: " choice
 
-case $choice in
-    0)
-        update_script
-        ;;
-    1)
-        check_environment
-        ;;
-    2)
-        if ! check_xray_requirements; then
-            exit 1
-        fi
-        install_xray
-        ;;
-    3)
-        if ! check_xray_requirements; then
-            exit 1
-        fi
-        install_shadowsocks
-        ;;
-    4)
-        if ! check_xray_requirements; then
-            exit 1
-        fi
-        echo "Which container do you want to update?"
-        echo "1) Xray"
-        echo "2) Shadowsocks"
-        echo "3) Both"
-        read -p "Enter your choice [1-3]: " update_choice
-        case $update_choice in
-            1)
-                update_xray
-                ;;
-            2)
-                update_shadowsocks
-                ;;
-            3)
-                update_xray
-                update_shadowsocks
-                ;;
-            *)
-                echo -e "${RED}Invalid choice. Exiting.${NC}"
-                ;;
-        esac
-        ;;
-    5)
-        if ! check_xray_requirements; then
-            exit 1
-        fi
-        restore_deployment
-        ;;
-    6)
-        show_links
-        ;;
-    7)
-        show_ss_links
-        ;;
-    8)
-        if ! check_xray_requirements; then
-            exit 1
-        fi
-        echo "Which container do you want to delete?"
-        echo "1) Xray"
-        echo "2) Shadowsocks"
-        echo "3) Both"
-        read -p "Enter your choice [1-3]: " delete_choice
-        case $delete_choice in
-            1)
-                delete_xray
-                ;;
-            2)
-                delete_shadowsocks
-                ;;
-            3)
-                delete_xray
-                delete_shadowsocks
-                ;;
-            *)
-                echo -e "${RED}Invalid choice. Exiting.${NC}"
-                ;;
-        esac
-        ;;
-    9)
-        if ! check_xray_requirements; then
-            exit 1
-        fi
-        manage_xray_quotas
-        ;;
-    10)
-        echo -e "${GREEN}Goodbye!${NC}"
-        exit 0
-        ;;
-    *)
-        echo -e "${RED}Invalid choice. Exiting.${NC}"
-        ;;
-esac
+    case $choice in
+        0)
+            update_script
+            ;;
+        1)
+            check_environment
+            ;;
+        2)
+            if ! check_xray_requirements; then
+                continue
+            fi
+            install_xray
+            ;;
+        3)
+            if ! check_xray_requirements; then
+                continue
+            fi
+            install_shadowsocks
+            ;;
+        4)
+            if ! check_xray_requirements; then
+                continue
+            fi
+            echo "Which container do you want to update?"
+            echo "1) Xray"
+            echo "2) Shadowsocks"
+            echo "3) Both"
+            read -p "Enter your choice [1-3]: " update_choice
+            case $update_choice in
+                1)
+                    update_xray
+                    ;;
+                2)
+                    update_shadowsocks
+                    ;;
+                3)
+                    update_xray
+                    update_shadowsocks
+                    ;;
+                *)
+                    echo -e "${RED}Invalid choice.${NC}"
+                    ;;
+            esac
+            ;;
+        5)
+            if ! check_xray_requirements; then
+                continue
+            fi
+            restore_deployment
+            ;;
+        6)
+            show_links
+            ;;
+        7)
+            show_ss_links
+            ;;
+        8)
+            if ! check_xray_requirements; then
+                continue
+            fi
+            echo "Which container do you want to delete?"
+            echo "1) Xray"
+            echo "2) Shadowsocks"
+            echo "3) Both"
+            read -p "Enter your choice [1-3]: " delete_choice
+            case $delete_choice in
+                1)
+                    delete_xray
+                    ;;
+                2)
+                    delete_shadowsocks
+                    ;;
+                3)
+                    delete_xray
+                    delete_shadowsocks
+                    ;;
+                *)
+                    echo -e "${RED}Invalid choice.${NC}"
+                    ;;
+            esac
+            ;;
+        9)
+            if ! check_xray_requirements; then
+                continue
+            fi
+            manage_xray_quotas
+            ;;
+        10)
+            echo -e "${GREEN}Goodbye!${NC}"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            ;;
+    esac
+
+    echo ""
+done
