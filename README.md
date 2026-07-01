@@ -71,7 +71,7 @@ This script is designed to run as a **non-root** user.
     -   Check/apply quota suspension and automatic re-enable on next user cycle
     -   Reset one user's current-cycle usage
     -   Change one user's monthly limit
-    -   Configure automatic quota checks via cron (1/2/5-minute intervals)
+    -   Configure automatic quota checks via systemd timer (recommended on Ubuntu) or cron fallback (1/2/5-minute intervals)
 -   **10) Exit**
 
 ## Recommended Clients
@@ -89,7 +89,7 @@ Just copy the vless:/ss: link and paste it into the client and enjoy!
   - `xray/user_limits.conf` (timezone)
   - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
 - Billing cycle is per-user **anniversary monthly** (from account creation timestamp to next month same local time, clamped to month-end when needed).
-- Quota checks run when you execute menu option `9 -> 2` (recommended to automate with cron for timely suspension/re-enable).
+- Quota checks run when you execute menu option `9 -> 2` (recommended to automate with a systemd timer on Ubuntu, or cron fallback, for timely suspension/re-enable).
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
     - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.  

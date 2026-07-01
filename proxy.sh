@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.4.2"
+SCRIPT_VERSION="3.5.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1485,13 +1485,99 @@ change_xray_user_limit() {
     fi
 }
 
-configure_xray_quota_auto_check() {
-    local script_path
-    script_path="$0"
-
+resolve_script_path() {
+    local path="$0"
     if command -v realpath >/dev/null 2>&1; then
-        script_path=$(realpath "$0" 2>/dev/null || echo "$0")
+        path=$(realpath "$0" 2>/dev/null || echo "$0")
     fi
+    echo "$path"
+}
+
+systemd_available() {
+    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+}
+
+disable_xray_quota_cron_silent() {
+    if ! command -v crontab >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local current_cron
+    current_cron=$(crontab -l 2>/dev/null || true)
+    current_cron=$(echo "$current_cron" | grep -v -- "--quota-check" || true)
+
+    if [ -n "$current_cron" ]; then
+        printf "%s\n" "$current_cron" | crontab -
+    else
+        crontab -r 2>/dev/null || true
+    fi
+}
+
+disable_xray_quota_systemd_silent() {
+    if ! systemd_available; then
+        return 0
+    fi
+
+    sudo systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
+    sudo rm -f /etc/systemd/system/xray-quota-check.timer /etc/systemd/system/xray-quota-check.service >/dev/null 2>&1 || true
+    sudo systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+ensure_crontab_available() {
+    if command -v crontab >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}crontab command not found. Automatic quota checks require cron.${NC}"
+    read -p "Install cron automatically now? [Y/n]: " install_cron_confirm
+    if [[ "$install_cron_confirm" == "n" || "$install_cron_confirm" == "N" ]]; then
+        return 1
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        if sudo apt-get install -y cron; then
+            sudo systemctl enable --now cron 2>/dev/null || true
+        else
+            echo -e "${RED}Failed to install cron via apt-get.${NC}"
+            return 1
+        fi
+    elif command -v dnf >/dev/null 2>&1; then
+        if sudo dnf install -y cronie; then
+            sudo systemctl enable --now crond 2>/dev/null || true
+        else
+            echo -e "${RED}Failed to install cronie via dnf.${NC}"
+            return 1
+        fi
+    elif command -v yum >/dev/null 2>&1; then
+        if sudo yum install -y cronie; then
+            sudo systemctl enable --now crond 2>/dev/null || true
+        else
+            echo -e "${RED}Failed to install cronie via yum.${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}Unsupported package manager. Please install cron manually, then retry.${NC}"
+        return 1
+    fi
+
+    if command -v crontab >/dev/null 2>&1; then
+        echo -e "${GREEN}Cron installed successfully.${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}Cron installation finished but 'crontab' is still unavailable.${NC}"
+    return 1
+}
+
+configure_xray_quota_auto_check_cron() {
+    if ! ensure_crontab_available; then
+        echo -e "${RED}Cannot configure automatic checks without crontab.${NC}"
+        return 1
+    fi
+
+    local script_path
+    script_path=$(resolve_script_path)
 
     if [ ! -f "$script_path" ]; then
         echo -e "${RED}Cannot determine script path for cron setup.${NC}"
@@ -1502,11 +1588,11 @@ configure_xray_quota_auto_check() {
     cron_cmd="bash $(printf '%q' "$script_path") --quota-check"
 
     echo ""
-    echo "Set automatic quota check interval:"
+    echo "Set automatic quota check interval (cron):"
     echo "1) Every 1 minute"
     echo "2) Every 2 minutes"
     echo "3) Every 5 minutes"
-    echo "4) Disable auto quota check"
+    echo "4) Disable cron auto quota check"
     read -p "Enter your choice [1-4]: " auto_choice
 
     case $auto_choice in
@@ -1537,7 +1623,7 @@ configure_xray_quota_auto_check() {
         else
             crontab -r 2>/dev/null || true
         fi
-        echo -e "${GREEN}Automatic quota check disabled.${NC}"
+        echo -e "${GREEN}Cron automatic quota check disabled.${NC}"
         return 0
     fi
 
@@ -1548,8 +1634,122 @@ configure_xray_quota_auto_check() {
         printf "%s\n" "$new_entry" | crontab -
     fi
 
-    echo -e "${GREEN}Automatic quota check enabled:${NC} ${cron_expr}"
+    echo -e "${GREEN}Cron automatic quota check enabled:${NC} ${cron_expr}"
     echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
+}
+
+configure_xray_quota_auto_check_systemd() {
+    if ! systemd_available; then
+        echo -e "${RED}Systemd is not available on this host.${NC}"
+        return 1
+    fi
+
+    local script_path script_dir unit_interval escaped_script escaped_dir
+    script_path=$(resolve_script_path)
+    script_dir=$(dirname "$script_path")
+    printf -v escaped_script '%q' "$script_path"
+    printf -v escaped_dir '%q' "$script_dir"
+
+    if [ ! -f "$script_path" ]; then
+        echo -e "${RED}Cannot determine script path for systemd timer setup.${NC}"
+        return 1
+    fi
+
+    echo ""
+    echo "Set automatic quota check interval (systemd timer):"
+    echo "1) Every 1 minute"
+    echo "2) Every 2 minutes"
+    echo "3) Every 5 minutes"
+    echo "4) Disable systemd timer auto quota check"
+    read -p "Enter your choice [1-4]: " auto_choice
+
+    case $auto_choice in
+        1)
+            unit_interval="1min"
+            ;;
+        2)
+            unit_interval="2min"
+            ;;
+        3)
+            unit_interval="5min"
+            ;;
+        4)
+            disable_xray_quota_systemd_silent
+            echo -e "${GREEN}Systemd timer automatic quota check disabled.${NC}"
+            return 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            return 1
+            ;;
+    esac
+
+    sudo tee /etc/systemd/system/xray-quota-check.service >/dev/null << EOL
+[Unit]
+Description=Xray per-user quota check
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc "cd $escaped_dir && bash $escaped_script --quota-check"
+EOL
+
+    sudo tee /etc/systemd/system/xray-quota-check.timer >/dev/null << EOL
+[Unit]
+Description=Run Xray quota check periodically
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=$unit_interval
+AccuracySec=10s
+Persistent=true
+Unit=xray-quota-check.service
+
+[Install]
+WantedBy=timers.target
+EOL
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now xray-quota-check.timer
+
+    # Avoid duplicate checks from cron if systemd timer is enabled.
+    disable_xray_quota_cron_silent
+
+    echo -e "${GREEN}Systemd timer automatic quota check enabled:${NC} every $unit_interval"
+    echo -e "${YELLOW}Check status: sudo systemctl status xray-quota-check.timer${NC}"
+    echo -e "${YELLOW}Logs: sudo journalctl -u xray-quota-check.service -n 50 --no-pager${NC}"
+}
+
+configure_xray_quota_auto_check() {
+    echo ""
+    echo "Choose scheduler for automatic quota checks:"
+    if systemd_available; then
+        echo "1) Systemd timer (recommended on Ubuntu 24.04+)"
+        echo "2) Cron"
+        echo "3) Disable all automatic quota checks"
+        read -p "Enter your choice [1-3]: " scheduler_choice
+
+        case $scheduler_choice in
+            1)
+                configure_xray_quota_auto_check_systemd
+                ;;
+            2)
+                configure_xray_quota_auto_check_cron
+                ;;
+            3)
+                disable_xray_quota_systemd_silent
+                disable_xray_quota_cron_silent
+                echo -e "${GREEN}Disabled all automatic quota checks.${NC}"
+                ;;
+            *)
+                echo -e "${RED}Invalid choice.${NC}"
+                ;;
+        esac
+    else
+        echo -e "${YELLOW}Systemd not detected. Falling back to cron configuration.${NC}"
+        configure_xray_quota_auto_check_cron
+    fi
 }
 
 manage_xray_quotas() {
@@ -1560,7 +1760,7 @@ manage_xray_quotas() {
         echo "2) Check/apply quotas now"
         echo "3) Reset one user's current cycle usage"
         echo "4) Change one user's monthly limit"
-        echo "5) Configure automatic quota checks (cron)"
+        echo "5) Configure automatic quota checks (systemd timer / cron)"
         echo "0) Back"
         read -p "Enter your choice [0-5]: " quota_choice
 
