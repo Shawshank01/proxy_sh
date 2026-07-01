@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.4.1"
+SCRIPT_VERSION="3.4.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1529,7 +1529,7 @@ configure_xray_quota_auto_check() {
 
     local current_cron
     current_cron=$(crontab -l 2>/dev/null || true)
-    current_cron=$(echo "$current_cron" | grep -v "--quota-check" || true)
+    current_cron=$(echo "$current_cron" | grep -v -- "--quota-check" || true)
 
     if [ "$auto_choice" = "4" ]; then
         if [ -n "$current_cron" ]; then
