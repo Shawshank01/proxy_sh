@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.5.0"
+SCRIPT_VERSION="3.5.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -2123,17 +2123,17 @@ handle_root_user_flow() {
     exec su - "$new_username" -c "bash $escaped_launch_script"
 }
 
-# Make sure the script is not run as root
-if [ "$EUID" -eq 0 ]; then
-  handle_root_user_flow
-fi
-
-# Non-interactive mode for cron-based quota checks
+# Non-interactive mode for scheduler-based quota checks (cron/systemd)
 if [ "${1:-}" = "--quota-check" ]; then
     if check_xray_requirements; then
         check_and_apply_xray_quotas
     fi
     exit 0
+fi
+
+# Make sure interactive mode is not run as root
+if [ "$EUID" -eq 0 ]; then
+  handle_root_user_flow
 fi
 
 # CHECK DEPENDENCIES NOW (Running as non-root, will use sudo inside)
