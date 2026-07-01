@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.5.1"
+SCRIPT_VERSION="3.5.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1062,6 +1062,25 @@ read_xray_quota_timezone() {
     echo "$tz"
 }
 
+apply_preserved_file_metadata() {
+    local target_file="$1"
+    local temp_file="$2"
+
+    if [ -e "$target_file" ]; then
+        local uid gid mode
+        uid=$(stat -c %u "$target_file" 2>/dev/null || true)
+        gid=$(stat -c %g "$target_file" 2>/dev/null || true)
+        mode=$(stat -c %a "$target_file" 2>/dev/null || true)
+
+        if [ -n "$uid" ] && [ -n "$gid" ]; then
+            chown "$uid:$gid" "$temp_file" 2>/dev/null || true
+        fi
+        if [ -n "$mode" ]; then
+            chmod "$mode" "$temp_file" 2>/dev/null || true
+        fi
+    fi
+}
+
 sync_xray_clients_from_quota_db() {
     local db_file="xray/user_limits.db"
     local config_file="xray/server.jsonc"
@@ -1117,6 +1136,7 @@ sync_xray_clients_from_quota_db() {
         }
     ' "$config_file" > "$tmp_file"
 
+    apply_preserved_file_metadata "$config_file" "$tmp_file"
     mv "$tmp_file" "$config_file"
     echo -e "${GREEN}Updated Xray clients list from quota database.${NC}"
 }
@@ -1301,6 +1321,7 @@ check_and_apply_xray_quotas() {
         echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
     mv "$tmp_db" "$db_file"
 
     if [ "$config_changed" -eq 1 ]; then
@@ -1420,6 +1441,7 @@ reset_xray_user_usage() {
         echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
     mv "$tmp_db" "$db_file"
 
     if [ "$config_changed" -eq 1 ]; then
@@ -1477,6 +1499,7 @@ change_xray_user_limit() {
         echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
     mv "$tmp_db" "$db_file"
 
     if [ "$config_changed" -eq 1 ]; then
