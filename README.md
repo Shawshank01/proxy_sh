@@ -76,9 +76,9 @@ This script is designed to run as a **non-root** user.
 
 ## Recommended Clients
 
-- **iOS / macOS**: [Shadowrocket](https://apps.apple.com/us/app/shadowrocket/id932747118)
-- **Android**: [v2rayNG](https://github.com/2dust/v2rayNG), [v2RayTun](https://v2raytun.com)
-- **Windows**: [v2rayN](https://github.com/2dust/v2rayN)
+- **iOS / macOS** (US$ 2.99): [Shadowrocket](https://apps.apple.com/us/app/shadowrocket/id932747118)
+- **Android**: [v2rayNG](https://github.com/2dust/v2rayNG)
+- **Windows**: [Furious](https://github.com/LorenEteval/Furious)
 
 Just copy the vless:/ss: link and paste it into the client and enjoy!
 
