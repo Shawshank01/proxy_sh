@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.5.2"
+SCRIPT_VERSION="3.5.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -451,11 +451,17 @@ install_xray() {
             VALIDATION_ERRORS=1
         fi
 
-        # Check for HTTP/2 (H2) support
-        if echo "$PING_OUTPUT" | grep -qi "ALPN.*h2\|HTTP/2\|h2,"; then
-            echo -e "${GREEN}✓ HTTP/2 (H2) supported${NC}"
+        # Check for HTTP/2 (H2) support using curl
+        CURL_H2_HEADERS=$(curl -I --http2 --max-time 10 -sS "https://${PING_HOST}" 2>&1 || true)
+        if echo "$CURL_H2_HEADERS" | grep -qiE '^HTTP/2'; then
+            echo -e "${GREEN}✓ HTTP/2 (H2) supported (curl)${NC}"
         else
-            echo -e "${YELLOW}⚠ HTTP/2 (H2) not detected - Reality works best with H2${NC}"
+            echo -e "${YELLOW}⚠ HTTP/2 (H2) not detected by curl - Reality works best with H2${NC}"
+            if [ -n "$CURL_H2_HEADERS" ]; then
+                echo "----- curl --http2 output -----"
+                echo "$CURL_H2_HEADERS"
+                echo "-------------------------------"
+            fi
         fi
 
         # Check for connection errors

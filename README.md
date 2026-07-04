@@ -80,7 +80,8 @@ This script is designed to run as a **non-root** user.
 - **Android**: [v2rayNG](https://github.com/2dust/v2rayNG)
 - **Windows**: [Furious](https://github.com/LorenEteval/Furious)
 
-Just copy the vless:/ss: link and paste it into the client and enjoy!
+Copy the `vless://` or `ss://` link and paste it into the client and enjoy!  
+> Some clients may require further configuration steps after pasting the link.
 
 ## Configuration Details
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
@@ -93,7 +94,7 @@ Just copy the vless:/ss: link and paste it into the client and enjoy!
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
     - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.  
-    Example: `zum.com, www.ssg.com, www.jype.com`  
+    Example: `www.ssg.com`  
     - The installer probes your chosen domain with:
       ```bash
       sudo docker run --rm teddysun/xray:latest xray tls ping <target-domain>
