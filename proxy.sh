@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.5.3"
+SCRIPT_VERSION="3.6.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1878,31 +1878,70 @@ delete_shadowsocks() {
     echo -e "${GREEN}Shadowsocks container and config deleted successfully!${NC}"
 }
 
+fetch_latest_script_version() {
+    local cache_bust latest_version
+    cache_bust="?$(date +%s)"
+    latest_version=$(curl -fsSL --max-time 10 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" 2>/dev/null | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
+    echo "$latest_version"
+}
+
+perform_script_update() {
+    local cache_bust
+    cache_bust="?$(date +%s)"
+
+    echo -e "${YELLOW}Updating script...${NC}"
+    if curl -fsSL --max-time 20 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" > proxy.sh; then
+        chmod +x proxy.sh
+        echo -e "${GREEN}Script updated successfully! Restarting...${NC}"
+        exec bash "$0"
+    else
+        echo -e "${RED}Failed to download update.${NC}"
+        return 1
+    fi
+}
+
+auto_check_script_update() {
+    local latest_version
+    latest_version=$(fetch_latest_script_version)
+
+    if [ -z "$latest_version" ]; then
+        return
+    fi
+
+    if [ "$SCRIPT_VERSION" != "$latest_version" ]; then
+        echo -e "${YELLOW}A new version of this script is available: $latest_version (current: $SCRIPT_VERSION).${NC}"
+        read -p "Do you want to update now? [Y/n]: " auto_update_confirm
+        if [[ "$auto_update_confirm" == "n" || "$auto_update_confirm" == "N" ]]; then
+            echo -e "${YELLOW}Continuing with current version.${NC}"
+            return
+        fi
+        perform_script_update
+    fi
+}
+
 update_script() {
     echo -e "${YELLOW}Checking for updates...${NC}"
-    CACHE_BUST="?$(date +%s)"
-    LATEST_VERSION=$(curl -s "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${CACHE_BUST}" | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
-    if [ -z "$LATEST_VERSION" ]; then
+    local latest_version
+    latest_version=$(fetch_latest_script_version)
+
+    if [ -z "$latest_version" ]; then
         echo -e "${RED}Could not check for updates. Please check your internet connection or the repository URL.${NC}"
         return
     fi
 
-    if [ "$SCRIPT_VERSION" == "$LATEST_VERSION" ]; then
+    if [ "$SCRIPT_VERSION" == "$latest_version" ]; then
         echo -e "${GREEN}You are already using the latest version of the script.${NC}"
         return
     fi
 
-    echo -e "${YELLOW}A new version of the script is available: $LATEST_VERSION${NC}"
+    echo -e "${YELLOW}A new version of the script is available: $latest_version${NC}"
     read -p "Do you want to update? [Y/n]: " update_confirm
     if [[ "$update_confirm" == "n" || "$update_confirm" == "N" ]]; then
         echo -e "${RED}Update cancelled.${NC}"
         return
     fi
 
-    echo -e "${YELLOW}Updating script...${NC}"
-    curl -s "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${CACHE_BUST}" > proxy.sh
-    echo -e "${GREEN}Script updated successfully! Restarting...${NC}"
-    exec bash "$0" "$@"
+    perform_script_update
 }
 
 # Function to restore deployment from existing config files
@@ -2167,6 +2206,9 @@ fi
 
 # CHECK DEPENDENCIES NOW (Running as non-root, will use sudo inside)
 check_dependencies
+
+# Automatically check for script updates at startup (interactive mode)
+auto_check_script_update
 
 while true; do
     echo -e "${YELLOW}--- Proxy Installer v${SCRIPT_VERSION} ---${NC}"

@@ -17,7 +17,7 @@ For the freedom of the internet!
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
 - **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
 - **Container Management**: Easy-to-use menu for updating, viewing links, or deleting the Xray container and its configuration.
-- **Self-Updating**: The script can manually check for and pull the latest version of itself from GitHub.
+- **Self-Updating**: The script automatically checks for a new version on startup (interactive mode) and can also be updated manually from the menu.
 
 ## Usage
 
