@@ -72,7 +72,12 @@ This script is designed to run as a **non-root** user.
     -   Reset one user's current-cycle usage
     -   Change one user's monthly limit
     -   Configure automatic quota checks via systemd timer (recommended on Ubuntu) or cron fallback (1/2/5-minute intervals)
--   **10) Exit**
+-   **10) Manage users (Add/Remove for Xray / Shadowsocks)**:
+    -   Add Xray users without recreating existing users
+    -   Remove specific Xray users without affecting others
+    -   Add Shadowsocks users without recreating existing users
+    -   Remove specific Shadowsocks users without affecting others
+-   **11) Exit**
 
 ## Recommended Clients
 

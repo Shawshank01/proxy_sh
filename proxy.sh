@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.6.0"
+SCRIPT_VERSION="3.7.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -25,7 +25,7 @@ DOCKER_COMPOSE_CMD=""
 # Check and install dependencies
 check_dependencies() {
     # Only check for tools we might need to install.
-    local dependencies=("curl" "openssl")
+    local dependencies=("curl" "openssl" "jq")
     local missing_deps=()
 
     for cmd in "${dependencies[@]}"; do
@@ -1819,6 +1819,284 @@ manage_xray_quotas() {
     done
 }
 
+reload_shadowsocks_container() {
+    if [ ! -d "shadowsocks" ] || [ ! -f "shadowsocks/docker-compose.yml" ]; then
+        echo -e "${RED}shadowsocks/docker-compose.yml not found.${NC}"
+        return 1
+    fi
+
+    if [ -z "$DOCKER_COMPOSE_CMD" ]; then
+        if ! check_xray_requirements; then
+            return 1
+        fi
+    fi
+
+    cd shadowsocks || return 1
+    if sudo $DOCKER_COMPOSE_CMD restart ssserver; then
+        cd .. || true
+        echo -e "${GREEN}Shadowsocks container reloaded successfully.${NC}"
+        return 0
+    else
+        cd .. || true
+        echo -e "${RED}Failed to reload Shadowsocks container.${NC}"
+        return 1
+    fi
+}
+
+add_xray_user() {
+    local db_file="xray/user_limits.db"
+    local config_file="xray/server.jsonc"
+
+    if [ ! -f "$db_file" ] || [ ! -f "$config_file" ]; then
+        echo -e "${RED}Xray quota/config files not found. Install Xray first.${NC}"
+        return 1
+    fi
+
+    local user_id
+    while true; do
+        user_id="u$(openssl rand -hex 8)"
+        if ! grep -q "^${user_id}|" "$db_file"; then
+            break
+        fi
+    done
+
+    local uuid
+    uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray uuid)
+
+    read -p "How many shortIds for generated links of ${user_id}? [Default: 1]: " user_shortids_count
+    user_shortids_count=${user_shortids_count:-1}
+    if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]] || [ "$user_shortids_count" -lt 1 ]; then
+        echo -e "${RED}shortId count must be a positive integer.${NC}"
+        return 1
+    fi
+
+    read -p "Set monthly data limit for ${user_id}? [Y/n]: " set_limit
+    local user_limit_mb=0
+    if [[ -z "$set_limit" || "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
+        while true; do
+            read -p "Enter monthly limit for ${user_id} in MB [Default: ${DEFAULT_USER_LIMIT_MB}]: " user_limit_mb
+            user_limit_mb=${user_limit_mb:-$DEFAULT_USER_LIMIT_MB}
+            if [[ "$user_limit_mb" =~ ^[0-9]+$ ]] && [ "$user_limit_mb" -gt 0 ]; then
+                break
+            fi
+            echo -e "${RED}Please enter a positive integer MB value.${NC}"
+        done
+    fi
+
+    local timezone now_epoch
+    timezone=$(read_xray_quota_timezone)
+    now_epoch=$(date +%s)
+    calculate_cycle_bounds "$now_epoch" "$now_epoch" "$timezone"
+
+    local tmp_db
+    tmp_db=$(mktemp)
+    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' >> "$tmp_db"
+    echo "${user_id}|${uuid}|${user_limit_mb}|${now_epoch}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active" >> "$tmp_db"
+
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
+    mv "$tmp_db" "$db_file"
+
+    sync_xray_clients_from_quota_db
+    reload_xray_container
+
+    local server_addr remarks remarks_url sni_domain xhttp_path shortid private_key public_key
+    read -p "Enter server IP/domain for new user's links (leave empty to skip link output): " server_addr
+
+    if [ -n "$server_addr" ]; then
+        read -p "Enter remarks prefix [Default: xray]: " remarks
+        remarks=${remarks:-xray}
+        remarks_url=${remarks// /%20}
+
+        sni_domain=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // empty' "$config_file" | head -n1)
+        xhttp_path=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.xhttpSettings.path // empty' "$config_file" | head -n1)
+        xhttp_path=${xhttp_path#/}
+        shortid=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[0] // empty' "$config_file" | head -n1)
+        private_key=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.privateKey // empty' "$config_file" | head -n1)
+
+        if [ -n "$private_key" ]; then
+            local derived
+            derived=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$private_key")
+            public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
+        fi
+
+        if [ -n "$sni_domain" ] && [ -n "$xhttp_path" ] && [ -n "$shortid" ] && [ -n "$public_key" ]; then
+            local link
+            link="vless://${uuid}@${server_addr}:443?security=reality&sni=${sni_domain}&pbk=${public_key}&sid=${shortid}&type=xhttp&path=%2F${xhttp_path}#${remarks_url}-${user_id}"
+            echo -e "\n${GREEN}New user link:${NC}"
+            echo "$link"
+            echo "$link" >> xray/vless_links.txt
+        else
+            echo -e "${YELLOW}Added user, but could not generate a link automatically from current config.${NC}"
+        fi
+    fi
+
+    echo -e "${GREEN}Added Xray user: ${user_id} (UUID: ${uuid})${NC}"
+}
+
+remove_xray_user() {
+    local db_file="xray/user_limits.db"
+
+    if [ ! -f "$db_file" ]; then
+        echo -e "${RED}Xray quota database not found.${NC}"
+        return 1
+    fi
+
+    if ! select_quota_user; then
+        return 1
+    fi
+
+    local target_email="$QUOTA_SELECTION_EMAIL"
+    local target_uuid
+    target_uuid=$(grep "^${target_email}|" "$db_file" | head -n1 | cut -d'|' -f2)
+
+    local tmp_db
+    tmp_db=$(mktemp)
+    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" >> "$tmp_db"
+
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
+    mv "$tmp_db" "$db_file"
+
+    sync_xray_clients_from_quota_db
+    reload_xray_container
+
+    if [ -f "xray/vless_links.txt" ] && [ -n "$target_uuid" ]; then
+        local tmp_links
+        tmp_links=$(mktemp)
+        grep -v -- "$target_uuid" xray/vless_links.txt > "$tmp_links" || true
+        apply_preserved_file_metadata "xray/vless_links.txt" "$tmp_links"
+        mv "$tmp_links" xray/vless_links.txt
+    fi
+
+    echo -e "${GREEN}Removed Xray user: ${target_email}${NC}"
+}
+
+add_shadowsocks_user() {
+    local ss_config="shadowsocks/server.json"
+
+    if [ ! -f "$ss_config" ]; then
+        echo -e "${RED}Shadowsocks config not found. Install Shadowsocks first.${NC}"
+        return 1
+    fi
+
+    local user_name
+    while true; do
+        user_name="u$(openssl rand -hex 6)"
+        if ! jq -e --arg n "$user_name" '.users[] | select(.name == $n)' "$ss_config" >/dev/null 2>&1; then
+            break
+        fi
+    done
+
+    local user_psk
+    user_psk=$(openssl rand -base64 32)
+
+    local tmp_ss
+    tmp_ss=$(mktemp)
+    jq --arg n "$user_name" --arg p "$user_psk" '.users += [{"name": $n, "password": $p}]' "$ss_config" > "$tmp_ss"
+
+    apply_preserved_file_metadata "$ss_config" "$tmp_ss"
+    mv "$tmp_ss" "$ss_config"
+
+    reload_shadowsocks_container
+
+    local server_psk method ss_port server_addr remarks remarks_url user_name_url password base64 link
+    server_psk=$(jq -r '.password' "$ss_config")
+    method=$(jq -r '.method' "$ss_config")
+    ss_port=$(jq -r '.server_port' "$ss_config")
+
+    read -p "Enter server IP/domain for new user's SS link (leave empty to skip link output): " server_addr
+    if [ -n "$server_addr" ]; then
+        read -p "Enter remarks prefix [Default: shadowsocks_rust]: " remarks
+        remarks=${remarks:-shadowsocks_rust}
+        remarks_url=${remarks// /%20}
+        user_name_url=${user_name// /%20}
+        password="${server_psk}:${user_psk}"
+        base64=$(printf "%s" "${method}:${password}" | base64 | tr -d '\n')
+        link="ss://${base64}@${server_addr}:${ss_port}#${remarks_url}-${user_name_url}"
+        echo -e "\n${GREEN}New SS user link:${NC}"
+        echo "$link"
+        echo "$link" >> shadowsocks/ss_links.txt
+    fi
+
+    echo -e "${GREEN}Added Shadowsocks user: ${user_name}${NC}"
+}
+
+remove_shadowsocks_user() {
+    local ss_config="shadowsocks/server.json"
+
+    if [ ! -f "$ss_config" ]; then
+        echo -e "${RED}Shadowsocks config not found.${NC}"
+        return 1
+    fi
+
+    local users=()
+    local idx=1
+    while IFS= read -r uname; do
+        [ -z "$uname" ] && continue
+        users+=("$uname")
+        echo "${idx}) ${uname}"
+        idx=$((idx + 1))
+    done < <(jq -r '.users[].name' "$ss_config")
+
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "${RED}No Shadowsocks users found.${NC}"
+        return 1
+    fi
+
+    read -p "Select user to remove [1-${#users[@]}]: " sel
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt ${#users[@]} ]; then
+        echo -e "${RED}Invalid selection.${NC}"
+        return 1
+    fi
+
+    local target_user="${users[$((sel - 1))]}"
+    local tmp_ss
+    tmp_ss=$(mktemp)
+    jq --arg n "$target_user" '.users |= map(select(.name != $n))' "$ss_config" > "$tmp_ss"
+
+    apply_preserved_file_metadata "$ss_config" "$tmp_ss"
+    mv "$tmp_ss" "$ss_config"
+
+    reload_shadowsocks_container
+
+    echo -e "${GREEN}Removed Shadowsocks user: ${target_user}${NC}"
+}
+
+manage_proxy_users() {
+    while true; do
+        echo ""
+        echo -e "${YELLOW}--- User Management (Add/Remove) ---${NC}"
+        echo "1) Add Xray user"
+        echo "2) Remove Xray user"
+        echo "3) Add Shadowsocks user"
+        echo "4) Remove Shadowsocks user"
+        echo "0) Back"
+        read -p "Enter your choice [0-4]: " user_mgmt_choice
+
+        case $user_mgmt_choice in
+            1)
+                add_xray_user
+                ;;
+            2)
+                remove_xray_user
+                ;;
+            3)
+                add_shadowsocks_user
+                ;;
+            4)
+                remove_shadowsocks_user
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid choice.${NC}"
+                ;;
+        esac
+    done
+}
+
 show_links() {
     LINKS_FILE="xray/vless_links.txt"
     if [ -f "xray/vless_links.txt" ]; then
@@ -2223,8 +2501,9 @@ while true; do
     echo "7) Show SS links for current config"
     echo "8) Delete container and config (Xray / Shadowsocks)"
     echo "9) Manage Xray per-user data quotas"
-    echo "10) Exit"
-    read -p "Enter your choice [0-10]: " choice
+    echo "10) Manage users (Add/Remove for Xray / Shadowsocks)"
+    echo "11) Exit"
+    read -p "Enter your choice [0-11]: " choice
 
     case $choice in
         0)
@@ -2314,6 +2593,12 @@ while true; do
             manage_xray_quotas
             ;;
         10)
+            if ! check_xray_requirements; then
+                continue
+            fi
+            manage_proxy_users
+            ;;
+        11)
             echo -e "${GREEN}Goodbye!${NC}"
             exit 0
             ;;
