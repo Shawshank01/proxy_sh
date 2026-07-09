@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.7.0"
+SCRIPT_VERSION="3.7.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -2407,6 +2407,21 @@ handle_root_user_flow() {
         exit 1
     fi
 
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo -e "${YELLOW}'sudo' command not found. Installing it...${NC}"
+        if command -v apt-get &> /dev/null; then
+            apt-get update && apt-get install -y sudo
+        elif command -v dnf &> /dev/null; then
+            dnf install -y sudo
+        elif command -v yum &> /dev/null; then
+            yum install -y sudo
+        fi
+        if ! command -v sudo >/dev/null 2>&1; then
+            echo -e "${RED}Failed to install 'sudo'. Please install it manually, then re-run this script.${NC}"
+            exit 1
+        fi
+    fi
+
     read -p "Enter non-root username to use/create: " new_username
     if [ -z "$new_username" ]; then
         echo -e "${RED}Username cannot be empty.${NC}"
@@ -2466,7 +2481,8 @@ handle_root_user_flow() {
     printf -v escaped_launch_script '%q' "$launch_script"
 
     echo -e "${GREEN}Relaunching as '$new_username'...${NC}"
-    exec su - "$new_username" -c "bash $escaped_launch_script"
+
+    exec sudo -u "$new_username" -i bash "$launch_script"
 }
 
 # Non-interactive mode for scheduler-based quota checks (cron/systemd)
