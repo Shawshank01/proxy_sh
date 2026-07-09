@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.7.1"
+SCRIPT_VERSION="3.7.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -24,8 +24,7 @@ DOCKER_COMPOSE_CMD=""
 
 # Check and install dependencies
 check_dependencies() {
-    # Only check for tools we might need to install.
-    local dependencies=("curl" "openssl" "jq")
+    local dependencies=("curl" "openssl")
     local missing_deps=()
 
     for cmd in "${dependencies[@]}"; do
@@ -59,6 +58,33 @@ check_dependencies() {
         done
         echo -e "${GREEN}Dependencies installed successfully!${NC}"
     fi
+}
+
+ensure_jq() {
+    if command -v jq &> /dev/null; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}This feature requires 'jq' to read/edit JSON configs. Installing it now...${NC}"
+
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y jq
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y jq
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y jq
+    else
+        echo -e "${RED}Could not detect package manager. Please install 'jq' manually.${NC}"
+        return 1
+    fi
+
+    if ! command -v jq &> /dev/null; then
+        echo -e "${RED}Failed to install 'jq'. Please install it manually.${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}'jq' installed successfully!${NC}"
+    return 0
 }
 
 # Function to detect the Linux distribution
@@ -1904,30 +1930,34 @@ add_xray_user() {
     read -p "Enter server IP/domain for new user's links (leave empty to skip link output): " server_addr
 
     if [ -n "$server_addr" ]; then
-        read -p "Enter remarks prefix [Default: xray]: " remarks
-        remarks=${remarks:-xray}
-        remarks_url=${remarks// /%20}
+        if ensure_jq; then
+            read -p "Enter remarks prefix [Default: xray]: " remarks
+            remarks=${remarks:-xray}
+            remarks_url=${remarks// /%20}
 
-        sni_domain=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // empty' "$config_file" | head -n1)
-        xhttp_path=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.xhttpSettings.path // empty' "$config_file" | head -n1)
-        xhttp_path=${xhttp_path#/}
-        shortid=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[0] // empty' "$config_file" | head -n1)
-        private_key=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.privateKey // empty' "$config_file" | head -n1)
+            sni_domain=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // empty' "$config_file" | head -n1)
+            xhttp_path=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.xhttpSettings.path // empty' "$config_file" | head -n1)
+            xhttp_path=${xhttp_path#/}
+            shortid=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[0] // empty' "$config_file" | head -n1)
+            private_key=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.privateKey // empty' "$config_file" | head -n1)
 
-        if [ -n "$private_key" ]; then
-            local derived
-            derived=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$private_key")
-            public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
-        fi
+            if [ -n "$private_key" ]; then
+                local derived
+                derived=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$private_key")
+                public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
+            fi
 
-        if [ -n "$sni_domain" ] && [ -n "$xhttp_path" ] && [ -n "$shortid" ] && [ -n "$public_key" ]; then
-            local link
-            link="vless://${uuid}@${server_addr}:443?security=reality&sni=${sni_domain}&pbk=${public_key}&sid=${shortid}&type=xhttp&path=%2F${xhttp_path}#${remarks_url}-${user_id}"
-            echo -e "\n${GREEN}New user link:${NC}"
-            echo "$link"
-            echo "$link" >> xray/vless_links.txt
+            if [ -n "$sni_domain" ] && [ -n "$xhttp_path" ] && [ -n "$shortid" ] && [ -n "$public_key" ]; then
+                local link
+                link="vless://${uuid}@${server_addr}:443?security=reality&sni=${sni_domain}&pbk=${public_key}&sid=${shortid}&type=xhttp&path=%2F${xhttp_path}#${remarks_url}-${user_id}"
+                echo -e "\n${GREEN}New user link:${NC}"
+                echo "$link"
+                echo "$link" >> xray/vless_links.txt
+            else
+                echo -e "${YELLOW}Added user, but could not generate a link automatically from current config.${NC}"
+            fi
         else
-            echo -e "${YELLOW}Added user, but could not generate a link automatically from current config.${NC}"
+            echo -e "${YELLOW}Added user, but 'jq' is unavailable so a link could not be generated automatically.${NC}"
         fi
     fi
 
@@ -1980,6 +2010,11 @@ add_shadowsocks_user() {
         return 1
     fi
 
+    if ! ensure_jq; then
+        echo -e "${RED}Cannot manage Shadowsocks users without 'jq'.${NC}"
+        return 1
+    fi
+
     local user_name
     while true; do
         user_name="u$(openssl rand -hex 6)"
@@ -2027,6 +2062,11 @@ remove_shadowsocks_user() {
 
     if [ ! -f "$ss_config" ]; then
         echo -e "${RED}Shadowsocks config not found.${NC}"
+        return 1
+    fi
+
+    if ! ensure_jq; then
+        echo -e "${RED}Cannot manage Shadowsocks users without 'jq'.${NC}"
         return 1
     fi
 
