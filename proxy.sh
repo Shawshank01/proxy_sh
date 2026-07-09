@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.8.0"
+SCRIPT_VERSION="3.8.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -726,8 +726,8 @@ EOL
     SNI_DOMAIN=$(awk '
         /"serverNames": *\[/ {flag=1; next}
         flag {
-            if (match($0, /"([^"]+)"/, m)) {
-                print m[1]
+            if (match($0, /"[^"]+"/)) {
+                print substr($0, RSTART + 1, RLENGTH - 2)
                 exit
             }
             if ($0 ~ /\]/) {
