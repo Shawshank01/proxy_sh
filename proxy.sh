@@ -1,17 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 #
-# proxy.sh: An automated script to install and manage an Xray proxy server.
+# proxy.sh: An automated script to install and manage a proxy server.
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.7.2"
+SCRIPT_VERSION="3.8.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
 DEFAULT_SS_PORT=80
 DEFAULT_QUOTA_TIMEZONE="UTC"
-DEFAULT_USER_LIMIT_MB=204800
+DEFAULT_USER_LIMIT_GB=300
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -391,15 +391,15 @@ install_xray() {
         done
 
         read -p "Set monthly data limit for ${user_email}? [Y/n]: " set_limit
-        user_limit_mb=0
+        user_limit_gb=0
         if [[ -z "$set_limit" || "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
             while true; do
-                read -p "Enter monthly limit for ${user_email} in MB [Default: ${DEFAULT_USER_LIMIT_MB}]: " user_limit_mb
-                user_limit_mb=${user_limit_mb:-$DEFAULT_USER_LIMIT_MB}
-                if [[ "$user_limit_mb" =~ ^[0-9]+$ ]] && [ "$user_limit_mb" -gt 0 ]; then
+                read -p "Enter monthly limit for ${user_email} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb
+                user_limit_gb=${user_limit_gb:-$DEFAULT_USER_LIMIT_GB}
+                if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [ "$user_limit_gb" -gt 0 ]; then
                     break
                 fi
-                echo -e "${RED}Please enter a positive integer MB value.${NC}"
+                echo -e "${RED}Please enter a positive integer GB value.${NC}"
             done
         fi
 
@@ -411,7 +411,7 @@ install_xray() {
             CLIENTS_JSON+=","
         fi
 
-        QUOTA_DB_LINES+="${user_email}|${uuid}|${user_limit_mb}|${user_anchor_now}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active"
+        QUOTA_DB_LINES+="${user_email}|${uuid}|${user_limit_gb}|${user_anchor_now}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active"
         if [ "$i" -lt "$num_uuids" ]; then
             QUOTA_DB_LINES+=$'\n'
         fi
@@ -775,7 +775,7 @@ TIMEZONE=$QUOTA_TIMEZONE
 EOL
 
     cat > user_limits.db << EOL
-# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status
+# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status
 $QUOTA_DB_LINES
 EOL
 
@@ -1113,9 +1113,41 @@ apply_preserved_file_metadata() {
     fi
 }
 
+# One-time, transparent migration for quota databases created by older
+# versions of this script, which stored per-user limits in MB instead of GB.
+# Safe to call repeatedly: it's a no-op once the file is already in the new format.
+migrate_quota_db_if_needed() {
+    local db_file="$1"
+    [ -f "$db_file" ] || return 0
+
+    if ! head -n1 "$db_file" | grep -q '^# email|uuid|limit_mb|'; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}Migrating ${db_file} per-user limits from MB to GB...${NC}"
+
+    local tmp_db
+    tmp_db=$(mktemp)
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+
+    while IFS='|' read -r email uuid old_limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+        [ -z "$email" ] && continue
+        local migrated_limit_gb=0
+        if [ "$old_limit_mb" -gt 0 ]; then
+            # Round up so migrated users never end up with a smaller quota than before.
+            migrated_limit_gb=$(( (old_limit_mb + 1023) / 1024 ))
+        fi
+        echo "${email}|${uuid}|${migrated_limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
+    mv "$tmp_db" "$db_file"
+}
+
 sync_xray_clients_from_quota_db() {
     local db_file="xray/user_limits.db"
     local config_file="xray/server.jsonc"
+    migrate_quota_db_if_needed "$db_file"
 
     if [ ! -f "$db_file" ] || [ ! -f "$config_file" ]; then
         echo -e "${RED}Quota database or Xray config not found.${NC}"
@@ -1123,7 +1155,7 @@ sync_xray_clients_from_quota_db() {
     fi
 
     local clients_json=""
-    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
         [ "$email" = "#" ] && continue
         if [ "$status" != "active" ]; then
@@ -1265,6 +1297,8 @@ check_and_apply_xray_quotas() {
         return 1
     fi
 
+    migrate_quota_db_if_needed "$db_file"
+
     local timezone
     timezone=$(read_xray_quota_timezone)
 
@@ -1300,10 +1334,10 @@ check_and_apply_xray_quotas() {
 
     local tmp_db
     tmp_db=$(mktemp)
-    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
 
     local config_changed=0
-    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
 
         calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone"
@@ -1341,16 +1375,16 @@ check_and_apply_xray_quotas() {
         cycle_usage=$((cycle_usage + delta))
         last_total=$current_total
 
-        if [ "$limit_mb" -gt 0 ]; then
-            local limit_bytes=$((limit_mb * 1024 * 1024))
+        if [ "$limit_gb" -gt 0 ]; then
+            local limit_bytes=$((limit_gb * 1024 * 1024 * 1024))
             if [ "$cycle_usage" -ge "$limit_bytes" ] && [ "$status" != "suspended" ]; then
                 status="suspended"
                 config_changed=1
-                echo -e "${YELLOW}User ${email} reached quota (${limit_mb} MB). Suspended.${NC}"
+                echo -e "${YELLOW}User ${email} reached quota (${limit_gb} GB). Suspended.${NC}"
             fi
         fi
 
-        echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+        echo "${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
     apply_preserved_file_metadata "$db_file" "$tmp_db"
@@ -1372,25 +1406,28 @@ show_xray_quota_status() {
         return 1
     fi
 
+    migrate_quota_db_if_needed "$db_file"
+
     local timezone
     timezone=$(read_xray_quota_timezone)
 
     echo -e "${YELLOW}Timezone:${NC} ${timezone}"
     echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
 
-    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
 
-        local usage_mb=$((cycle_usage / 1024 / 1024))
+        local usage_gb
+        usage_gb=$(awk -v b="$cycle_usage" 'BEGIN { printf "%.2f", b/1024/1024/1024 }')
         local cycle_start_h cycle_end_h
         cycle_start_h=$(TZ="$timezone" date -d "@${cycle_start}" "+%Y-%m-%d %H:%M:%S")
         cycle_end_h=$(TZ="$timezone" date -d "@${cycle_end}" "+%Y-%m-%d %H:%M:%S")
 
-        if [ "$limit_mb" -gt 0 ]; then
-            local percent=$((cycle_usage * 100 / (limit_mb * 1024 * 1024)))
-            echo "- ${email} | status=${status} | usage=${usage_mb}MB / ${limit_mb}MB (${percent}%) | cycle=${cycle_start_h} -> ${cycle_end_h}"
+        if [ "$limit_gb" -gt 0 ]; then
+            local percent=$((cycle_usage * 100 / (limit_gb * 1024 * 1024 * 1024)))
+            echo "- ${email} | status=${status} | usage=${usage_gb}GB / ${limit_gb}GB (${percent}%) | cycle=${cycle_start_h} -> ${cycle_end_h}"
         else
-            echo "- ${email} | status=${status} | usage=${usage_mb}MB / unlimited | cycle=${cycle_start_h} -> ${cycle_end_h}"
+            echo "- ${email} | status=${status} | usage=${usage_gb}GB / unlimited | cycle=${cycle_start_h} -> ${cycle_end_h}"
         fi
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 }
@@ -1402,14 +1439,16 @@ select_quota_user() {
         return 1
     fi
 
+    migrate_quota_db_if_needed "$db_file"
+
     QUOTA_SELECTION_EMAIL=""
 
     local idx=1
     local lines=()
-    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
-        lines+=("$email|$uuid|$limit_mb|$anchor_epoch|$cycle_start|$cycle_end|$cycle_usage|$last_total|$status")
-        echo "${idx}) ${email} (status: ${status}, limit: ${limit_mb} MB)"
+        lines+=("$email|$uuid|$limit_gb|$anchor_epoch|$cycle_start|$cycle_end|$cycle_usage|$last_total|$status")
+        echo "${idx}) ${email} (status: ${status}, limit: ${limit_gb} GB)"
         idx=$((idx + 1))
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
@@ -1451,10 +1490,10 @@ reset_xray_user_usage() {
 
     local tmp_db
     tmp_db=$(mktemp)
-    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
 
     local config_changed=0
-    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
 
         if [ "$email" = "$target_email" ]; then
@@ -1470,7 +1509,7 @@ reset_xray_user_usage() {
             echo -e "${GREEN}Usage reset for ${email}.${NC}"
         fi
 
-        echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+        echo "${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
     apply_preserved_file_metadata "$db_file" "$tmp_db"
@@ -1490,28 +1529,28 @@ change_xray_user_limit() {
     local target_email="$QUOTA_SELECTION_EMAIL"
     local db_file="xray/user_limits.db"
 
-    read -p "Enter new monthly limit in MB (0 = unlimited): " new_limit_mb
-    if ! [[ "$new_limit_mb" =~ ^[0-9]+$ ]]; then
+    read -p "Enter new monthly limit in GB (0 = unlimited): " new_limit_gb
+    if ! [[ "$new_limit_gb" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}Limit must be a non-negative integer.${NC}"
         return 1
     fi
 
     local tmp_db
     tmp_db=$(mktemp)
-    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
 
     local config_changed=0
-    while IFS='|' read -r email uuid limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
 
         if [ "$email" = "$target_email" ]; then
-            limit_mb=$new_limit_mb
+            limit_gb=$new_limit_gb
             if [ "$status" = "suspended" ]; then
                 local should_reenable=0
-                if [ "$limit_mb" -eq 0 ]; then
+                if [ "$limit_gb" -eq 0 ]; then
                     should_reenable=1
                 else
-                    local limit_bytes=$((limit_mb * 1024 * 1024))
+                    local limit_bytes=$((limit_gb * 1024 * 1024 * 1024))
                     if [ "$cycle_usage" -lt "$limit_bytes" ]; then
                         should_reenable=1
                     fi
@@ -1525,10 +1564,10 @@ change_xray_user_limit() {
                     fi
                 fi
             fi
-            echo -e "${GREEN}Updated limit for ${email} to ${limit_mb} MB.${NC}"
+            echo -e "${GREEN}Updated limit for ${email} to ${limit_gb} GB.${NC}"
         fi
 
-        echo "${email}|${uuid}|${limit_mb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+        echo "${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
     apply_preserved_file_metadata "$db_file" "$tmp_db"
@@ -1878,6 +1917,8 @@ add_xray_user() {
         return 1
     fi
 
+    migrate_quota_db_if_needed "$db_file"
+
     local user_id
     while true; do
         user_id="u$(openssl rand -hex 8)"
@@ -1897,15 +1938,15 @@ add_xray_user() {
     fi
 
     read -p "Set monthly data limit for ${user_id}? [Y/n]: " set_limit
-    local user_limit_mb=0
+    local user_limit_gb=0
     if [[ -z "$set_limit" || "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
         while true; do
-            read -p "Enter monthly limit for ${user_id} in MB [Default: ${DEFAULT_USER_LIMIT_MB}]: " user_limit_mb
-            user_limit_mb=${user_limit_mb:-$DEFAULT_USER_LIMIT_MB}
-            if [[ "$user_limit_mb" =~ ^[0-9]+$ ]] && [ "$user_limit_mb" -gt 0 ]; then
+            read -p "Enter monthly limit for ${user_id} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb
+            user_limit_gb=${user_limit_gb:-$DEFAULT_USER_LIMIT_GB}
+            if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [ "$user_limit_gb" -gt 0 ]; then
                 break
             fi
-            echo -e "${RED}Please enter a positive integer MB value.${NC}"
+            echo -e "${RED}Please enter a positive integer GB value.${NC}"
         done
     fi
 
@@ -1916,9 +1957,9 @@ add_xray_user() {
 
     local tmp_db
     tmp_db=$(mktemp)
-    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
     grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' >> "$tmp_db"
-    echo "${user_id}|${uuid}|${user_limit_mb}|${now_epoch}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active" >> "$tmp_db"
+    echo "${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active" >> "$tmp_db"
 
     apply_preserved_file_metadata "$db_file" "$tmp_db"
     mv "$tmp_db" "$db_file"
@@ -1982,7 +2023,7 @@ remove_xray_user() {
 
     local tmp_db
     tmp_db=$(mktemp)
-    echo "# email|uuid|limit_mb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
     grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" >> "$tmp_db"
 
     apply_preserved_file_metadata "$db_file" "$tmp_db"
