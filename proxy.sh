@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.8.1"
+SCRIPT_VERSION="3.8.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -424,15 +424,14 @@ install_xray() {
     # Generate random XHTTP path for security
     XHTTP_PATH=$(openssl rand -hex 4)
 
-    REALITY_TARGET_DEFAULT="zum.com:443"
-    REALITY_SERVER_NAMES_DEFAULT="\"m.zum.com\",\"www.zum.com\",\"zum.com\""
-    REALITY_TARGET="$REALITY_TARGET_DEFAULT"
-    REALITY_SERVER_NAMES="$REALITY_SERVER_NAMES_DEFAULT"
+    REALITY_TARGET=""
+    REALITY_SERVER_NAMES=""
 
     while true; do
-        read -p "Enter a domain to probe with 'xray tls ping' (leave empty to keep defaults): " REALITY_DOMAIN
+        read -p "Enter a domain to probe with 'xray tls ping': " REALITY_DOMAIN
         if [ -z "$REALITY_DOMAIN" ]; then
-            break
+            echo -e "${RED}A domain is required. Please enter a domain.${NC}"
+            continue
         fi
 
         REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN#http://}
