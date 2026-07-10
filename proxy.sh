@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.8.2"
+SCRIPT_VERSION="3.8.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -15,7 +15,7 @@ DEFAULT_USER_LIMIT_GB=300
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # Global variable for Docker Compose command
 DOCKER_COMPOSE_CMD=""
@@ -759,6 +759,10 @@ EOL
         for shortid in "${sid_list[@]}"; do
             link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$shortid&type=xhttp&path=%2F$XHTTP_PATH#${REMARKS_URL}-${user_email_url}"
             echo "$link"
+            echo
+            if [ -n "$LINKS" ]; then
+                LINKS+="\n"
+            fi
             LINKS+="$link\n"
         done
     done
@@ -1154,6 +1158,7 @@ sync_xray_clients_from_quota_db() {
     fi
 
     local clients_json=""
+    local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
     while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
         [ "$email" = "#" ] && continue
@@ -1936,6 +1941,42 @@ add_xray_user() {
         return 1
     fi
 
+    # Generate new shortIds for this user and add them to the config
+    local new_shortids=()
+    if ensure_jq; then
+        local existing_shortids
+        existing_shortids=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[]' "$config_file" 2>/dev/null || true)
+        for sid_idx in $(seq 1 $user_shortids_count); do
+            local new_sid
+            while true; do
+                new_sid=$(openssl rand -hex 4)
+                # Ensure it doesn't collide with existing shortIds
+                if ! echo "$existing_shortids" | grep -qx "$new_sid"; then
+                    break
+                fi
+            done
+            new_shortids+=("$new_sid")
+            existing_shortids+=$'\n'"$new_sid"
+        done
+
+        # Add new shortIds to the config's shortIds array
+        local sid_add_json="[]"
+        for sid in "${new_shortids[@]}"; do
+            sid_add_json=$(echo "$sid_add_json" | jq --arg s "$sid" '. + [$s]')
+        done
+        local tmp_config
+        tmp_config=$(mktemp)
+        jq --argjson newids "$sid_add_json" '(.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds) += $newids' "$config_file" > "$tmp_config"
+        apply_preserved_file_metadata "$config_file" "$tmp_config"
+        mv "$tmp_config" "$config_file"
+    else
+        # Fallback: generate shortids but cannot add to config without jq
+        for sid_idx in $(seq 1 $user_shortids_count); do
+            new_shortids+=("$(openssl rand -hex 4)")
+        done
+        echo -e "${YELLOW}Warning: 'jq' unavailable, new shortIds could not be added to server.jsonc automatically.${NC}"
+    fi
+
     read -p "Set monthly data limit for ${user_id}? [Y/n]: " set_limit
     local user_limit_gb=0
     if [[ -z "$set_limit" || "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
@@ -1966,7 +2007,7 @@ add_xray_user() {
     sync_xray_clients_from_quota_db
     reload_xray_container
 
-    local server_addr remarks remarks_url sni_domain xhttp_path shortid private_key public_key
+    local server_addr remarks remarks_url sni_domain xhttp_path private_key public_key
     read -p "Enter server IP/domain for new user's links (leave empty to skip link output): " server_addr
 
     if [ -n "$server_addr" ]; then
@@ -1978,7 +2019,6 @@ add_xray_user() {
             sni_domain=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // empty' "$config_file" | head -n1)
             xhttp_path=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.xhttpSettings.path // empty' "$config_file" | head -n1)
             xhttp_path=${xhttp_path#/}
-            shortid=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[0] // empty' "$config_file" | head -n1)
             private_key=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.privateKey // empty' "$config_file" | head -n1)
 
             if [ -n "$private_key" ]; then
@@ -1987,12 +2027,15 @@ add_xray_user() {
                 public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
             fi
 
-            if [ -n "$sni_domain" ] && [ -n "$xhttp_path" ] && [ -n "$shortid" ] && [ -n "$public_key" ]; then
-                local link
-                link="vless://${uuid}@${server_addr}:443?security=reality&sni=${sni_domain}&pbk=${public_key}&sid=${shortid}&type=xhttp&path=%2F${xhttp_path}#${remarks_url}-${user_id}"
-                echo -e "\n${GREEN}New user link:${NC}"
-                echo "$link"
-                echo "$link" >> xray/vless_links.txt
+            if [ -n "$sni_domain" ] && [ -n "$xhttp_path" ] && [ ${#new_shortids[@]} -gt 0 ] && [ -n "$public_key" ]; then
+                echo -e "\n${GREEN}New user link(s):${NC}"
+                for shortid in "${new_shortids[@]}"; do
+                    local link
+                    link="vless://${uuid}@${server_addr}:443?security=reality&sni=${sni_domain}&pbk=${public_key}&sid=${shortid}&type=xhttp&path=%2F${xhttp_path}#${remarks_url}-${user_id}"
+                    echo "$link"
+                    echo "" >> xray/vless_links.txt
+                    echo "$link" >> xray/vless_links.txt
+                done
             else
                 echo -e "${YELLOW}Added user, but could not generate a link automatically from current config.${NC}"
             fi
@@ -2188,7 +2231,12 @@ show_links() {
         return
     fi
     echo -e "\n${GREEN}Saved VLESS Links:${NC}"
-    cat "$LINKS_FILE"
+    # Display each link separated by blank lines
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        echo "$line"
+        echo
+    done < "$LINKS_FILE"
 }
 
 show_ss_links() {
@@ -2419,7 +2467,11 @@ restore_xray() {
         echo "Your existing configuration and links are preserved."
         if [ -f "vless_links.txt" ]; then
             echo -e "\n${GREEN}Your VLESS links:${NC}"
-            cat vless_links.txt
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                echo "$line"
+                echo
+            done < vless_links.txt
         fi
     else
         echo -e "${RED}Failed to start Xray container.${NC}"
