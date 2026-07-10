@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.8.3"
+SCRIPT_VERSION="3.8.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1998,7 +1998,7 @@ add_xray_user() {
     local tmp_db
     tmp_db=$(mktemp)
     echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-    grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' >> "$tmp_db"
+    grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' >> "$tmp_db" || true
     echo "${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active" >> "$tmp_db"
 
     apply_preserved_file_metadata "$db_file" "$tmp_db"
@@ -2066,7 +2066,7 @@ remove_xray_user() {
     local tmp_db
     tmp_db=$(mktemp)
     echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-    grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" >> "$tmp_db"
+    grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" >> "$tmp_db" || true
 
     apply_preserved_file_metadata "$db_file" "$tmp_db"
     mv "$tmp_db" "$db_file"
