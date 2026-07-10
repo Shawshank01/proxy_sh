@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.8.5"
+SCRIPT_VERSION="3.8.6"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1477,24 +1477,23 @@ select_quota_user() {
 }
 
 reset_xray_user_usage() {
-    if ! select_quota_user; then
-        return 1
+    read -p "Do you want to reset usage for ALL users? [y/N]: " reset_all
+    local target_email=""
+
+    if [[ "$reset_all" == "y" || "$reset_all" == "Y" ]]; then
+        target_email="ALL"
+    else
+        if ! select_quota_user; then
+            return 0
+        fi
+        target_email="$QUOTA_SELECTION_EMAIL"
     fi
 
-    local target_email="$QUOTA_SELECTION_EMAIL"
     local db_file="xray/user_limits.db"
 
     local stats_map_file
     stats_map_file=$(mktemp)
     collect_xray_user_stats "$stats_map_file"
-
-    local current_total=0
-    while IFS='|' read -r email dir value; do
-        [ "$email" != "$target_email" ] && continue
-        value=${value:-0}
-        current_total=$((current_total + value))
-    done < "$stats_map_file"
-    rm -f "$stats_map_file"
 
     local tmp_db
     tmp_db=$(mktemp)
@@ -1504,14 +1503,26 @@ reset_xray_user_usage() {
     while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
 
-        if [ "$email" = "$target_email" ]; then
+        if [ "$target_email" = "ALL" ] || [ "$email" = "$target_email" ]; then
+            local current_total=0
+            while IFS='|' read -r s_email s_dir s_value; do
+                if [ "$s_email" = "$email" ]; then
+                    current_total=$((current_total + ${s_value:-0}))
+                fi
+            done < "$stats_map_file"
+
             cycle_usage=0
             last_total=$current_total
             if [ "$status" = "suspended" ]; then
-                read -p "User is suspended. Re-enable now? [Y/n]: " reenable
-                if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
+                if [ "$target_email" = "ALL" ]; then
                     status="active"
                     config_changed=1
+                else
+                    read -p "User is suspended. Re-enable now? [Y/n]: " reenable
+                    if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
+                        status="active"
+                        config_changed=1
+                    fi
                 fi
             fi
             echo -e "${GREEN}Usage reset for ${email}.${NC}"
@@ -1531,7 +1542,7 @@ reset_xray_user_usage() {
 
 change_xray_user_limit() {
     if ! select_quota_user; then
-        return 1
+        return 0
     fi
 
     local target_email="$QUOTA_SELECTION_EMAIL"
@@ -2060,7 +2071,7 @@ remove_xray_user() {
     fi
 
     if ! select_quota_user; then
-        return 1
+        return 0
     fi
 
     local target_email="$QUOTA_SELECTION_EMAIL"
