@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.8.6"
+SCRIPT_VERSION="3.9.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1598,6 +1598,115 @@ change_xray_user_limit() {
     fi
 }
 
+change_xray_user_billing_cycle() {
+    read -p "Do you want to change the billing cycle for ALL users? [y/N]: " change_all
+    local target_email=""
+
+    if [[ "$change_all" == "y" || "$change_all" == "Y" ]]; then
+        target_email="ALL"
+    else
+        if ! select_quota_user; then
+            return 0
+        fi
+        target_email="$QUOTA_SELECTION_EMAIL"
+    fi
+
+    local db_file="xray/user_limits.db"
+
+    echo ""
+    if [ "$target_email" = "ALL" ]; then
+        echo "How would you like to change the billing cycle for ALL users?"
+    else
+        echo "How would you like to change the billing cycle for ${target_email}?"
+    fi
+    echo "1) Restart cycle today (resets exactly 1 month from right now)"
+    echo "2) Set a specific day of the month (e.g., the 1st or 15th)"
+    echo "0) Cancel"
+    read -p "Enter choice [0-2]: " cycle_choice
+
+    local new_anchor_epoch
+    local timezone
+    timezone=$(read_xray_quota_timezone)
+
+    if [ "$cycle_choice" = "1" ]; then
+        new_anchor_epoch=$(date +%s)
+    elif [ "$cycle_choice" = "2" ]; then
+        read -p "Enter the day of the month [1-28]: " cycle_day
+        if ! [[ "$cycle_day" =~ ^[0-9]+$ ]] || [ "$cycle_day" -lt 1 ] || [ "$cycle_day" -gt 28 ]; then
+            echo -e "${RED}Invalid day. Must be between 1 and 28.${NC}"
+            return 1
+        fi
+        new_anchor_epoch=$(TZ="$timezone" date -d "2000-01-$(printf "%02d" "$cycle_day") 00:00:00" +%s)
+    else
+        return 0
+    fi
+
+    read -p "Do you also want to wipe their current traffic usage back to 0 GB? [y/N]: " reset_usage
+
+    local tmp_db
+    tmp_db=$(mktemp)
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+
+    local stats_map_file
+    stats_map_file=$(mktemp)
+    collect_xray_user_stats "$stats_map_file"
+
+    local config_changed=0
+    local now_epoch
+    now_epoch=$(date +%s)
+
+    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
+        [ -z "$email" ] && continue
+
+        if [ "$target_email" = "ALL" ] || [ "$email" = "$target_email" ]; then
+            anchor_epoch="$new_anchor_epoch"
+            calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone"
+            cycle_start=$CYCLE_START_EPOCH
+            cycle_end=$CYCLE_END_EPOCH
+
+            if [[ "$reset_usage" == "y" || "$reset_usage" == "Y" ]]; then
+                local current_total=0
+                while IFS='|' read -r s_email s_dir s_value; do
+                    if [ "$s_email" = "$email" ]; then
+                        current_total=$((current_total + ${s_value:-0}))
+                    fi
+                done < "$stats_map_file"
+                
+                cycle_usage=0
+                last_total=$current_total
+
+                if [ "$status" = "suspended" ]; then
+                    if [ "$target_email" = "ALL" ]; then
+                        status="active"
+                        config_changed=1
+                    else
+                        read -p "User is suspended. Re-enable now? [Y/n]: " reenable
+                        if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
+                            status="active"
+                            config_changed=1
+                        fi
+                    fi
+                fi
+                echo -e "${GREEN}Billing cycle dates updated and usage reset to 0 GB for ${email}.${NC}"
+            else
+                echo -e "${GREEN}Billing cycle dates updated for ${email}.${NC}"
+            fi
+        fi
+
+        echo "${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+
+    rm -f "$stats_map_file"
+
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
+    mv "$tmp_db" "$db_file"
+
+    if [ "$config_changed" -eq 1 ]; then
+        sync_xray_clients_from_quota_db
+        reload_xray_container
+    fi
+}
+
 resolve_script_path() {
     local path="$0"
     if command -v realpath >/dev/null 2>&1; then
@@ -1873,9 +1982,10 @@ manage_xray_quotas() {
         echo "2) Check/apply quotas now"
         echo "3) Reset one user's current cycle usage"
         echo "4) Change one user's monthly limit"
-        echo "5) Configure automatic quota checks (systemd timer / cron)"
+        echo "5) Change one user's billing cycle dates"
+        echo "6) Configure automatic quota checks (systemd timer / cron)"
         echo "0) Back"
-        read -p "Enter your choice [0-5]: " quota_choice
+        read -p "Enter your choice [0-6]: " quota_choice
 
         case $quota_choice in
             1)
@@ -1891,6 +2001,9 @@ manage_xray_quotas() {
                 change_xray_user_limit
                 ;;
             5)
+                change_xray_user_billing_cycle
+                ;;
+            6)
                 configure_xray_quota_auto_check
                 ;;
             0)
