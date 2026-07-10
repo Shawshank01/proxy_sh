@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.8.4"
+SCRIPT_VERSION="3.8.5"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1461,7 +1461,11 @@ select_quota_user() {
         return 1
     fi
 
-    read -p "Select user [1-${#lines[@]}]: " select_idx
+    echo "0) Cancel & Go Back"
+    read -p "Select user [0-${#lines[@]}]: " select_idx
+    if [ "$select_idx" = "0" ]; then
+        return 1
+    fi
     if ! [[ "$select_idx" =~ ^[0-9]+$ ]] || [ "$select_idx" -lt 1 ] || [ "$select_idx" -gt ${#lines[@]} ]; then
         echo -e "${RED}Invalid selection.${NC}"
         return 1
