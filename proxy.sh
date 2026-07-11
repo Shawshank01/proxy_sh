@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.9.0"
+SCRIPT_VERSION="3.9.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1974,6 +1974,58 @@ configure_xray_quota_auto_check() {
     fi
 }
 
+show_xray_quota_auto_check_status() {
+    local systemd_enabled=0
+    local systemd_interval=""
+    local cron_enabled=0
+    local cron_schedule=""
+
+    # Check systemd timer
+    if systemd_available; then
+        if [ -f "/etc/systemd/system/xray-quota-check.timer" ]; then
+            if systemctl is-active xray-quota-check.timer >/dev/null 2>&1 || systemctl is-enabled xray-quota-check.timer >/dev/null 2>&1; then
+                systemd_enabled=1
+                systemd_interval=$(grep "^OnUnitActiveSec=" "/etc/systemd/system/xray-quota-check.timer" | cut -d'=' -f2 || true)
+            fi
+        fi
+    fi
+
+    # Check cron job
+    if command -v crontab >/dev/null 2>&1; then
+        local cron_line
+        cron_line=$(crontab -l 2>/dev/null | grep -E -- "--quota-check" | head -n 1 || true)
+        if [ -n "$cron_line" ]; then
+            cron_enabled=1
+            cron_schedule=$(echo "$cron_line" | awk '{print $1" "$2" "$3" "$4" "$5}')
+        fi
+    fi
+
+    echo ""
+    echo -e "${YELLOW}--- Automatic Quota Check Configuration Status ---${NC}"
+    if [ "$systemd_enabled" -eq 1 ]; then
+        echo -e "${GREEN}Status:${NC} Enabled"
+        echo -e "${GREEN}Method:${NC} Systemd Timer"
+        case "$systemd_interval" in
+            "1min") echo -e "${GREEN}Time Period:${NC} Every 1 minute" ;;
+            "2min") echo -e "${GREEN}Time Period:${NC} Every 2 minutes" ;;
+            "5min") echo -e "${GREEN}Time Period:${NC} Every 5 minutes" ;;
+            *) echo -e "${GREEN}Time Period:${NC} ${systemd_interval:-Unknown}" ;;
+        esac
+    elif [ "$cron_enabled" -eq 1 ]; then
+        echo -e "${GREEN}Status:${NC} Enabled"
+        echo -e "${GREEN}Method:${NC} Cron Job"
+        case "$cron_schedule" in
+            "* * * * *") echo -e "${GREEN}Time Period:${NC} Every 1 minute" ;;
+            "*/2 * * * *") echo -e "${GREEN}Time Period:${NC} Every 2 minutes" ;;
+            "*/5 * * * *") echo -e "${GREEN}Time Period:${NC} Every 5 minutes" ;;
+            *) echo -e "${GREEN}Time Period:${NC} Custom schedule (${cron_schedule})" ;;
+        esac
+    else
+        echo -e "${RED}Status:${NC} Disabled"
+        echo -e "Automatic quota checks are not scheduled."
+    fi
+}
+
 manage_xray_quotas() {
     while true; do
         echo ""
@@ -1984,8 +2036,9 @@ manage_xray_quotas() {
         echo "4) Change one user's monthly limit"
         echo "5) Change one user's billing cycle dates"
         echo "6) Configure automatic quota checks (systemd timer / cron)"
+        echo "7) Show automatic quota check configuration status"
         echo "0) Back"
-        read -p "Enter your choice [0-6]: " quota_choice
+        read -p "Enter your choice [0-7]: " quota_choice
 
         case $quota_choice in
             1)
@@ -2005,6 +2058,9 @@ manage_xray_quotas() {
                 ;;
             6)
                 configure_xray_quota_auto_check
+                ;;
+            7)
+                show_xray_quota_auto_check_status
                 ;;
             0)
                 break
@@ -2750,6 +2806,9 @@ if [ "${1:-}" = "--quota-check" ]; then
     if check_xray_requirements; then
         check_and_apply_xray_quotas
     fi
+    exit 0
+elif [ "${1:-}" = "--quota-check-status" ]; then
+    show_xray_quota_auto_check_status
     exit 0
 fi
 
