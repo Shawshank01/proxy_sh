@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.9.1"
+SCRIPT_VERSION="3.9.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -975,6 +975,107 @@ update_shadowsocks() {
         echo -e "${RED}Watchtower failed to run.${NC}"
         return 1
     fi
+}
+
+# Function to change/downgrade Xray or Shadowsocks container version
+change_container_version() {
+    echo ""
+    echo -e "${YELLOW}--- Change Container Version (Downgrade/Upgrade) ---${NC}"
+    echo "1) Xray"
+    echo "2) Shadowsocks"
+    echo "0) Back"
+    read -p "Select the container [0-2]: " container_choice
+
+    local dir=""
+    local container_name=""
+    local base_image=""
+
+    case $container_choice in
+        1)
+            dir="xray"
+            container_name="xray_server"
+            base_image="teddysun/xray"
+            ;;
+        2)
+            dir="shadowsocks"
+            container_name="ssserver"
+            base_image="ghcr.io/shadowsocks/ssserver-rust"
+            ;;
+        0)
+            return 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            return 1
+            ;;
+    esac
+
+    if [ ! -d "$dir" ] || [ ! -f "$dir/docker-compose.yml" ]; then
+        echo -e "${RED}Container directory or docker-compose.yml for ${dir} not found.${NC}"
+        return 1
+    fi
+
+    # Read current image configuration
+    local current_image
+    current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
+    echo -e "Current image in docker-compose.yml: ${GREEN}${current_image:-Unknown}${NC}"
+
+    echo ""
+    echo "Enter the specific version tag you want to downgrade/upgrade to."
+    echo "Examples: 26.6.27, 1.8.24, latest (or leave empty to use 'latest')"
+    read -p "Target version tag: " target_version
+
+    target_version=$(echo "$target_version" | xargs) # trim whitespace
+    if [ -z "$target_version" ]; then
+        target_version="latest"
+    fi
+
+    local new_image="$base_image"
+    if [ "$target_version" != "latest" ]; then
+        new_image="${base_image}:${target_version}"
+    fi
+
+    echo -e "Changing image to: ${YELLOW}${new_image}${NC}..."
+
+    # Use sed portably to update the image in docker-compose.yml
+    local tmp_file
+    tmp_file=$(mktemp)
+    if sed "s|image:.*|image: ${new_image}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
+        mv "$tmp_file" "$dir/docker-compose.yml"
+    else
+        rm -f "$tmp_file"
+        echo -e "${RED}Failed to update docker-compose.yml.${NC}"
+        return 1
+    fi
+
+    if [ -z "$DOCKER_COMPOSE_CMD" ]; then
+        if ! check_xray_requirements; then
+            return 1
+        fi
+    fi
+
+    echo "Pulling new image version..."
+    cd "$dir" || return 1
+    if sudo $DOCKER_COMPOSE_CMD pull; then
+        echo "Recreating container..."
+        if sudo $DOCKER_COMPOSE_CMD down && sudo $DOCKER_COMPOSE_CMD up -d; then
+            cd .. || true
+            echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
+            return 0
+        fi
+    fi
+
+    # If any step fails:
+    cd .. || true
+    echo -e "${RED}Failed to apply new version. Restoring compose file...${NC}"
+    local restore_tmp
+    restore_tmp=$(mktemp)
+    if sed "s|image:.*|image: ${current_image}|g" "$dir/docker-compose.yml" > "$restore_tmp"; then
+        mv "$restore_tmp" "$dir/docker-compose.yml"
+    else
+        rm -f "$restore_tmp"
+    fi
+    return 1
 }
 
 # Function to check environment (distro and Docker)
@@ -2830,7 +2931,7 @@ while true; do
     echo "1) Environment Check (Check distro and install Docker)"
     echo "2) Install Xray (VLESS-XHTTP-Reality)"
     echo "3) Install Shadowsocks (ssserver-rust)"
-    echo "4) Update existing container (Xray / Shadowsocks)"
+    echo "4) Update / Change version of existing container (Xray / Shadowsocks)"
     echo "5) Restore deployment from existing config"
     echo "6) Show VLESS links for current config"
     echo "7) Show SS links for current config"
@@ -2863,21 +2964,39 @@ while true; do
             if ! check_xray_requirements; then
                 continue
             fi
-            echo "Which container do you want to update?"
-            echo "1) Xray"
-            echo "2) Shadowsocks"
-            echo "3) Both"
-            read -p "Enter your choice [1-3]: " update_choice
-            case $update_choice in
+            echo ""
+            echo "Version / Update Management:"
+            echo "1) Update existing containers to latest"
+            echo "2) Downgrade / Change container version"
+            echo "0) Back"
+            read -p "Enter your choice [0-2]: " ver_choice
+            case $ver_choice in
                 1)
-                    update_xray
+                    echo "Which container do you want to update?"
+                    echo "1) Xray"
+                    echo "2) Shadowsocks"
+                    echo "3) Both"
+                    read -p "Enter your choice [1-3]: " update_choice
+                    case $update_choice in
+                        1)
+                            update_xray
+                            ;;
+                        2)
+                            update_shadowsocks
+                            ;;
+                        3)
+                            update_xray
+                            update_shadowsocks
+                            ;;
+                        *)
+                            echo -e "${RED}Invalid choice.${NC}"
+                            ;;
+                    esac
                     ;;
                 2)
-                    update_shadowsocks
+                    change_container_version
                     ;;
-                3)
-                    update_xray
-                    update_shadowsocks
+                0)
                     ;;
                 *)
                     echo -e "${RED}Invalid choice.${NC}"
