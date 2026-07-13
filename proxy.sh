@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.9.2"
+SCRIPT_VERSION="3.9.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -924,6 +924,60 @@ EOL
     cd ..
 }
 
+# Helper function to release any specific version lock and revert to latest
+# Returns:
+#   0: No lock present (safe to run Watchtower)
+#   1: Error occurred
+#   2: Lock released and container updated successfully
+release_version_lock_if_needed() {
+    local dir=$1
+    local base_image=$2
+    local default_tag=$3
+
+    if [ ! -f "$dir/docker-compose.yml" ]; then
+        return 0
+    fi
+
+    local current_image
+    current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
+
+    local expected_default="$base_image"
+    if [ -n "$default_tag" ]; then
+        expected_default="${base_image}:${default_tag}"
+    fi
+
+    if [ "$current_image" != "$expected_default" ] && [ "$current_image" != "$base_image" ]; then
+        echo -e "${YELLOW}Releasing version lock ($current_image) and resetting to latest...${NC}"
+        local tmp_file
+        tmp_file=$(mktemp)
+        if sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
+            mv "$tmp_file" "$dir/docker-compose.yml"
+            
+            if [ -z "$DOCKER_COMPOSE_CMD" ]; then
+                if ! check_xray_requirements; then
+                    return 1
+                fi
+            fi
+            echo "Recreating container with latest image..."
+            cd "$dir" || return 1
+            if sudo $DOCKER_COMPOSE_CMD pull && sudo $DOCKER_COMPOSE_CMD down && sudo $DOCKER_COMPOSE_CMD up -d; then
+                cd .. || true
+                echo -e "${GREEN}Reset to latest version successfully.${NC}"
+                return 2
+            else
+                cd .. || true
+                echo -e "${RED}Failed to recreate container with latest image.${NC}"
+                return 1
+            fi
+        else
+            rm -f "$tmp_file"
+            echo -e "${RED}Failed to update docker-compose.yml to release lock.${NC}"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # Function to update Xray
 update_xray() {
     local CONTAINER_NAME="xray_server"
@@ -933,6 +987,15 @@ update_xray() {
     if ! sudo docker ps -a -q -f name="^/${CONTAINER_NAME}$" | grep -q .; then
         echo -e "${RED}Container '${CONTAINER_NAME}' not found. Cannot update.${NC}"
         return 1
+    fi
+
+    # Release version lock if present
+    local lock_status=0
+    release_version_lock_if_needed "xray" "teddysun/xray" "" || lock_status=$?
+    if [ "$lock_status" -eq 1 ]; then
+        return 1
+    elif [ "$lock_status" -eq 2 ]; then
+        return 0
     fi
 
     echo "Updating ${CONTAINER_NAME}..."
@@ -959,6 +1022,15 @@ update_shadowsocks() {
     if ! sudo docker ps -a -q -f name="^/${CONTAINER_NAME}$" | grep -q .; then
         echo -e "${RED}Container '${CONTAINER_NAME}' not found. Cannot update.${NC}"
         return 1
+    fi
+
+    # Release version lock if present
+    local lock_status=0
+    release_version_lock_if_needed "shadowsocks" "ghcr.io/shadowsocks/ssserver-rust" "latest" || lock_status=$?
+    if [ "$lock_status" -eq 1 ]; then
+        return 1
+    elif [ "$lock_status" -eq 2 ]; then
+        return 0
     fi
 
     echo "Updating ${CONTAINER_NAME}..."
@@ -1021,13 +1093,13 @@ change_container_version() {
     echo -e "Current image in docker-compose.yml: ${GREEN}${current_image:-Unknown}${NC}"
 
     echo ""
-    echo "Enter the specific version tag you want to downgrade/upgrade to."
-    echo "Examples: 26.6.27, 1.8.24, latest (or leave empty to use 'latest')"
+    echo "Enter the specific version tag you want to downgrade/upgrade to:"
     read -p "Target version tag: " target_version
 
-    target_version=$(echo "$target_version" | xargs) # trim whitespace
+    target_version=$(echo "$target_version" | xargs)
     if [ -z "$target_version" ]; then
-        target_version="latest"
+        echo -e "${RED}Version tag cannot be empty.${NC}"
+        return 1
     fi
 
     local new_image="$base_image"
