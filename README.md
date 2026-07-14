@@ -11,12 +11,12 @@ For the freedom of the internet!
 - **Interactive Installation**: Guides you through setting up an Xray VLESS-XHTTP-Reality proxy.
 - **Xray Per-User Monthly Quotas**: Optional per-user MB limits with automatic suspension when a limit is reached.
 - **Per-User Anniversary Billing Cycle**: Each user cycle starts from their account creation timestamp and rolls monthly (with end-of-month clamping).
-- **Quota Management Menu**: Check/apply quotas, reset user usage, and change user limits later without recreating users.
+- **Quota Management Menu**: Check/apply quotas, reset user usage, change user limits, and view automatic check scheduler status.
 - **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
 - **IPv6 Support**: Optional dual-stack listening for both Xray and Shadowsocks.
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
 - **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
-- **Container Management**: Easy-to-use menu for updating, viewing links, or deleting the Xray container and its configuration.
+- **Container Management**: Easy-to-use menu for updating, changing/downgrading versions, viewing links, or deleting containers and configurations.
 - **Self-Updating**: The script automatically checks for a new version on startup (interactive mode) and can also be updated manually from the menu.
 
 ## Usage
@@ -61,7 +61,7 @@ This script is designed to run as a **non-root** user.
     -   Ask for the number of users and the listening port.
     -   Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
     -   Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
--   **4) Update existing container (Xray or Shadowsocks)**: Pulls the latest Docker image and restarts the selected container using Watchtower.
+-   **4) Update / Change version of existing container (Xray / Shadowsocks)**: Allows you to either update containers to the latest version via Watchtower or pin/downgrade them to a specific version tag. Releasing version locks is fully automated when updating to latest.
 -   **5) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
 -   **6) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
 -   **7) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
@@ -72,6 +72,7 @@ This script is designed to run as a **non-root** user.
     -   Reset one user's current-cycle usage
     -   Change one user's monthly limit
     -   Configure automatic quota checks via systemd timer (recommended on Ubuntu) or cron fallback (1/2/5-minute intervals)
+    -   Show automatic quota check configuration status (method and interval/schedule)
 -   **10) Manage users (Add/Remove for Xray / Shadowsocks)**:
     -   Add Xray users without recreating existing users
     -   Remove specific Xray users without affecting others
@@ -95,7 +96,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
   - `xray/user_limits.conf` (timezone)
   - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
 - Billing cycle is per-user **anniversary monthly** (from account creation timestamp to next month same local time, clamped to month-end when needed).
-- Quota checks run when you execute menu option `9 -> 2` (recommended to automate with a systemd timer on Ubuntu, or cron fallback, for timely suspension/re-enable).
+- Quota checks run when you execute menu option `9 -> 2` (recommended to automate with a systemd timer on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `9 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
     - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.  
