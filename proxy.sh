@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.9.3"
+SCRIPT_VERSION="3.9.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -2120,7 +2120,7 @@ configure_xray_quota_auto_check() {
     echo ""
     echo "Choose scheduler for automatic quota checks:"
     if systemd_available; then
-        echo "1) Systemd timer (recommended on Ubuntu 24.04+)"
+        echo "1) Systemd timer (recommended)"
         echo "2) Cron"
         echo "3) Disable all automatic quota checks"
         read -p "Enter your choice [1-3]: " scheduler_choice
