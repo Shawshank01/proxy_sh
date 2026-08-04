@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.9.5"
+SCRIPT_VERSION="3.10.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -19,6 +19,36 @@ NC='\033[0m'
 
 # Global variable for Docker Compose command
 DOCKER_COMPOSE_CMD=""
+XRAY_DOCKER_IMAGE="teddysun/xray:latest"
+
+# Global state & cleanup trap for temporary files
+TMP_FILES=()
+cleanup_tmp_files() {
+    if [ ${#TMP_FILES[@]} -gt 0 ]; then
+        rm -f "${TMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+trap cleanup_tmp_files EXIT INT TERM
+
+make_temp_file() {
+    local tmp
+    tmp=$(mktemp)
+    TMP_FILES+=("$tmp")
+    echo "$tmp"
+}
+
+save_quota_db_content() {
+    local content="$1"
+    local db_file="xray/user_limits.db"
+    local tmp_db
+    tmp_db=$(make_temp_file)
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    if [ -n "$content" ]; then
+        printf "%s\n" "$content" >> "$tmp_db"
+    fi
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
+    mv "$tmp_db" "$db_file"
+}
 
 # --- Functions ---
 
@@ -290,17 +320,16 @@ install_xray() {
     echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
     mkdir -p xray
-    cd xray || return 1
+    ( cd xray || return 1
 
-    echo "Pulling teddysun/xray image..."
-    sudo docker pull teddysun/xray
+    echo "Pulling $XRAY_DOCKER_IMAGE image..."
+    sudo docker pull "$XRAY_DOCKER_IMAGE"
 
     read -p "How many users do you need? [Default: $DEFAULT_UUIDS]: " num_uuids
     num_uuids=${num_uuids:-$DEFAULT_UUIDS}
 
     if ! [[ "$num_uuids" =~ ^[0-9]+$ ]] || [ "$num_uuids" -lt 1 ]; then
         echo -e "${RED}User count must be a positive integer.${NC}"
-        cd ..
         return 1
     fi
 
@@ -313,18 +342,18 @@ install_xray() {
 
     # Generate keys and IDs
     echo "Generating keys and IDs..."
-    KEYS=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519)
+    KEYS=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519)
     PRIVATE_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /private[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
     PUBLIC_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
 
     if [ -z "$PRIVATE_KEY" ]; then
         echo -e "${RED}Failed to parse x25519 private key. Command output:${NC}"
         echo "$KEYS"
-        exit 1
+        return 1
     fi
 
     if [ -z "$PUBLIC_KEY" ]; then
-        DERIVED=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$PRIVATE_KEY")
+        DERIVED=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$PRIVATE_KEY")
         PUBLIC_KEY=$(echo "$DERIVED" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
     fi
 
@@ -335,7 +364,7 @@ install_xray() {
         else
             echo "$KEYS"
         fi
-        exit 1
+        return 1
     fi
 
     CLIENTS_JSON=""
@@ -348,7 +377,7 @@ install_xray() {
     USER_SHORTIDS=()
 
     for i in $(seq 1 $num_uuids); do
-        uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray uuid)
+        uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
 
         while true; do
             user_email="u$(openssl rand -hex 8)"
@@ -363,7 +392,6 @@ install_xray() {
         user_shortids_count=${user_shortids_count:-1}
         if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]] || [ "$user_shortids_count" -lt 1 ]; then
             echo -e "${RED}shortId count for ${user_email} must be a positive integer.${NC}"
-            cd ..
             return 1
         fi
 
@@ -402,14 +430,17 @@ install_xray() {
         fi
 
         user_anchor_now=$(date +%s)
-        calculate_cycle_bounds "$user_anchor_now" "$user_anchor_now" "$QUOTA_TIMEZONE"
+        local cycle_bounds
+        cycle_bounds=$(calculate_cycle_bounds "$user_anchor_now" "$user_anchor_now" "$QUOTA_TIMEZONE")
+        local user_cycle_start="${cycle_bounds%%|*}"
+        local user_cycle_end="${cycle_bounds##*|}"
 
         CLIENTS_JSON+="{\"id\": \"$uuid\", \"flow\": \"\", \"email\": \"$user_email\"}"
         if [ "$i" -lt "$num_uuids" ]; then
             CLIENTS_JSON+=","
         fi
 
-        QUOTA_DB_LINES+="${user_email}|${uuid}|${user_limit_gb}|${user_anchor_now}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active"
+        QUOTA_DB_LINES+="${user_email}|${uuid}|${user_limit_gb}|${user_anchor_now}|${user_cycle_start}|${user_cycle_end}|0|0|active"
         if [ "$i" -lt "$num_uuids" ]; then
             QUOTA_DB_LINES+=$'\n'
         fi
@@ -465,7 +496,7 @@ install_xray() {
         fi
 
         echo "Running xray tls ping for $PING_HOST..."
-        PING_OUTPUT=$(sudo docker run --rm teddysun/xray:latest xray tls ping "$PING_HOST" 2>&1)
+        PING_OUTPUT=$(sudo docker run --rm "$XRAY_DOCKER_IMAGE" xray tls ping "$PING_HOST" 2>&1)
         echo "----- tls ping output -----"
         echo "$PING_OUTPUT"
         echo "---------------------------"
@@ -582,7 +613,7 @@ install_xray() {
     cat > docker-compose.yml << 'EOL'
 services:
   xray:
-    image: teddysun/xray
+    image: ${XRAY_DOCKER_IMAGE}
     container_name: xray_server
     restart: unless-stopped
     network_mode: host
@@ -594,6 +625,9 @@ services:
         max-size: "10m"
         max-file: "3"
 EOL
+
+    # Write .env so Docker Compose can resolve ${XRAY_DOCKER_IMAGE}
+    echo "XRAY_DOCKER_IMAGE=${XRAY_DOCKER_IMAGE}" > .env
 
     # Create server.jsonc (with routing, sniffing, two outbounds, and all serverNames)
     cat > server.jsonc << EOL
@@ -750,7 +784,7 @@ EOL
 
     if [ -z "$SNI_DOMAIN" ]; then
         echo -e "${RED}Unable to determine Reality SNI from server.jsonc. Please set serverNames or a valid target (host:port).${NC}"
-        exit 1
+        return 1
     fi
 
     # Generate links using each user's assigned shortIds only
@@ -795,18 +829,16 @@ EOL
         sudo $DOCKER_COMPOSE_CMD up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
-    else
         echo -e "${RED}Container start cancelled.${NC}"
     fi
-
-    cd ..
+) || return 1
 }
 
 install_shadowsocks() {
     echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
 
     mkdir -p shadowsocks
-    cd shadowsocks || return 1
+    ( cd shadowsocks || return 1
 
     echo "Pulling ghcr.io/shadowsocks/ssserver-rust image..."
     sudo docker pull ghcr.io/shadowsocks/ssserver-rust:latest
@@ -919,7 +951,7 @@ EOL
         echo -e "${RED}Container start cancelled.${NC}"
     fi
 
-    cd ..
+    ) || return 1
 }
 
 # Helper function to release any specific version lock and revert to latest
@@ -947,7 +979,7 @@ release_version_lock_if_needed() {
     if [ "$current_image" != "$expected_default" ] && [ "$current_image" != "$base_image" ]; then
         echo -e "${YELLOW}Releasing version lock ($current_image) and resetting to latest...${NC}"
         local tmp_file
-        tmp_file=$(mktemp)
+        tmp_file=$(make_temp_file)
         if sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
             mv "$tmp_file" "$dir/docker-compose.yml"
 
@@ -957,13 +989,10 @@ release_version_lock_if_needed() {
                 fi
             fi
             echo "Recreating container with latest image..."
-            cd "$dir" || return 1
-            if sudo $DOCKER_COMPOSE_CMD pull && sudo $DOCKER_COMPOSE_CMD down && sudo $DOCKER_COMPOSE_CMD up -d; then
-                cd .. || true
+            if ( cd "$dir" && sudo $DOCKER_COMPOSE_CMD pull && sudo $DOCKER_COMPOSE_CMD down && sudo $DOCKER_COMPOSE_CMD up -d ); then
                 echo -e "${GREEN}Reset to latest version successfully.${NC}"
                 return 2
             else
-                cd .. || true
                 echo -e "${RED}Failed to recreate container with latest image.${NC}"
                 return 1
             fi
@@ -987,7 +1016,7 @@ update_xray() {
 
     # Release version lock if present
     local lock_status=0
-    release_version_lock_if_needed "xray" "teddysun/xray" "" || lock_status=$?
+    release_version_lock_if_needed "xray" "${XRAY_DOCKER_IMAGE%%:*}" "" || lock_status=$?
     if [ "$lock_status" -eq 1 ]; then
         return 1
     elif [ "$lock_status" -eq 2 ]; then
@@ -1060,7 +1089,7 @@ change_container_version() {
         1)
             dir="xray"
             container_name="xray_server"
-            base_image="teddysun/xray"
+            base_image="${XRAY_DOCKER_IMAGE%%:*}"
             ;;
         2)
             dir="shadowsocks"
@@ -1105,7 +1134,7 @@ change_container_version() {
 
     # Use sed portably to update the image in docker-compose.yml
     local tmp_file
-    tmp_file=$(mktemp)
+    tmp_file=$(make_temp_file)
     if sed "s|image:.*|image: ${new_image}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
         mv "$tmp_file" "$dir/docker-compose.yml"
     else
@@ -1121,20 +1150,16 @@ change_container_version() {
     fi
 
     echo "Pulling new image version..."
-    cd "$dir" || return 1
-    if sudo $DOCKER_COMPOSE_CMD pull; then
+    if ( cd "$dir" && sudo $DOCKER_COMPOSE_CMD pull ); then
         echo "Recreating container..."
-        if sudo $DOCKER_COMPOSE_CMD down && sudo $DOCKER_COMPOSE_CMD up -d; then
-            cd .. || true
+        if ( cd "$dir" && sudo $DOCKER_COMPOSE_CMD down && sudo $DOCKER_COMPOSE_CMD up -d ); then
             echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
             return 0
         fi
     fi
-
-    cd .. || true
     echo -e "${RED}Failed to apply new version. Restoring compose file...${NC}"
     local restore_tmp
-    restore_tmp=$(mktemp)
+    restore_tmp=$(make_temp_file)
     if sed "s|image:.*|image: ${current_image}|g" "$dir/docker-compose.yml" > "$restore_tmp"; then
         mv "$restore_tmp" "$dir/docker-compose.yml"
     else
@@ -1225,16 +1250,16 @@ calculate_cycle_bounds() {
 
     # Safety for unusual clock/timezone conditions
     if [ "$start_epoch" -gt "$now_epoch" ]; then
-        CYCLE_START_EPOCH=$start_epoch
-        CYCLE_END_EPOCH=$(add_months_clamped_epoch "$anchor_epoch" $((month_offset + 1)) "$timezone")
+        local end_epoch
+        end_epoch=$(add_months_clamped_epoch "$anchor_epoch" $((month_offset + 1)) "$timezone")
+        echo "${start_epoch}|${end_epoch}"
         return
     fi
 
     while true; do
         next_epoch=$(add_months_clamped_epoch "$anchor_epoch" $((month_offset + 1)) "$timezone")
         if [ "$now_epoch" -lt "$next_epoch" ]; then
-            CYCLE_START_EPOCH=$start_epoch
-            CYCLE_END_EPOCH=$next_epoch
+            echo "${start_epoch}|${next_epoch}"
             return
         fi
         month_offset=$((month_offset + 1))
@@ -1314,7 +1339,7 @@ sync_xray_clients_from_quota_db() {
     fi
 
     local tmp_file
-    tmp_file=$(mktemp)
+    tmp_file=$(make_temp_file)
 
     awk -v clients="$clients_json" '
         BEGIN { in_clients = 0 }
@@ -1326,7 +1351,7 @@ sync_xray_clients_from_quota_db() {
                 next
             }
             if (in_clients == 1) {
-                if ($0 ~ /^[[:space:]]*\][[:space:]]*,[[:space:]]*$/) {
+                if ($0 ~ /^[[:space:]]*\][[:space:]]*,?[[:space:]]*$/) {
                     print
                     in_clients = 0
                 }
@@ -1335,6 +1360,13 @@ sync_xray_clients_from_quota_db() {
             print
         }
     ' "$config_file" > "$tmp_file"
+
+    # Validate the generated config is valid JSON
+    if command -v jq &>/dev/null && ! jq empty "$tmp_file" 2>/dev/null; then
+        echo -e "${RED}Error: Config file corruption detected after client sync. Aborting.${NC}" >&2
+        rm -f "$tmp_file"
+        return 1
+    fi
 
     apply_preserved_file_metadata "$config_file" "$tmp_file"
     mv "$tmp_file" "$config_file"
@@ -1353,13 +1385,10 @@ reload_xray_container() {
         fi
     fi
 
-    cd xray || return 1
-    if sudo $DOCKER_COMPOSE_CMD restart xray; then
-        cd .. || true
+    if ( cd xray && sudo $DOCKER_COMPOSE_CMD restart xray ); then
         echo -e "${GREEN}Xray container reloaded successfully.${NC}"
         return 0
     else
-        cd .. || true
         echo -e "${RED}Failed to reload Xray container.${NC}"
         return 1
     fi
@@ -1369,10 +1398,11 @@ collect_xray_user_stats() {
     local map_file=$1
 
     : > "$map_file"
-    COLLECTED_STATS_COUNT=0
-    XRAY_STATS_LAST_ERROR=""
+    local stats_count=0
+    local stats_error=""
 
     if ! sudo docker ps -q -f name="^/xray_server$" | grep -q .; then
+        echo "${stats_count}|${stats_error}"
         return 0
     fi
 
@@ -1380,12 +1410,13 @@ collect_xray_user_stats() {
     raw_stats=$(sudo docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
 
     if [ -z "$raw_stats" ]; then
-        XRAY_STATS_LAST_ERROR="empty statsquery output"
+        stats_error="empty statsquery output"
+        echo "${stats_count}|${stats_error}"
         return 0
     fi
 
     if echo "$raw_stats" | grep -qiE "failed|error|unavailable|connection refused"; then
-        XRAY_STATS_LAST_ERROR=$(echo "$raw_stats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+        stats_error=$(echo "$raw_stats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
     fi
 
     local pending_user=""
@@ -1420,8 +1451,10 @@ collect_xray_user_stats() {
     done <<< "$raw_stats"
 
     if [ -s "$map_file" ]; then
-        COLLECTED_STATS_COUNT=$(wc -l < "$map_file" | tr -d ' ')
+        stats_count=$(wc -l < "$map_file" | tr -d ' ')
     fi
+
+    echo "${stats_count}|${stats_error}"
 }
 
 check_and_apply_xray_quotas() {
@@ -1440,13 +1473,16 @@ check_and_apply_xray_quotas() {
     now_epoch=$(date +%s)
 
     local stats_map_file
-    stats_map_file=$(mktemp)
-    collect_xray_user_stats "$stats_map_file"
+    stats_map_file=$(make_temp_file)
+    local stats_result
+    stats_result=$(collect_xray_user_stats "$stats_map_file")
+    local collected_stats_count="${stats_result%%|*}"
+    local xray_stats_last_error="${stats_result##*|}"
 
-    if [ "${COLLECTED_STATS_COUNT:-0}" -eq 0 ]; then
+    if [ "${collected_stats_count:-0}" -eq 0 ]; then
         echo -e "${YELLOW}Warning: no per-user traffic stats were collected from Xray.${NC}"
-        if [ -n "${XRAY_STATS_LAST_ERROR:-}" ]; then
-            echo -e "${YELLOW}Xray stats response:${NC} ${XRAY_STATS_LAST_ERROR}"
+        if [ -n "${xray_stats_last_error:-}" ]; then
+            echo -e "${YELLOW}Xray stats response:${NC} ${xray_stats_last_error}"
         fi
         echo -e "${YELLOW}Usage values may remain unchanged until stats become available.${NC}"
     fi
@@ -1466,21 +1502,21 @@ check_and_apply_xray_quotas() {
 
     rm -f "$stats_map_file"
 
-    local tmp_db
-    tmp_db=$(mktemp)
-    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-
+    local db_lines=""
     local config_changed=0
     while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
 
-        calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone"
+        local cycle_bounds
+        cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone")
+        local new_cycle_start="${cycle_bounds%%|*}"
+        local new_cycle_end="${cycle_bounds##*|}"
 
         local cycle_rotated=0
-        if [ "$cycle_start" != "$CYCLE_START_EPOCH" ] || [ "$cycle_end" != "$CYCLE_END_EPOCH" ]; then
+        if [ "$cycle_start" != "$new_cycle_start" ] || [ "$cycle_end" != "$new_cycle_end" ]; then
             cycle_usage=0
-            cycle_start=$CYCLE_START_EPOCH
-            cycle_end=$CYCLE_END_EPOCH
+            cycle_start=$new_cycle_start
+            cycle_end=$new_cycle_end
             cycle_rotated=1
             if [ "$status" = "suspended" ]; then
                 status="active"
@@ -1518,11 +1554,13 @@ check_and_apply_xray_quotas() {
             fi
         fi
 
-        echo "${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+        if [ -n "$db_lines" ]; then
+            db_lines+=$'\n'
+        fi
+        db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
-    apply_preserved_file_metadata "$db_file" "$tmp_db"
-    mv "$tmp_db" "$db_file"
+    save_quota_db_content "$db_lines"
 
     if [ "$config_changed" -eq 1 ]; then
         sync_xray_clients_from_quota_db
@@ -1567,39 +1605,37 @@ show_xray_quota_status() {
 select_quota_user() {
     local db_file="xray/user_limits.db"
     if [ ! -f "$db_file" ]; then
-        echo -e "${RED}Quota database not found.${NC}"
+        echo -e "${RED}Quota database not found.${NC}" >&2
         return 1
     fi
-
-    QUOTA_SELECTION_EMAIL=""
 
     local idx=1
     local lines=()
     while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
         lines+=("$email|$uuid|$limit_gb|$anchor_epoch|$cycle_start|$cycle_end|$cycle_usage|$last_total|$status")
-        echo "${idx}) ${email} (status: ${status}, limit: ${limit_gb} GB)"
+        echo "${idx}) ${email} (status: ${status}, limit: ${limit_gb} GB)" >&2
         idx=$((idx + 1))
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
     if [ ${#lines[@]} -eq 0 ]; then
-        echo -e "${RED}No users found in quota database.${NC}"
+        echo -e "${RED}No users found in quota database.${NC}" >&2
         return 1
     fi
 
-    echo "0) Cancel & Go Back"
-    read -p "Select user [0-${#lines[@]}]: " select_idx
+    echo "0) Cancel & Go Back" >&2
+    read -p "Select user [0-${#lines[@]}]: " select_idx </dev/tty
     if [ "$select_idx" = "0" ]; then
         return 1
     fi
-    if ! [[ "$select_idx" =~ ^[0-9]+$ ]] || [ "$select_idx" -lt 1 ] || [ "$select_idx" -gt ${#lines[@]} ]; then
-        echo -e "${RED}Invalid selection.${NC}"
+    local sel_val=$((10#${select_idx:-0}))
+    if ! [[ "$select_idx" =~ ^[0-9]+$ ]] || [ "$sel_val" -lt 1 ] || [ "$sel_val" -gt ${#lines[@]} ]; then
+        echo -e "${RED}Invalid selection.${NC}" >&2
         return 1
     fi
 
-    local selected="${lines[$((select_idx - 1))]}"
-    QUOTA_SELECTION_EMAIL=$(echo "$selected" | cut -d'|' -f1)
-    return 0
+    local selected="${lines[$((sel_val - 1))]}"
+    echo "$selected" | cut -d'|' -f1
 }
 
 reset_xray_user_usage() {
@@ -1609,22 +1645,16 @@ reset_xray_user_usage() {
     if [[ "$reset_all" == "y" || "$reset_all" == "Y" ]]; then
         target_email="ALL"
     else
-        if ! select_quota_user; then
-            return 0
-        fi
-        target_email="$QUOTA_SELECTION_EMAIL"
+        target_email=$(select_quota_user) || return 0
     fi
 
     local db_file="xray/user_limits.db"
 
     local stats_map_file
-    stats_map_file=$(mktemp)
+    stats_map_file=$(make_temp_file)
     collect_xray_user_stats "$stats_map_file"
 
-    local tmp_db
-    tmp_db=$(mktemp)
-    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-
+    local db_lines=""
     local config_changed=0
     while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
@@ -1654,11 +1684,13 @@ reset_xray_user_usage() {
             echo -e "${GREEN}Usage reset for ${email}.${NC}"
         fi
 
-        echo "${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+        if [ -n "$db_lines" ]; then
+            db_lines+=$'\n'
+        fi
+        db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
-    apply_preserved_file_metadata "$db_file" "$tmp_db"
-    mv "$tmp_db" "$db_file"
+    save_quota_db_content "$db_lines"
 
     if [ "$config_changed" -eq 1 ]; then
         sync_xray_clients_from_quota_db
@@ -1667,11 +1699,8 @@ reset_xray_user_usage() {
 }
 
 change_xray_user_limit() {
-    if ! select_quota_user; then
-        return 0
-    fi
-
-    local target_email="$QUOTA_SELECTION_EMAIL"
+    local target_email
+    target_email=$(select_quota_user) || return 0
     local db_file="xray/user_limits.db"
 
     read -p "Enter new monthly limit in GB (0 = unlimited): " new_limit_gb
@@ -1679,11 +1708,9 @@ change_xray_user_limit() {
         echo -e "${RED}Limit must be a non-negative integer.${NC}"
         return 1
     fi
+    new_limit_gb=$((10#$new_limit_gb))
 
-    local tmp_db
-    tmp_db=$(mktemp)
-    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-
+    local db_lines=""
     local config_changed=0
     while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
@@ -1712,11 +1739,13 @@ change_xray_user_limit() {
             echo -e "${GREEN}Updated limit for ${email} to ${limit_gb} GB.${NC}"
         fi
 
-        echo "${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+        if [ -n "$db_lines" ]; then
+            db_lines+=$'\n'
+        fi
+        db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
-    apply_preserved_file_metadata "$db_file" "$tmp_db"
-    mv "$tmp_db" "$db_file"
+    save_quota_db_content "$db_lines"
 
     if [ "$config_changed" -eq 1 ]; then
         sync_xray_clients_from_quota_db
@@ -1731,10 +1760,7 @@ change_xray_user_billing_cycle() {
     if [[ "$change_all" == "y" || "$change_all" == "Y" ]]; then
         target_email="ALL"
     else
-        if ! select_quota_user; then
-            return 0
-        fi
-        target_email="$QUOTA_SELECTION_EMAIL"
+        target_email=$(select_quota_user) || return 0
     fi
 
     local db_file="xray/user_limits.db"
@@ -1758,25 +1784,23 @@ change_xray_user_billing_cycle() {
         new_anchor_epoch=$(date +%s)
     elif [ "$cycle_choice" = "2" ]; then
         read -p "Enter the day of the month [1-28]: " cycle_day
-        if ! [[ "$cycle_day" =~ ^[0-9]+$ ]] || [ "$cycle_day" -lt 1 ] || [ "$cycle_day" -gt 28 ]; then
+        local clean_day=$((10#${cycle_day:-0}))
+        if ! [[ "$cycle_day" =~ ^[0-9]+$ ]] || [ "$clean_day" -lt 1 ] || [ "$clean_day" -gt 28 ]; then
             echo -e "${RED}Invalid day. Must be between 1 and 28.${NC}"
             return 1
         fi
-        new_anchor_epoch=$(TZ="$timezone" date -d "2000-01-$(printf "%02d" "$cycle_day") 00:00:00" +%s)
+        new_anchor_epoch=$(TZ="$timezone" date -d "2000-01-$(printf "%02d" "$clean_day") 00:00:00" +%s)
     else
         return 0
     fi
 
     read -p "Do you also want to wipe their current traffic usage back to 0 GB? [y/N]: " reset_usage
 
-    local tmp_db
-    tmp_db=$(mktemp)
-    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-
     local stats_map_file
-    stats_map_file=$(mktemp)
+    stats_map_file=$(make_temp_file)
     collect_xray_user_stats "$stats_map_file"
 
+    local db_lines=""
     local config_changed=0
     local now_epoch
     now_epoch=$(date +%s)
@@ -1786,9 +1810,10 @@ change_xray_user_billing_cycle() {
 
         if [ "$target_email" = "ALL" ] || [ "$email" = "$target_email" ]; then
             anchor_epoch="$new_anchor_epoch"
-            calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone"
-            cycle_start=$CYCLE_START_EPOCH
-            cycle_end=$CYCLE_END_EPOCH
+            local cycle_bounds
+            cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone")
+            cycle_start="${cycle_bounds%%|*}"
+            cycle_end="${cycle_bounds##*|}"
 
             if [[ "$reset_usage" == "y" || "$reset_usage" == "Y" ]]; then
                 local current_total=0
@@ -1819,13 +1844,13 @@ change_xray_user_billing_cycle() {
             fi
         fi
 
-        echo "${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
+        if [ -n "$db_lines" ]; then
+            db_lines+=$'\n'
+        fi
+        db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
-    rm -f "$stats_map_file"
-
-    apply_preserved_file_metadata "$db_file" "$tmp_db"
-    mv "$tmp_db" "$db_file"
+    save_quota_db_content "$db_lines"
 
     if [ "$config_changed" -eq 1 ]; then
         sync_xray_clients_from_quota_db
@@ -2210,13 +2235,10 @@ reload_shadowsocks_container() {
         fi
     fi
 
-    cd shadowsocks || return 1
-    if sudo $DOCKER_COMPOSE_CMD restart ssserver; then
-        cd .. || true
+    if (cd shadowsocks && sudo $DOCKER_COMPOSE_CMD restart ssserver); then
         echo -e "${GREEN}Shadowsocks container reloaded successfully.${NC}"
         return 0
     else
-        cd .. || true
         echo -e "${RED}Failed to reload Shadowsocks container.${NC}"
         return 1
     fi
@@ -2240,11 +2262,12 @@ add_xray_user() {
     done
 
     local uuid
-    uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray uuid)
+    uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
 
     read -p "How many shortIds for generated links of ${user_id}? [Default: 1]: " user_shortids_count
     user_shortids_count=${user_shortids_count:-1}
-    if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]] || [ "$user_shortids_count" -lt 1 ]; then
+    local clean_sid_count=$((10#${user_shortids_count:-0}))
+    if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]] || [ "$clean_sid_count" -lt 1 ]; then
         echo -e "${RED}shortId count must be a positive integer.${NC}"
         return 1
     fi
@@ -2254,7 +2277,7 @@ add_xray_user() {
     if ensure_jq; then
         local existing_shortids
         existing_shortids=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[]' "$config_file" 2>/dev/null || true)
-        for sid_idx in $(seq 1 $user_shortids_count); do
+        for sid_idx in $(seq 1 $clean_sid_count); do
             local new_sid
             while true; do
                 new_sid=$(openssl rand -hex 4)
@@ -2273,13 +2296,13 @@ add_xray_user() {
             sid_add_json=$(echo "$sid_add_json" | jq --arg s "$sid" '. + [$s]')
         done
         local tmp_config
-        tmp_config=$(mktemp)
+        tmp_config=$(make_temp_file)
         jq --argjson newids "$sid_add_json" '(.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds) += $newids' "$config_file" > "$tmp_config"
         apply_preserved_file_metadata "$config_file" "$tmp_config"
         mv "$tmp_config" "$config_file"
     else
         # Fallback: generate shortids but cannot add to config without jq
-        for sid_idx in $(seq 1 $user_shortids_count); do
+        for sid_idx in $(seq 1 $clean_sid_count); do
             new_shortids+=("$(openssl rand -hex 4)")
         done
         echo -e "${YELLOW}Warning: 'jq' unavailable, new shortIds could not be added to server.jsonc automatically.${NC}"
@@ -2291,7 +2314,8 @@ add_xray_user() {
         while true; do
             read -p "Enter monthly limit for ${user_id} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb
             user_limit_gb=${user_limit_gb:-$DEFAULT_USER_LIMIT_GB}
-            if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [ "$user_limit_gb" -gt 0 ]; then
+            if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [ "$((10#$user_limit_gb))" -gt 0 ]; then
+                user_limit_gb=$((10#$user_limit_gb))
                 break
             fi
             echo -e "${RED}Please enter a positive integer GB value.${NC}"
@@ -2301,16 +2325,18 @@ add_xray_user() {
     local timezone now_epoch
     timezone=$(read_xray_quota_timezone)
     now_epoch=$(date +%s)
-    calculate_cycle_bounds "$now_epoch" "$now_epoch" "$timezone"
+    local cycle_bounds
+    cycle_bounds=$(calculate_cycle_bounds "$now_epoch" "$now_epoch" "$timezone")
+    local cycle_start="${cycle_bounds%%|*}"
+    local cycle_end="${cycle_bounds##*|}"
 
-    local tmp_db
-    tmp_db=$(mktemp)
-    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-    grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' >> "$tmp_db" || true
-    echo "${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${CYCLE_START_EPOCH}|${CYCLE_END_EPOCH}|0|0|active" >> "$tmp_db"
-
-    apply_preserved_file_metadata "$db_file" "$tmp_db"
-    mv "$tmp_db" "$db_file"
+    local existing_db
+    existing_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' || true)
+    if [ -n "$existing_db" ]; then
+        existing_db+=$'\n'
+    fi
+    existing_db+="${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${cycle_start}|${cycle_end}|0|0|active"
+    save_quota_db_content "$existing_db"
 
     sync_xray_clients_from_quota_db
     reload_xray_container
@@ -2331,7 +2357,7 @@ add_xray_user() {
 
             if [ -n "$private_key" ]; then
                 local derived
-                derived=$(sudo docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$private_key")
+                derived=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$private_key")
                 public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
             fi
 
@@ -2363,28 +2389,21 @@ remove_xray_user() {
         return 1
     fi
 
-    if ! select_quota_user; then
-        return 0
-    fi
-
-    local target_email="$QUOTA_SELECTION_EMAIL"
+    local target_email
+    target_email=$(select_quota_user) || return 0
     local target_uuid
     target_uuid=$(grep "^${target_email}|" "$db_file" | head -n1 | cut -d'|' -f2)
 
-    local tmp_db
-    tmp_db=$(mktemp)
-    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-    grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" >> "$tmp_db" || true
-
-    apply_preserved_file_metadata "$db_file" "$tmp_db"
-    mv "$tmp_db" "$db_file"
+    local filtered_db
+    filtered_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" || true)
+    save_quota_db_content "$filtered_db"
 
     sync_xray_clients_from_quota_db
     reload_xray_container
 
     if [ -f "xray/vless_links.txt" ] && [ -n "$target_uuid" ]; then
         local tmp_links
-        tmp_links=$(mktemp)
+        tmp_links=$(make_temp_file)
         grep -v -- "$target_uuid" xray/vless_links.txt > "$tmp_links" || true
         apply_preserved_file_metadata "xray/vless_links.txt" "$tmp_links"
         mv "$tmp_links" xray/vless_links.txt
@@ -2418,7 +2437,7 @@ add_shadowsocks_user() {
     user_psk=$(openssl rand -base64 32)
 
     local tmp_ss
-    tmp_ss=$(mktemp)
+    tmp_ss=$(make_temp_file)
     jq --arg n "$user_name" --arg p "$user_psk" '.users += [{"name": $n, "password": $p}]' "$ss_config" > "$tmp_ss"
 
     apply_preserved_file_metadata "$ss_config" "$tmp_ss"
@@ -2483,7 +2502,7 @@ remove_shadowsocks_user() {
 
     local target_user="${users[$((sel - 1))]}"
     local tmp_ss
-    tmp_ss=$(mktemp)
+    tmp_ss=$(make_temp_file)
     jq --arg n "$target_user" '.users |= map(select(.name != $n))' "$ss_config" > "$tmp_ss"
 
     apply_preserved_file_metadata "$ss_config" "$tmp_ss"
@@ -2570,9 +2589,7 @@ delete_xray() {
         return
     fi
 
-    cd xray || return 1
-    sudo $DOCKER_COMPOSE_CMD down
-    cd ..
+    ( cd xray && sudo $DOCKER_COMPOSE_CMD down ) || true
     rm -rf xray
     echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
 }
@@ -2585,9 +2602,7 @@ delete_shadowsocks() {
         return
     fi
 
-    cd shadowsocks || return 1
-    sudo $DOCKER_COMPOSE_CMD down
-    cd ..
+    ( cd shadowsocks && sudo $DOCKER_COMPOSE_CMD down ) || true
     rm -rf shadowsocks
     echo -e "${GREEN}Shadowsocks container and config deleted successfully!${NC}"
 }
@@ -2754,18 +2769,16 @@ restore_xray() {
             return 0
         else
             echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
-            cd xray || return 1
-            sudo $DOCKER_COMPOSE_CMD start
-            cd ..
+            ( cd xray && sudo $DOCKER_COMPOSE_CMD start ) || return 1
             echo -e "${GREEN}Xray container started successfully!${NC}"
             return 0
         fi
     fi
 
-    echo "Pulling teddysun/xray image..."
-    sudo docker pull teddysun/xray
+    echo "Pulling $XRAY_DOCKER_IMAGE image..."
+    sudo docker pull "$XRAY_DOCKER_IMAGE"
 
-    cd xray || return 1
+    ( cd xray || return 1
 
     echo -e "${YELLOW}Starting Xray container...${NC}"
     if sudo $DOCKER_COMPOSE_CMD up -d; then
@@ -2781,11 +2794,10 @@ restore_xray() {
         fi
     else
         echo -e "${RED}Failed to start Xray container.${NC}"
-        cd ..
         return 1
     fi
 
-    cd ..
+    ) || return 1
 }
 
 restore_shadowsocks() {
@@ -2799,9 +2811,7 @@ restore_shadowsocks() {
             return 0
         else
             echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
-            cd shadowsocks || return 1
-            sudo $DOCKER_COMPOSE_CMD start
-            cd ..
+            ( cd shadowsocks && sudo $DOCKER_COMPOSE_CMD start ) || return 1
             echo -e "${GREEN}Shadowsocks container started successfully!${NC}"
             return 0
         fi
@@ -2810,7 +2820,7 @@ restore_shadowsocks() {
     echo "Pulling ghcr.io/shadowsocks/ssserver-rust image..."
     sudo docker pull ghcr.io/shadowsocks/ssserver-rust:latest
 
-    cd shadowsocks || return 1
+    ( cd shadowsocks || return 1
 
     echo -e "${YELLOW}Starting Shadowsocks container...${NC}"
     if sudo $DOCKER_COMPOSE_CMD up -d; then
@@ -2822,11 +2832,10 @@ restore_shadowsocks() {
         fi
     else
         echo -e "${RED}Failed to start Shadowsocks container.${NC}"
-        cd ..
         return 1
     fi
 
-    cd ..
+    ) || return 1
 }
 
 # --- Main Script ---
