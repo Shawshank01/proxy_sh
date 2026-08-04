@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.9.4"
+SCRIPT_VERSION="3.9.5"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -150,7 +150,7 @@ install_docker_packages() {
     echo "Installing Docker for ${DISTRO}..."
     case "$DISTRO" in
         ubuntu|debian|linuxmint)
-            # Install prerequisites
+
             sudo apt-get update
             if ! sudo apt-get install -y ca-certificates curl gnupg; then
                 echo -e "${RED}Failed to install prerequisites. Please install them manually.${NC}"
@@ -227,7 +227,7 @@ install_docker_compose() {
     echo -e "${YELLOW}Installing Docker Compose...${NC}"
     case "$DISTRO" in
         ubuntu|debian|linuxmint)
-            # Try to install docker-compose-plugin (newer version)
+            # Try to install docker-compose-plugin
             if sudo apt-get install -y docker-compose-plugin 2>/dev/null; then
                 echo -e "${GREEN}Docker Compose plugin installed successfully.${NC}"
             else
@@ -289,11 +289,9 @@ install_docker_compose() {
 install_xray() {
     echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
-    # Create directory
     mkdir -p xray
     cd xray || return 1
 
-    # Pull Docker image
     echo "Pulling teddysun/xray image..."
     sudo docker pull teddysun/xray
 
@@ -443,6 +441,13 @@ install_xray() {
 
         PING_HOST=${REALITY_DOMAIN_CLEAN%%:*}
 
+        # Reject Microsoft domains for Reality target / SNI
+        PING_HOST_LOWER=$(echo "$PING_HOST" | tr '[:upper:]' '[:lower:]')
+        if [[ "$PING_HOST_LOWER" == *microsoft* || "$PING_HOST_LOWER" == *azure.com || "$PING_HOST_LOWER" == *azure.net || "$PING_HOST_LOWER" == *office.com || "$PING_HOST_LOWER" == *office.net || "$PING_HOST_LOWER" == *live.com || "$PING_HOST_LOWER" == *msn.com || "$PING_HOST_LOWER" == *bing.com || "$PING_HOST_LOWER" == *outlook.com || "$PING_HOST_LOWER" == *windows.com || "$PING_HOST_LOWER" == *windows.net || "$PING_HOST_LOWER" == *office365.com || "$PING_HOST_LOWER" == *skype.com || "$PING_HOST_LOWER" == *xbox.com || "$PING_HOST_LOWER" == *msftncsi.com || "$PING_HOST_LOWER" == *msftconnecttest.com || "$PING_HOST_LOWER" == *sharepoint.com || "$PING_HOST_LOWER" == *onedrive.com ]]; then
+            echo -e "${RED}Error: Microsoft domains (e.g., microsoft.com, azure.com, office.com, bing.com, etc.) are not accepted for Reality SNI. Please enter a different domain.${NC}"
+            continue
+        fi
+
         # Check for Chinese domains before probing
         DOMAIN_WARNING=""
         if [[ "$PING_HOST" == *.cn || "$PING_HOST" == *.com.cn || "$PING_HOST" == *.net.cn || "$PING_HOST" == *.org.cn || "$PING_HOST" == *.中国 || "$PING_HOST" == *.中國 ]]; then
@@ -524,6 +529,10 @@ install_xray() {
                     DROPPED_WILDCARDS=1
                     continue
                 fi
+                domain_lower=$(echo "$domain" | tr '[:upper:]' '[:lower:]')
+                if [[ "$domain_lower" == *microsoft* || "$domain_lower" == *azure.com || "$domain_lower" == *azure.net || "$domain_lower" == *office.com || "$domain_lower" == *office.net || "$domain_lower" == *live.com || "$domain_lower" == *msn.com || "$domain_lower" == *bing.com || "$domain_lower" == *outlook.com || "$domain_lower" == *windows.com || "$domain_lower" == *windows.net || "$domain_lower" == *office365.com || "$domain_lower" == *skype.com || "$domain_lower" == *xbox.com || "$domain_lower" == *msftncsi.com || "$domain_lower" == *msftconnecttest.com || "$domain_lower" == *sharepoint.com || "$domain_lower" == *onedrive.com ]]; then
+                    continue
+                fi
                 if [[ " $SEEN_DOMAINS " == *" $domain "* ]]; then
                     continue
                 fi
@@ -546,7 +555,8 @@ install_xray() {
                 REALITY_SERVER_NAMES=$(echo "$SERVER_NAMES_INPUT" | awk -F',' '{
                     for (i=1; i<=NF; i++) {
                         gsub(/^[ \t]+|[ \t]+$/, "", $i)
-                        if ($i == "" || $i ~ /\*/) { continue }
+                        low = tolower($i)
+                        if ($i == "" || $i ~ /\*/ || low ~ /microsoft|azure\.com|azure\.net|office\.com|office\.net|live\.com|msn\.com|bing\.com|outlook\.com|windows\.com|windows\.net|office365\.com|skype\.com|xbox\.com|msftncsi\.com|msftconnecttest\.com|sharepoint\.com|onedrive\.com/) { continue }
                         if (out != "") { out=out"," }
                         out=out"\"" $i "\""
                     }
@@ -562,7 +572,6 @@ install_xray() {
         break
     done
 
-    # Ask whether to enable IPv6 (dual-stack) listen
     read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6
     if [[ "$enable_ipv6" == "y" || "$enable_ipv6" == "Y" ]]; then
         LISTEN_ADDR="::"
@@ -570,7 +579,6 @@ install_xray() {
         LISTEN_ADDR="0.0.0.0"
     fi
 
-    # Create docker-compose.yml (with logging options)
     cat > docker-compose.yml << 'EOL'
 services:
   xray:
@@ -767,12 +775,10 @@ EOL
         done
     done
 
-    # Save links to file
     echo -e "\nSaving links to vless_links.txt..."
     echo -e "$LINKS" > vless_links.txt
     echo "Links saved successfully!"
 
-    # Save per-user quota metadata
     cat > user_limits.conf << EOL
 TIMEZONE=$QUOTA_TIMEZONE
 EOL
@@ -793,23 +799,18 @@ EOL
         echo -e "${RED}Container start cancelled.${NC}"
     fi
 
-    # RETURN TO MAIN DIRECTORY
     cd ..
 }
 
-# Function to install Shadowsocks (ssserver-rust)
 install_shadowsocks() {
     echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
 
-    # Create directory
     mkdir -p shadowsocks
     cd shadowsocks || return 1
 
-    # Pull Docker image
     echo "Pulling ghcr.io/shadowsocks/ssserver-rust image..."
     sudo docker pull ghcr.io/shadowsocks/ssserver-rust:latest
 
-    # Get user input for counts and port
     read -p "How many users do you need? [Default: $DEFAULT_SS_USERS]: " num_users
     num_users=${num_users:-$DEFAULT_SS_USERS}
 
@@ -844,7 +845,6 @@ install_shadowsocks() {
         USER_LABELS+=("$user_label")
     done
 
-    # Create docker-compose.yml (with logging options)
     cat > docker-compose.yml << EOL
 services:
   ssserver:
@@ -863,7 +863,6 @@ services:
         max-file: "3"
 EOL
 
-    # Create server.json
     cat > server.json << EOL
 {
   "server": "$SS_LISTEN_ADDR",
@@ -920,7 +919,6 @@ EOL
         echo -e "${RED}Container start cancelled.${NC}"
     fi
 
-    # RETURN TO MAIN DIRECTORY
     cd ..
 }
 
@@ -952,7 +950,7 @@ release_version_lock_if_needed() {
         tmp_file=$(mktemp)
         if sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
             mv "$tmp_file" "$dir/docker-compose.yml"
-            
+
             if [ -z "$DOCKER_COMPOSE_CMD" ]; then
                 if ! check_xray_requirements; then
                     return 1
@@ -978,12 +976,10 @@ release_version_lock_if_needed() {
     return 0
 }
 
-# Function to update Xray
 update_xray() {
     local CONTAINER_NAME="xray_server"
 
     # Check if container exists (running or stopped)
-    # Using -a ensures we find it even if it happens to be stopped currently
     if ! sudo docker ps -a -q -f name="^/${CONTAINER_NAME}$" | grep -q .; then
         echo -e "${RED}Container '${CONTAINER_NAME}' not found. Cannot update.${NC}"
         return 1
@@ -1000,7 +996,7 @@ update_xray() {
 
     echo "Updating ${CONTAINER_NAME}..."
 
-    # Run Watchtower with the API Fix
+    # Run Watchtower with the API fixed to ver. 1.44
     if sudo docker run --rm \
       -e DOCKER_API_VERSION=1.44 \
       -v /var/run/docker.sock:/var/run/docker.sock \
@@ -1015,7 +1011,6 @@ update_xray() {
     fi
 }
 
-# Function to update Shadowsocks
 update_shadowsocks() {
     local CONTAINER_NAME="ssserver"
 
@@ -1049,7 +1044,6 @@ update_shadowsocks() {
     fi
 }
 
-# Function to change/downgrade Xray or Shadowsocks container version
 change_container_version() {
     echo ""
     echo -e "${YELLOW}--- Change Container Version (Downgrade/Upgrade) ---${NC}"
@@ -1137,7 +1131,6 @@ change_container_version() {
         fi
     fi
 
-    # If any step fails:
     cd .. || true
     echo -e "${RED}Failed to apply new version. Restoring compose file...${NC}"
     local restore_tmp
@@ -1150,7 +1143,6 @@ change_container_version() {
     return 1
 }
 
-# Function to check environment (distro and Docker)
 check_environment() {
     echo -e "${YELLOW}Checking environment...${NC}"
     check_distro
@@ -1158,7 +1150,6 @@ check_environment() {
     echo -e "${GREEN}Environment check completed!${NC}"
 }
 
-# Function to check if environment is ready for Xray installation
 check_xray_requirements() {
     if ! command -v docker &> /dev/null; then
         echo -e "${RED}Docker is not installed. Please run option 1 (Environment Check) first.${NC}"
@@ -1167,7 +1158,7 @@ check_xray_requirements() {
     echo -e "${YELLOW}Checking Docker Compose availability...${NC}"
 
     # Check for both docker-compose (hyphen) and docker compose (space) versions
-    # Prioritize the newer 'docker compose' version (with space)
+    # Prioritise the newer 'docker compose' version (with space)
     if docker compose version &> /dev/null 2>&1; then
         DOCKER_COMPOSE_CMD="docker compose"
         echo -e "${GREEN}Using Docker Compose: $DOCKER_COMPOSE_CMD${NC}"
@@ -1187,7 +1178,7 @@ check_xray_requirements() {
     return 0
 }
 
-# ----- Xray quota helpers -----
+# Xray quota helpers
 
 days_in_month() {
     local year=$1
@@ -1289,41 +1280,9 @@ apply_preserved_file_metadata() {
     fi
 }
 
-# One-time, transparent migration for quota databases created by older
-# versions of this script, which stored per-user limits in MB instead of GB.
-# Safe to call repeatedly: it's a no-op once the file is already in the new format.
-migrate_quota_db_if_needed() {
-    local db_file="$1"
-    [ -f "$db_file" ] || return 0
-
-    if ! head -n1 "$db_file" | grep -q '^# email|uuid|limit_mb|'; then
-        return 0
-    fi
-
-    echo -e "${YELLOW}Migrating ${db_file} per-user limits from MB to GB...${NC}"
-
-    local tmp_db
-    tmp_db=$(mktemp)
-    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-
-    while IFS='|' read -r email uuid old_limit_mb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
-        [ -z "$email" ] && continue
-        local migrated_limit_gb=0
-        if [ "$old_limit_mb" -gt 0 ]; then
-            # Round up so migrated users never end up with a smaller quota than before.
-            migrated_limit_gb=$(( (old_limit_mb + 1023) / 1024 ))
-        fi
-        echo "${email}|${uuid}|${migrated_limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}" >> "$tmp_db"
-    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
-
-    apply_preserved_file_metadata "$db_file" "$tmp_db"
-    mv "$tmp_db" "$db_file"
-}
-
 sync_xray_clients_from_quota_db() {
     local db_file="xray/user_limits.db"
     local config_file="xray/server.jsonc"
-    migrate_quota_db_if_needed "$db_file"
 
     if [ ! -f "$db_file" ] || [ ! -f "$config_file" ]; then
         echo -e "${RED}Quota database or Xray config not found.${NC}"
@@ -1474,8 +1433,6 @@ check_and_apply_xray_quotas() {
         return 1
     fi
 
-    migrate_quota_db_if_needed "$db_file"
-
     local timezone
     timezone=$(read_xray_quota_timezone)
 
@@ -1583,8 +1540,6 @@ show_xray_quota_status() {
         return 1
     fi
 
-    migrate_quota_db_if_needed "$db_file"
-
     local timezone
     timezone=$(read_xray_quota_timezone)
 
@@ -1615,8 +1570,6 @@ select_quota_user() {
         echo -e "${RED}Quota database not found.${NC}"
         return 1
     fi
-
-    migrate_quota_db_if_needed "$db_file"
 
     QUOTA_SELECTION_EMAIL=""
 
@@ -1844,7 +1797,7 @@ change_xray_user_billing_cycle() {
                         current_total=$((current_total + ${s_value:-0}))
                     fi
                 done < "$stats_map_file"
-                
+
                 cycle_usage=0
                 last_total=$current_total
 
@@ -2278,8 +2231,6 @@ add_xray_user() {
         return 1
     fi
 
-    migrate_quota_db_if_needed "$db_file"
-
     local user_id
     while true; do
         user_id="u$(openssl rand -hex 8)"
@@ -2613,7 +2564,7 @@ show_ss_links() {
 delete_xray() {
     echo -e "${YELLOW}Deleting Xray container and config...${NC}"
 
-    # SAFETY CHECK: Only try to enter/delete if directory exists
+    # Only try to enter/delete if directory exists
     if [ ! -d "xray" ]; then
         echo -e "${RED}Directory 'xray' not found. Nothing to delete.${NC}"
         return
@@ -2792,7 +2743,6 @@ restore_deployment() {
     esac
 }
 
-# Function to restore Xray container
 restore_xray() {
     echo -e "\n${YELLOW}Restoring Xray deployment...${NC}"
 
@@ -2812,7 +2762,6 @@ restore_xray() {
         fi
     fi
 
-    # Pull image and start container
     echo "Pulling teddysun/xray image..."
     sudo docker pull teddysun/xray
 
@@ -2839,7 +2788,6 @@ restore_xray() {
     cd ..
 }
 
-# Function to restore Shadowsocks container
 restore_shadowsocks() {
     echo -e "\n${YELLOW}Restoring Shadowsocks deployment...${NC}"
 
@@ -2859,7 +2807,6 @@ restore_shadowsocks() {
         fi
     fi
 
-    # Pull image and start container
     echo "Pulling ghcr.io/shadowsocks/ssserver-rust image..."
     sudo docker pull ghcr.io/shadowsocks/ssserver-rust:latest
 
@@ -2974,7 +2921,6 @@ handle_root_user_flow() {
     exec sudo -u "$new_username" -i bash "$launch_script"
 }
 
-# Non-interactive mode for scheduler-based quota checks (cron/systemd)
 if [ "${1:-}" = "--quota-check" ]; then
     if check_xray_requirements; then
         check_and_apply_xray_quotas
@@ -2985,15 +2931,12 @@ elif [ "${1:-}" = "--quota-check-status" ]; then
     exit 0
 fi
 
-# Make sure interactive mode is not run as root
 if [ "$EUID" -eq 0 ]; then
   handle_root_user_flow
 fi
 
-# CHECK DEPENDENCIES NOW (Running as non-root, will use sudo inside)
 check_dependencies
 
-# Automatically check for script updates at startup (interactive mode)
 auto_check_script_update
 
 while true; do
