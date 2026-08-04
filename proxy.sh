@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.10.0"
+SCRIPT_VERSION="3.10.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -18,7 +18,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 # Global variable for Docker Compose command
-DOCKER_COMPOSE_CMD=""
+DOCKER_COMPOSE_CMD=()
 XRAY_DOCKER_IMAGE="teddysun/xray:latest"
 
 # Global state & cleanup trap for temporary files
@@ -52,13 +52,28 @@ save_quota_db_content() {
 
 # --- Functions ---
 
+# Generic package installer — detects apt-get / dnf / yum and installs the
+# given packages.  Returns 0 on success, 1 if no supported package manager
+# was found or the install command failed.
+install_system_packages() {
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y "$@"
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y "$@"
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y "$@"
+    else
+        return 1
+    fi
+}
+
 # Check and install dependencies
 check_dependencies() {
     local dependencies=("curl" "openssl")
     local missing_deps=()
 
     for cmd in "${dependencies[@]}"; do
-        if ! command -v $cmd &> /dev/null; then
+        if ! command -v "$cmd" &> /dev/null; then
             missing_deps+=("$cmd")
         fi
     done
@@ -67,21 +82,14 @@ check_dependencies() {
         echo -e "${YELLOW}Missing dependencies: ${missing_deps[*]}${NC}"
         echo -e "${YELLOW}Attempting to install them...${NC}"
 
-        # Detect package manager
-        if command -v apt-get &> /dev/null; then
-            sudo apt-get update && sudo apt-get install -y "${missing_deps[@]}"
-        elif command -v dnf &> /dev/null; then
-            sudo dnf install -y "${missing_deps[@]}"
-        elif command -v yum &> /dev/null; then
-            sudo yum install -y "${missing_deps[@]}"
-        else
+        if ! install_system_packages "${missing_deps[@]}"; then
             echo -e "${RED}Could not detect package manager. Please install manually: ${missing_deps[*]}${NC}"
             exit 1
         fi
 
         # Verify installation
         for cmd in "${missing_deps[@]}"; do
-            if ! command -v $cmd &> /dev/null; then
+            if ! command -v "$cmd" &> /dev/null; then
                  echo -e "${RED}Failed to install $cmd. Please install manually.${NC}"
                  exit 1
             fi
@@ -97,13 +105,7 @@ ensure_jq() {
 
     echo -e "${YELLOW}This feature requires 'jq' to read/edit JSON configs. Installing it now...${NC}"
 
-    if command -v apt-get &> /dev/null; then
-        sudo apt-get update && sudo apt-get install -y jq
-    elif command -v dnf &> /dev/null; then
-        sudo dnf install -y jq
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y jq
-    else
+    if ! install_system_packages jq; then
         echo -e "${RED}Could not detect package manager. Please install 'jq' manually.${NC}"
         return 1
     fi
@@ -176,6 +178,32 @@ install_docker() {
 }
 
 # Function to install Docker packages
+# Set up Docker's official APT repository (GPG key + sources list).
+# Handles Ubuntu, Debian, and Linux Mint codename detection.
+setup_docker_apt_repo() {
+    sudo install -m 0755 -d /etc/apt/keyrings
+
+    local repo_url repo_codename
+    if [ "$DISTRO" = "linuxmint" ]; then
+        local ubuntu_codename
+        ubuntu_codename=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
+        echo -e "${YELLOW}Linux Mint detected, using Ubuntu codename: $ubuntu_codename${NC}"
+        repo_url="https://download.docker.com/linux/ubuntu"
+        repo_codename="$ubuntu_codename"
+    elif [ "$DISTRO" = "debian" ]; then
+        repo_url="https://download.docker.com/linux/debian"
+        repo_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    else
+        repo_url="https://download.docker.com/linux/ubuntu"
+        repo_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    fi
+
+    curl -fsSL "${repo_url}/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $repo_url $repo_codename stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+}
+
 install_docker_packages() {
     echo "Installing Docker for ${DISTRO}..."
     case "$DISTRO" in
@@ -187,30 +215,7 @@ install_docker_packages() {
                 exit 1
             fi
 
-            # Add Docker's official GPG key
-            sudo install -m 0755 -d /etc/apt/keyrings
-
-            # Determine the correct Docker repo based on distro
-            if [ "$DISTRO" = "linuxmint" ]; then
-                UBUNTU_CODENAME=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
-                echo -e "${YELLOW}Linux Mint detected, using Ubuntu codename: $UBUNTU_CODENAME${NC}"
-                REPO_URL="https://download.docker.com/linux/ubuntu"
-                REPO_CODENAME="$UBUNTU_CODENAME"
-            elif [ "$DISTRO" = "debian" ]; then
-                REPO_URL="https://download.docker.com/linux/debian"
-                REPO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-            else
-                # Ubuntu or compatible
-                REPO_URL="https://download.docker.com/linux/ubuntu"
-                REPO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-            fi
-
-            # Download and install Docker's GPG key
-            curl -fsSL "${REPO_URL}/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-            sudo chmod a+r /etc/apt/keyrings/docker.gpg
-
-            # Add the Docker repository
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $REPO_URL $REPO_CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            setup_docker_apt_repo
 
             # Update and install Docker
             sudo apt-get update
@@ -262,35 +267,12 @@ install_docker_compose() {
                 echo -e "${GREEN}Docker Compose plugin installed successfully.${NC}"
             else
                 echo -e "${YELLOW}Docker Compose plugin not available, trying alternative installation...${NC}"
-                # Try installing docker-compose-plugin from Docker's official repository
                 if ! sudo apt-get install -y ca-certificates curl gnupg; then
                     echo -e "${RED}Failed to install prerequisites for Docker Compose.${NC}"
                     exit 1
                 fi
 
-                # Add Docker's official GPG key
-                sudo install -m 0755 -d /etc/apt/keyrings
-                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-                sudo chmod a+r /etc/apt/keyrings/docker.gpg
-
-                # Add the repository to Apt sources
-                if [ "$DISTRO" = "linuxmint" ]; then
-                    UBUNTU_CODENAME=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
-                    echo -e "${YELLOW}Linux Mint detected, using Ubuntu codename: $UBUNTU_CODENAME${NC}"
-                    REPO_URL="https://download.docker.com/linux/ubuntu"
-                    REPO_CODENAME="$UBUNTU_CODENAME"
-                elif [ "$DISTRO" = "debian" ]; then
-                    VER_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-                    REPO_URL="https://download.docker.com/linux/debian"
-                    REPO_CODENAME="$VER_CODENAME"
-                else
-                    # Assume Ubuntu or compatible
-                    VER_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-                    REPO_URL="https://download.docker.com/linux/ubuntu"
-                    REPO_CODENAME="$VER_CODENAME"
-                fi
-
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $REPO_URL $REPO_CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                setup_docker_apt_repo
 
                 # Remove conflicting packages that might be installed from distro repos
                 echo -e "${YELLOW}Removing conflicting packages to avoid installation errors...${NC}"
@@ -313,6 +295,14 @@ install_docker_compose() {
             exit 1
             ;;
     esac
+}
+
+# Check whether a domain belongs to the Microsoft domain blocklist.
+# Returns 0 (true) if the domain matches, 1 otherwise.
+is_microsoft_domain() {
+    local domain_lower
+    domain_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    [[ "$domain_lower" == *microsoft* || "$domain_lower" == *azure.com || "$domain_lower" == *azure.net || "$domain_lower" == *office.com || "$domain_lower" == *office.net || "$domain_lower" == *live.com || "$domain_lower" == *msn.com || "$domain_lower" == *bing.com || "$domain_lower" == *outlook.com || "$domain_lower" == *windows.com || "$domain_lower" == *windows.net || "$domain_lower" == *office365.com || "$domain_lower" == *skype.com || "$domain_lower" == *xbox.com || "$domain_lower" == *msftncsi.com || "$domain_lower" == *msftconnecttest.com || "$domain_lower" == *sharepoint.com || "$domain_lower" == *onedrive.com ]]
 }
 
 # Function to install Xray VLESS-XHTTP-Reality
@@ -473,8 +463,7 @@ install_xray() {
         PING_HOST=${REALITY_DOMAIN_CLEAN%%:*}
 
         # Reject Microsoft domains for Reality target / SNI
-        PING_HOST_LOWER=$(echo "$PING_HOST" | tr '[:upper:]' '[:lower:]')
-        if [[ "$PING_HOST_LOWER" == *microsoft* || "$PING_HOST_LOWER" == *azure.com || "$PING_HOST_LOWER" == *azure.net || "$PING_HOST_LOWER" == *office.com || "$PING_HOST_LOWER" == *office.net || "$PING_HOST_LOWER" == *live.com || "$PING_HOST_LOWER" == *msn.com || "$PING_HOST_LOWER" == *bing.com || "$PING_HOST_LOWER" == *outlook.com || "$PING_HOST_LOWER" == *windows.com || "$PING_HOST_LOWER" == *windows.net || "$PING_HOST_LOWER" == *office365.com || "$PING_HOST_LOWER" == *skype.com || "$PING_HOST_LOWER" == *xbox.com || "$PING_HOST_LOWER" == *msftncsi.com || "$PING_HOST_LOWER" == *msftconnecttest.com || "$PING_HOST_LOWER" == *sharepoint.com || "$PING_HOST_LOWER" == *onedrive.com ]]; then
+        if is_microsoft_domain "$PING_HOST"; then
             echo -e "${RED}Error: Microsoft domains (e.g., microsoft.com, azure.com, office.com, bing.com, etc.) are not accepted for Reality SNI. Please enter a different domain.${NC}"
             continue
         fi
@@ -560,8 +549,7 @@ install_xray() {
                     DROPPED_WILDCARDS=1
                     continue
                 fi
-                domain_lower=$(echo "$domain" | tr '[:upper:]' '[:lower:]')
-                if [[ "$domain_lower" == *microsoft* || "$domain_lower" == *azure.com || "$domain_lower" == *azure.net || "$domain_lower" == *office.com || "$domain_lower" == *office.net || "$domain_lower" == *live.com || "$domain_lower" == *msn.com || "$domain_lower" == *bing.com || "$domain_lower" == *outlook.com || "$domain_lower" == *windows.com || "$domain_lower" == *windows.net || "$domain_lower" == *office365.com || "$domain_lower" == *skype.com || "$domain_lower" == *xbox.com || "$domain_lower" == *msftncsi.com || "$domain_lower" == *msftconnecttest.com || "$domain_lower" == *sharepoint.com || "$domain_lower" == *onedrive.com ]]; then
+                if is_microsoft_domain "$domain"; then
                     continue
                 fi
                 if [[ " $SEEN_DOMAINS " == *" $domain "* ]]; then
@@ -583,16 +571,17 @@ install_xray() {
         else
             read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $PING_HOST]: " SERVER_NAMES_INPUT
             if [ -n "$SERVER_NAMES_INPUT" ]; then
-                REALITY_SERVER_NAMES=$(echo "$SERVER_NAMES_INPUT" | awk -F',' '{
-                    for (i=1; i<=NF; i++) {
-                        gsub(/^[ \t]+|[ \t]+$/, "", $i)
-                        low = tolower($i)
-                        if ($i == "" || $i ~ /\*/ || low ~ /microsoft|azure\.com|azure\.net|office\.com|office\.net|live\.com|msn\.com|bing\.com|outlook\.com|windows\.com|windows\.net|office365\.com|skype\.com|xbox\.com|msftncsi\.com|msftconnecttest\.com|sharepoint\.com|onedrive\.com/) { continue }
-                        if (out != "") { out=out"," }
-                        out=out"\"" $i "\""
-                    }
-                    print out
-                }')
+                REALITY_SERVER_NAMES=""
+                IFS=',' read -r -a sni_input_arr <<< "$SERVER_NAMES_INPUT"
+                for sni_entry in "${sni_input_arr[@]}"; do
+                    sni_entry=$(echo "$sni_entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    [[ -z "$sni_entry" || "$sni_entry" == *"*"* ]] && continue
+                    is_microsoft_domain "$sni_entry" && continue
+                    if [ -n "$REALITY_SERVER_NAMES" ]; then
+                        REALITY_SERVER_NAMES+=","
+                    fi
+                    REALITY_SERVER_NAMES+="\"$sni_entry\""
+                done
                 if [ -z "$REALITY_SERVER_NAMES" ]; then
                     REALITY_SERVER_NAMES="\"$PING_HOST\""
                 fi
@@ -826,9 +815,10 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm
     if [[ -z "$start_confirm" || "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        sudo $DOCKER_COMPOSE_CMD up -d
+        sudo "${DOCKER_COMPOSE_CMD[@]}" up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
+    else
         echo -e "${RED}Container start cancelled.${NC}"
     fi
 ) || return 1
@@ -923,7 +913,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm
     if [[ -z "$start_confirm" || "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        if sudo $DOCKER_COMPOSE_CMD up -d; then
+        if sudo "${DOCKER_COMPOSE_CMD[@]}" up -d; then
             echo -e "${GREEN}Shadowsocks container has been started!${NC}"
             echo "Remember to open port ${ss_port} (TCP & UDP) in your server's firewall."
 
@@ -983,13 +973,13 @@ release_version_lock_if_needed() {
         if sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
             mv "$tmp_file" "$dir/docker-compose.yml"
 
-            if [ -z "$DOCKER_COMPOSE_CMD" ]; then
+            if [ ${#DOCKER_COMPOSE_CMD[@]} -eq 0 ]; then
                 if ! check_xray_requirements; then
                     return 1
                 fi
             fi
             echo "Recreating container with latest image..."
-            if ( cd "$dir" && sudo $DOCKER_COMPOSE_CMD pull && sudo $DOCKER_COMPOSE_CMD down && sudo $DOCKER_COMPOSE_CMD up -d ); then
+            if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" down && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
                 echo -e "${GREEN}Reset to latest version successfully.${NC}"
                 return 2
             else
@@ -1005,25 +995,27 @@ release_version_lock_if_needed() {
     return 0
 }
 
-update_xray() {
-    local CONTAINER_NAME="xray_server"
+update_container() {
+    local container_name=$1
+    local compose_dir=$2
+    local base_image=$3
+    local default_tag=${4:-}
 
-    # Check if container exists (running or stopped)
-    if ! sudo docker ps -a -q -f name="^/${CONTAINER_NAME}$" | grep -q .; then
-        echo -e "${RED}Container '${CONTAINER_NAME}' not found. Cannot update.${NC}"
+    if ! sudo docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
+        echo -e "${RED}Container '${container_name}' not found. Cannot update.${NC}"
         return 1
     fi
 
     # Release version lock if present
     local lock_status=0
-    release_version_lock_if_needed "xray" "${XRAY_DOCKER_IMAGE%%:*}" "" || lock_status=$?
+    release_version_lock_if_needed "$compose_dir" "$base_image" "$default_tag" || lock_status=$?
     if [ "$lock_status" -eq 1 ]; then
         return 1
     elif [ "$lock_status" -eq 2 ]; then
         return 0
     fi
 
-    echo "Updating ${CONTAINER_NAME}..."
+    echo "Updating ${container_name}..."
 
     # Run Watchtower with the API fixed to ver. 1.44
     if sudo docker run --rm \
@@ -1032,7 +1024,7 @@ update_xray() {
       containrrr/watchtower \
       --run-once \
       -c \
-      "$CONTAINER_NAME"; then
+      "$container_name"; then
         echo -e "${GREEN}Update process finished successfully.${NC}"
     else
         echo -e "${RED}Watchtower failed to run.${NC}"
@@ -1040,37 +1032,12 @@ update_xray() {
     fi
 }
 
+update_xray() {
+    update_container "xray_server" "xray" "${XRAY_DOCKER_IMAGE%%:*}" ""
+}
+
 update_shadowsocks() {
-    local CONTAINER_NAME="ssserver"
-
-    if ! sudo docker ps -a -q -f name="^/${CONTAINER_NAME}$" | grep -q .; then
-        echo -e "${RED}Container '${CONTAINER_NAME}' not found. Cannot update.${NC}"
-        return 1
-    fi
-
-    # Release version lock if present
-    local lock_status=0
-    release_version_lock_if_needed "shadowsocks" "ghcr.io/shadowsocks/ssserver-rust" "latest" || lock_status=$?
-    if [ "$lock_status" -eq 1 ]; then
-        return 1
-    elif [ "$lock_status" -eq 2 ]; then
-        return 0
-    fi
-
-    echo "Updating ${CONTAINER_NAME}..."
-
-    if sudo docker run --rm \
-      -e DOCKER_API_VERSION=1.44 \
-      -v /var/run/docker.sock:/var/run/docker.sock \
-      containrrr/watchtower \
-      --run-once \
-      -c \
-      "$CONTAINER_NAME"; then
-        echo -e "${GREEN}Update process finished successfully.${NC}"
-    else
-        echo -e "${RED}Watchtower failed to run.${NC}"
-        return 1
-    fi
+    update_container "ssserver" "shadowsocks" "ghcr.io/shadowsocks/ssserver-rust" "latest"
 }
 
 change_container_version() {
@@ -1143,16 +1110,16 @@ change_container_version() {
         return 1
     fi
 
-    if [ -z "$DOCKER_COMPOSE_CMD" ]; then
+    if [ ${#DOCKER_COMPOSE_CMD[@]} -eq 0 ]; then
         if ! check_xray_requirements; then
             return 1
         fi
     fi
 
     echo "Pulling new image version..."
-    if ( cd "$dir" && sudo $DOCKER_COMPOSE_CMD pull ); then
+    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull ); then
         echo "Recreating container..."
-        if ( cd "$dir" && sudo $DOCKER_COMPOSE_CMD down && sudo $DOCKER_COMPOSE_CMD up -d ); then
+        if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" down && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
             echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
             return 0
         fi
@@ -1185,13 +1152,13 @@ check_xray_requirements() {
     # Check for both docker-compose (hyphen) and docker compose (space) versions
     # Prioritise the newer 'docker compose' version (with space)
     if docker compose version &> /dev/null 2>&1; then
-        DOCKER_COMPOSE_CMD="docker compose"
-        echo -e "${GREEN}Using Docker Compose: $DOCKER_COMPOSE_CMD${NC}"
+        DOCKER_COMPOSE_CMD=(docker compose)
+        echo -e "${GREEN}Using Docker Compose: ${DOCKER_COMPOSE_CMD[*]}${NC}"
     elif command -v docker-compose &> /dev/null; then
         echo -e "${YELLOW}Found docker-compose (old version), testing if it works...${NC}"
         if docker-compose version &> /dev/null 2>&1; then
-            DOCKER_COMPOSE_CMD="docker-compose"
-            echo -e "${GREEN}Using Docker Compose: $DOCKER_COMPOSE_CMD${NC}"
+            DOCKER_COMPOSE_CMD=(docker-compose)
+            echo -e "${GREEN}Using Docker Compose: ${DOCKER_COMPOSE_CMD[*]}${NC}"
         else
             echo -e "${RED}Docker Compose is installed but not working. Please install the newer version.${NC}"
             return 1
@@ -1379,18 +1346,32 @@ reload_xray_container() {
         return 1
     fi
 
-    if [ -z "$DOCKER_COMPOSE_CMD" ]; then
+    if [ ${#DOCKER_COMPOSE_CMD[@]} -eq 0 ]; then
         if ! check_xray_requirements; then
             return 1
         fi
     fi
 
-    if ( cd xray && sudo $DOCKER_COMPOSE_CMD restart xray ); then
+    if ( cd xray && sudo "${DOCKER_COMPOSE_CMD[@]}" restart xray ); then
         echo -e "${GREEN}Xray container reloaded successfully.${NC}"
         return 0
     else
         echo -e "${RED}Failed to reload Xray container.${NC}"
         return 1
+    fi
+}
+
+# Save the quota database and optionally sync the Xray client list
+# and reload the container if any config changes were made.
+finalize_quota_db_update() {
+    local db_lines="$1"
+    local config_changed="$2"
+
+    save_quota_db_content "$db_lines"
+
+    if [ "$config_changed" -eq 1 ]; then
+        sync_xray_clients_from_quota_db
+        reload_xray_container
     fi
 }
 
@@ -1560,12 +1541,7 @@ check_and_apply_xray_quotas() {
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
-    save_quota_db_content "$db_lines"
-
-    if [ "$config_changed" -eq 1 ]; then
-        sync_xray_clients_from_quota_db
-        reload_xray_container
-    fi
+    finalize_quota_db_update "$db_lines" "$config_changed"
 
     echo -e "${GREEN}Quota check complete.${NC}"
 }
@@ -1690,12 +1666,7 @@ reset_xray_user_usage() {
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
-    save_quota_db_content "$db_lines"
-
-    if [ "$config_changed" -eq 1 ]; then
-        sync_xray_clients_from_quota_db
-        reload_xray_container
-    fi
+    finalize_quota_db_update "$db_lines" "$config_changed"
 }
 
 change_xray_user_limit() {
@@ -1745,12 +1716,7 @@ change_xray_user_limit() {
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
-    save_quota_db_content "$db_lines"
-
-    if [ "$config_changed" -eq 1 ]; then
-        sync_xray_clients_from_quota_db
-        reload_xray_container
-    fi
+    finalize_quota_db_update "$db_lines" "$config_changed"
 }
 
 change_xray_user_billing_cycle() {
@@ -1850,12 +1816,7 @@ change_xray_user_billing_cycle() {
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
     done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
 
-    save_quota_db_content "$db_lines"
-
-    if [ "$config_changed" -eq 1 ]; then
-        sync_xray_clients_from_quota_db
-        reload_xray_container
-    fi
+    finalize_quota_db_update "$db_lines" "$config_changed"
 }
 
 resolve_script_path() {
@@ -1907,32 +1868,27 @@ ensure_crontab_available() {
         return 1
     fi
 
+    # Package and service names differ per distro family
+    local cron_pkg cron_svc
     if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
-        if sudo apt-get install -y cron; then
-            sudo systemctl enable --now cron 2>/dev/null || true
-        else
-            echo -e "${RED}Failed to install cron via apt-get.${NC}"
-            return 1
-        fi
+        cron_pkg="cron"
+        cron_svc="cron"
     elif command -v dnf >/dev/null 2>&1; then
-        if sudo dnf install -y cronie; then
-            sudo systemctl enable --now crond 2>/dev/null || true
-        else
-            echo -e "${RED}Failed to install cronie via dnf.${NC}"
-            return 1
-        fi
+        cron_pkg="cronie"
+        cron_svc="crond"
     elif command -v yum >/dev/null 2>&1; then
-        if sudo yum install -y cronie; then
-            sudo systemctl enable --now crond 2>/dev/null || true
-        else
-            echo -e "${RED}Failed to install cronie via yum.${NC}"
-            return 1
-        fi
+        cron_pkg="cronie"
+        cron_svc="crond"
     else
         echo -e "${RED}Unsupported package manager. Please install cron manually, then retry.${NC}"
         return 1
     fi
+
+    if ! install_system_packages "$cron_pkg"; then
+        echo -e "${RED}Failed to install ${cron_pkg}.${NC}"
+        return 1
+    fi
+    sudo systemctl enable --now "$cron_svc" 2>/dev/null || true
 
     if command -v crontab >/dev/null 2>&1; then
         echo -e "${GREEN}Cron installed successfully.${NC}"
@@ -2229,13 +2185,13 @@ reload_shadowsocks_container() {
         return 1
     fi
 
-    if [ -z "$DOCKER_COMPOSE_CMD" ]; then
+    if [ ${#DOCKER_COMPOSE_CMD[@]} -eq 0 ]; then
         if ! check_xray_requirements; then
             return 1
         fi
     fi
 
-    if (cd shadowsocks && sudo $DOCKER_COMPOSE_CMD restart ssserver); then
+    if (cd shadowsocks && sudo "${DOCKER_COMPOSE_CMD[@]}" restart ssserver); then
         echo -e "${GREEN}Shadowsocks container reloaded successfully.${NC}"
         return 0
     else
@@ -2547,64 +2503,58 @@ manage_proxy_users() {
     done
 }
 
-show_links() {
-    LINKS_FILE="xray/vless_links.txt"
-    if [ -f "xray/vless_links.txt" ]; then
-        LINKS_FILE="xray/vless_links.txt"
-    elif [ -f "vless_links.txt" ]; then
-        LINKS_FILE="vless_links.txt"
+show_saved_links() {
+    local primary_path=$1
+    local fallback_path=$2
+    local link_type=$3
+
+    local links_file=""
+    if [ -f "$primary_path" ]; then
+        links_file="$primary_path"
+    elif [ -f "$fallback_path" ]; then
+        links_file="$fallback_path"
     else
-        echo -e "${RED}No saved VLESS links found. Please install Xray first to generate and save links.${NC}"
+        echo -e "${RED}No saved ${link_type} links found. Please install the service first to generate and save links.${NC}"
         return
     fi
-    echo -e "\n${GREEN}Saved VLESS Links:${NC}"
-    # Display each link separated by blank lines
+    echo -e "\n${GREEN}Saved ${link_type} Links:${NC}"
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         echo "$line"
         echo
-    done < "$LINKS_FILE"
+    done < "$links_file"
+}
+
+show_links() {
+    show_saved_links "xray/vless_links.txt" "vless_links.txt" "VLESS"
 }
 
 show_ss_links() {
-    LINKS_FILE="shadowsocks/ss_links.txt"
-    if [ -f "shadowsocks/ss_links.txt" ]; then
-        LINKS_FILE="shadowsocks/ss_links.txt"
-    elif [ -f "ss_links.txt" ]; then
-        LINKS_FILE="ss_links.txt"
-    else
-        echo -e "${RED}No saved SS links found. Please install Shadowsocks first to generate and save links.${NC}"
+    show_saved_links "shadowsocks/ss_links.txt" "ss_links.txt" "SS"
+}
+
+delete_container() {
+    local service_name=$1
+    local dir=$2
+
+    echo -e "${YELLOW}Deleting ${service_name} container and config...${NC}"
+
+    if [ ! -d "$dir" ]; then
+        echo -e "${RED}Directory '${dir}' not found. Nothing to delete.${NC}"
         return
     fi
-    echo -e "\n${GREEN}Saved SS Links:${NC}"
-    cat "$LINKS_FILE"
+
+    ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" down ) || true
+    rm -rf "$dir"
+    echo -e "${GREEN}${service_name} container and config deleted successfully!${NC}"
 }
 
 delete_xray() {
-    echo -e "${YELLOW}Deleting Xray container and config...${NC}"
-
-    # Only try to enter/delete if directory exists
-    if [ ! -d "xray" ]; then
-        echo -e "${RED}Directory 'xray' not found. Nothing to delete.${NC}"
-        return
-    fi
-
-    ( cd xray && sudo $DOCKER_COMPOSE_CMD down ) || true
-    rm -rf xray
-    echo -e "${GREEN}Xray container and config deleted successfully!${NC}"
+    delete_container "Xray" "xray"
 }
 
 delete_shadowsocks() {
-    echo -e "${YELLOW}Deleting Shadowsocks container and config...${NC}"
-
-    if [ ! -d "shadowsocks" ]; then
-        echo -e "${RED}Directory 'shadowsocks' not found. Nothing to delete.${NC}"
-        return
-    fi
-
-    ( cd shadowsocks && sudo $DOCKER_COMPOSE_CMD down ) || true
-    rm -rf shadowsocks
-    echo -e "${GREEN}Shadowsocks container and config deleted successfully!${NC}"
+    delete_container "Shadowsocks" "shadowsocks"
 }
 
 fetch_latest_script_version() {
@@ -2758,84 +2708,61 @@ restore_deployment() {
     esac
 }
 
-restore_xray() {
-    echo -e "\n${YELLOW}Restoring Xray deployment...${NC}"
+restore_container() {
+    local service_name=$1
+    local container_name=$2
+    local dir=$3
+    local docker_image=$4
+    local links_file=$5
+    local link_type=$6
+
+    echo -e "\n${YELLOW}Restoring ${service_name} deployment...${NC}"
 
     # Check if container already exists
-    if sudo docker ps -a -q -f name="^/xray_server$" | grep -q .; then
-        echo -e "${YELLOW}Xray container already exists. Checking status...${NC}"
-        if sudo docker ps -q -f name="^/xray_server$" | grep -q .; then
-            echo -e "${GREEN}Xray container is already running!${NC}"
+    if sudo docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
+        echo -e "${YELLOW}${service_name} container already exists. Checking status...${NC}"
+        if sudo docker ps -q -f name="^/${container_name}$" | grep -q .; then
+            echo -e "${GREEN}${service_name} container is already running!${NC}"
             return 0
         else
             echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
-            ( cd xray && sudo $DOCKER_COMPOSE_CMD start ) || return 1
-            echo -e "${GREEN}Xray container started successfully!${NC}"
+            ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" start ) || return 1
+            echo -e "${GREEN}${service_name} container started successfully!${NC}"
             return 0
         fi
     fi
 
-    echo "Pulling $XRAY_DOCKER_IMAGE image..."
-    sudo docker pull "$XRAY_DOCKER_IMAGE"
+    echo "Pulling ${docker_image} image..."
+    sudo docker pull "$docker_image"
 
-    ( cd xray || return 1
+    ( cd "$dir" || return 1
 
-    echo -e "${YELLOW}Starting Xray container...${NC}"
-    if sudo $DOCKER_COMPOSE_CMD up -d; then
-        echo -e "${GREEN}Xray container has been restored and started!${NC}"
+    echo -e "${YELLOW}Starting ${service_name} container...${NC}"
+    if sudo "${DOCKER_COMPOSE_CMD[@]}" up -d; then
+        echo -e "${GREEN}${service_name} container has been restored and started!${NC}"
         echo "Your existing configuration and links are preserved."
-        if [ -f "vless_links.txt" ]; then
-            echo -e "\n${GREEN}Your VLESS links:${NC}"
+        if [ -f "$links_file" ]; then
+            echo -e "\n${GREEN}Your ${link_type} links:${NC}"
             while IFS= read -r line; do
                 [ -z "$line" ] && continue
                 echo "$line"
                 echo
-            done < vless_links.txt
+            done < "$links_file"
         fi
     else
-        echo -e "${RED}Failed to start Xray container.${NC}"
+        echo -e "${RED}Failed to start ${service_name} container.${NC}"
         return 1
     fi
 
     ) || return 1
 }
 
+restore_xray() {
+    restore_container "Xray" "xray_server" "xray" "$XRAY_DOCKER_IMAGE" "vless_links.txt" "VLESS"
+}
+
 restore_shadowsocks() {
-    echo -e "\n${YELLOW}Restoring Shadowsocks deployment...${NC}"
-
-    # Check if container already exists
-    if sudo docker ps -a -q -f name="^/ssserver$" | grep -q .; then
-        echo -e "${YELLOW}Shadowsocks container already exists. Checking status...${NC}"
-        if sudo docker ps -q -f name="^/ssserver$" | grep -q .; then
-            echo -e "${GREEN}Shadowsocks container is already running!${NC}"
-            return 0
-        else
-            echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
-            ( cd shadowsocks && sudo $DOCKER_COMPOSE_CMD start ) || return 1
-            echo -e "${GREEN}Shadowsocks container started successfully!${NC}"
-            return 0
-        fi
-    fi
-
-    echo "Pulling ghcr.io/shadowsocks/ssserver-rust image..."
-    sudo docker pull ghcr.io/shadowsocks/ssserver-rust:latest
-
-    ( cd shadowsocks || return 1
-
-    echo -e "${YELLOW}Starting Shadowsocks container...${NC}"
-    if sudo $DOCKER_COMPOSE_CMD up -d; then
-        echo -e "${GREEN}Shadowsocks container has been restored and started!${NC}"
-        echo "Your existing configuration and links are preserved."
-        if [ -f "ss_links.txt" ]; then
-            echo -e "\n${GREEN}Your SS links:${NC}"
-            cat ss_links.txt
-        fi
-    else
-        echo -e "${RED}Failed to start Shadowsocks container.${NC}"
-        return 1
-    fi
-
-    ) || return 1
+    restore_container "Shadowsocks" "ssserver" "shadowsocks" "ghcr.io/shadowsocks/ssserver-rust:latest" "ss_links.txt" "SS"
 }
 
 # --- Main Script ---
