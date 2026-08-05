@@ -5,13 +5,14 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.12.0"
+SCRIPT_VERSION="3.12.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
 DEFAULT_SS_PORT=80
 DEFAULT_QUOTA_TIMEZONE="UTC"
 DEFAULT_USER_LIMIT_GB=300
+XRAY_QUOTA_CRON_MARKER="# proxy-sh:xray-quota-check"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -32,17 +33,60 @@ cleanup_tmp_files() {
 trap cleanup_tmp_files EXIT INT TERM
 
 make_temp_file() {
+    local result_var=$1
+    local template=${2:-}
     local tmp
-    tmp=$(mktemp)
+
+    if [[ -n "$template" ]]; then
+        tmp=$(mktemp "$template") || return 1
+    else
+        tmp=$(mktemp) || return 1
+    fi
+
     TMP_FILES+=("$tmp")
-    echo "$tmp"
+    printf -v "$result_var" '%s' "$tmp"
+}
+
+url_encode_component() {
+    local input=$1
+    local output="" char hex
+    local LC_ALL=C
+    local i
+
+    for ((i = 0; i < ${#input}; i++)); do
+        char=${input:i:1}
+        case "$char" in
+            [a-zA-Z0-9.~_-]) output+="$char" ;;
+            *)
+                printf -v hex '%02X' "'$char"
+                output+="%${hex}"
+                ;;
+        esac
+    done
+
+    printf '%s' "$output"
+}
+
+format_uri_host() {
+    local host=$1
+    if [[ "$host" == \[*\] ]]; then
+        printf '%s' "$host"
+    elif [[ "$host" == *:* ]]; then
+        printf '[%s]' "$host"
+    else
+        printf '%s' "$host"
+    fi
+}
+
+base64url_encode() {
+    printf '%s' "$1" | base64 | tr -d '\n=' | tr '/+' '_-'
 }
 
 save_quota_db_content() {
     local content="$1"
     local db_file="xray/user_limits.db"
     local tmp_db
-    tmp_db=$(make_temp_file)
+    make_temp_file tmp_db
     echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
     if [[ -n "$content" ]]; then
         printf "%s\n" "$content" >> "$tmp_db"
@@ -791,16 +835,21 @@ EOL
     # Generate links using each user's assigned shortIds only
     echo -e "\n${GREEN}VLESS Links:${NC}"
     LINKS=""
-    REMARKS_URL=${REMARKS// /%20}
+    local server_uri_host sni_url public_key_url xhttp_path_url
+    server_uri_host=$(format_uri_host "$SERVER_ADDR")
+    sni_url=$(url_encode_component "$SNI_DOMAIN")
+    public_key_url=$(url_encode_component "$PUBLIC_KEY")
+    xhttp_path_url=$(url_encode_component "/$XHTTP_PATH")
 
     for idx in "${!USER_UUIDS[@]}"; do
         uuid=${USER_UUIDS[$idx]}
         user_email=${USER_EMAILS[$idx]}
-        user_email_url=${user_email// /%20}
+        local fragment_url
+        fragment_url=$(url_encode_component "${REMARKS}-${user_email}")
 
         IFS=',' read -r -a sid_list <<< "${USER_SHORTIDS[$idx]}"
         for shortid in "${sid_list[@]}"; do
-            link="vless://$uuid@$SERVER_ADDR:443?security=reality&sni=$SNI_DOMAIN&pbk=$PUBLIC_KEY&sid=$shortid&type=xhttp&path=%2F$XHTTP_PATH#${REMARKS_URL}-${user_email_url}"
+            link="vless://$uuid@$server_uri_host:443?security=reality&sni=$sni_url&pbk=$public_key_url&sid=$shortid&type=xhttp&path=$xhttp_path_url#${fragment_url}"
             echo "$link"
             echo
             if [[ -n "$LINKS" ]]; then
@@ -931,14 +980,16 @@ EOL
 
             echo -e "\n${GREEN}SS Links:${NC}"
             LINKS=""
-            REMARKS_URL=${REMARKS// /%20}
+            local server_uri_host
+            server_uri_host=$(format_uri_host "$SERVER_ADDR")
             for i in "${!USER_PSKS[@]}"; do
                 user_psk=${USER_PSKS[$i]}
                 user_label=${USER_LABELS[$i]}
-                user_label_url=${user_label// /%20}
+                local fragment_url
+                fragment_url=$(url_encode_component "${REMARKS}-${user_label}")
                 PASSWORD="${SERVER_PSK}:${user_psk}"
-                BASE64=$(printf "%s" "${SS_METHOD}:${PASSWORD}" | base64 | tr -d '\n')
-                link="ss://${BASE64}@${SERVER_ADDR}:${ss_port}#${REMARKS_URL}-${user_label_url}"
+                BASE64=$(base64url_encode "${SS_METHOD}:${PASSWORD}")
+                link="ss://${BASE64}@${server_uri_host}:${ss_port}#${fragment_url}"
                 echo "$link"
                 LINKS+="$link\n"
             done
@@ -1346,7 +1397,7 @@ sync_xray_clients_from_quota_db() {
     fi
 
     local tmp_file
-    tmp_file=$(make_temp_file)
+    make_temp_file tmp_file
 
     awk -v clients="$clients_json" '
         BEGIN { in_clients = 0 }
@@ -1525,7 +1576,7 @@ check_and_apply_xray_quotas() {
     now_epoch=$(date +%s)
 
     local stats_map_file
-    stats_map_file=$(make_temp_file)
+    make_temp_file stats_map_file
     local stats_result
     stats_result=$(collect_xray_user_stats "$stats_map_file")
     local collected_stats_count="${stats_result%%|*}"
@@ -1675,8 +1726,12 @@ select_quota_user() {
     if [[ "$select_idx" = "0" ]]; then
         return 1
     fi
-    local sel_val=$((10#${select_idx:-0}))
-    if ! [[ "$select_idx" =~ ^[0-9]+$ ]] || [ "$sel_val" -lt 1 ]] || [[ "$sel_val" -gt ${#lines[@]} ]]; then
+    if ! [[ "$select_idx" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Invalid selection.${NC}" >&2
+        return 1
+    fi
+    local sel_val=$((10#$select_idx))
+    if [[ "$sel_val" -lt 1 ]] || [[ "$sel_val" -gt ${#lines[@]} ]]; then
         echo -e "${RED}Invalid selection.${NC}" >&2
         return 1
     fi
@@ -1698,7 +1753,7 @@ reset_xray_user_usage() {
     local db_file="xray/user_limits.db"
 
     local stats_map_file
-    stats_map_file=$(make_temp_file)
+    make_temp_file stats_map_file
     collect_xray_user_stats "$stats_map_file"
 
     local db_lines=""
@@ -1821,8 +1876,12 @@ change_xray_user_billing_cycle() {
         new_anchor_epoch=$(date +%s)
     elif [[ "$cycle_choice" = "2" ]]; then
         read -p "Enter the day of the month [1-28]: " cycle_day
-        local clean_day=$((10#${cycle_day:-0}))
-        if ! [[ "$cycle_day" =~ ^[0-9]+$ ]] || [ "$clean_day" -lt 1 ]] || [[ "$clean_day" -gt 28 ]]; then
+        if ! [[ "$cycle_day" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}Invalid day. Must be between 1 and 28.${NC}"
+            return 1
+        fi
+        local clean_day=$((10#$cycle_day))
+        if [[ "$clean_day" -lt 1 ]] || [[ "$clean_day" -gt 28 ]]; then
             echo -e "${RED}Invalid day. Must be between 1 and 28.${NC}"
             return 1
         fi
@@ -1834,7 +1893,7 @@ change_xray_user_billing_cycle() {
     read -p "Do you also want to wipe their current traffic usage back to 0 GB? [y/N]: " reset_usage
 
     local stats_map_file
-    stats_map_file=$(make_temp_file)
+    make_temp_file stats_map_file
     collect_xray_user_stats "$stats_map_file"
 
     local db_lines=""
@@ -1911,9 +1970,12 @@ disable_xray_quota_cron_silent() {
         return 0
     fi
 
-    local current_cron
+    local script_path script_dir cron_cmd current_cron
+    script_path=$(resolve_script_path) || script_path="$0"
+    script_dir=$(dirname "$script_path")
+    cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check"
     current_cron=$(crontab -l 2>/dev/null || true)
-    current_cron=$(echo "$current_cron" | grep -v -- "--quota-check" || true)
+    current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -Fv -- "$cron_cmd" || true)
 
     if [[ -n "$current_cron" ]]; then
         printf "%s\n" "$current_cron" | crontab -
@@ -2021,7 +2083,7 @@ configure_xray_quota_auto_check_cron() {
 
     local current_cron
     current_cron=$(crontab -l 2>/dev/null || true)
-    current_cron=$(echo "$current_cron" | grep -v -- "--quota-check" || true)
+    current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -Fv -- "$cron_cmd" || true)
 
     if [[ "$auto_choice" = "4" ]]; then
         if [[ -n "$current_cron" ]]; then
@@ -2033,7 +2095,7 @@ configure_xray_quota_auto_check_cron() {
         return 0
     fi
 
-    local new_entry="${cron_expr} ${cron_cmd} >/dev/null 2>&1"
+    local new_entry="${cron_expr} ${cron_cmd} >/dev/null 2>&1 ${XRAY_QUOTA_CRON_MARKER}"
     if [[ -n "$current_cron" ]]; then
         printf "%s\n%s\n" "$current_cron" "$new_entry" | crontab -
     else
@@ -2182,7 +2244,7 @@ show_xray_quota_auto_check_status() {
     # Check cron job
     if command -v crontab >/dev/null 2>&1; then
         local cron_line
-        cron_line=$(crontab -l 2>/dev/null | grep -E -- "--quota-check" | head -n 1 || true)
+        cron_line=$(crontab -l 2>/dev/null | grep -F -- "$XRAY_QUOTA_CRON_MARKER" | head -n 1 || true)
         if [[ -n "$cron_line" ]]; then
             cron_enabled=1
             cron_schedule=$(echo "$cron_line" | awk '{print $1" "$2" "$3" "$4" "$5}')
@@ -2302,8 +2364,12 @@ add_xray_user() {
 
     read -p "How many shortIds for generated links of ${user_id}? [Default: 1]: " user_shortids_count
     user_shortids_count=${user_shortids_count:-1}
-    local clean_sid_count=$((10#${user_shortids_count:-0}))
-    if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]] || [ "$clean_sid_count" -lt 1 ]]; then
+    if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}shortId count must be a positive integer.${NC}"
+        return 1
+    fi
+    local clean_sid_count=$((10#$user_shortids_count))
+    if [[ "$clean_sid_count" -lt 1 ]]; then
         echo -e "${RED}shortId count must be a positive integer.${NC}"
         return 1
     fi
@@ -2332,7 +2398,7 @@ add_xray_user() {
             sid_add_json=$(echo "$sid_add_json" | jq --arg s "$sid" '. + [$s]')
         done
         local tmp_config
-        tmp_config=$(make_temp_file)
+        make_temp_file tmp_config
         jq --argjson newids "$sid_add_json" '(.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds) += $newids' "$config_file" > "$tmp_config"
         apply_preserved_file_metadata "$config_file" "$tmp_config"
         mv "$tmp_config" "$config_file"
@@ -2377,14 +2443,13 @@ add_xray_user() {
     sync_xray_clients_from_quota_db
     reload_xray_container
 
-    local server_addr remarks remarks_url sni_domain xhttp_path private_key public_key
+    local server_addr remarks sni_domain xhttp_path private_key public_key
     read -p "Enter server IP/domain for new user's links (leave empty to skip link output): " server_addr
 
     if [[ -n "$server_addr" ]]; then
         if ensure_jq; then
             read -p "Enter remarks prefix [Default: xray]: " remarks
             remarks=${remarks:-xray}
-            remarks_url=${remarks// /%20}
 
             sni_domain=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // empty' "$config_file" | head -n1)
             xhttp_path=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.xhttpSettings.path // empty' "$config_file" | head -n1)
@@ -2398,10 +2463,17 @@ add_xray_user() {
             fi
 
             if [[ -n "$sni_domain" ]] && [[ -n "$xhttp_path" ]] && [[ ${#new_shortids[@]} -gt 0 ]] && [[ -n "$public_key" ]]; then
+                local server_uri_host sni_url public_key_url xhttp_path_url fragment_url
+                server_uri_host=$(format_uri_host "$server_addr")
+                sni_url=$(url_encode_component "$sni_domain")
+                public_key_url=$(url_encode_component "$public_key")
+                xhttp_path_url=$(url_encode_component "/$xhttp_path")
+                fragment_url=$(url_encode_component "${remarks}-${user_id}")
+
                 echo -e "\n${GREEN}New user link(s):${NC}"
                 for shortid in "${new_shortids[@]}"; do
                     local link
-                    link="vless://${uuid}@${server_addr}:443?security=reality&sni=${sni_domain}&pbk=${public_key}&sid=${shortid}&type=xhttp&path=%2F${xhttp_path}#${remarks_url}-${user_id}"
+                    link="vless://${uuid}@${server_uri_host}:443?security=reality&sni=${sni_url}&pbk=${public_key_url}&sid=${shortid}&type=xhttp&path=${xhttp_path_url}#${fragment_url}"
                     echo "$link"
                     echo "" >> xray/vless_links.txt
                     echo "$link" >> xray/vless_links.txt
@@ -2439,7 +2511,7 @@ remove_xray_user() {
 
     if [[ -f "xray/vless_links.txt" ]] && [[ -n "$target_uuid" ]]; then
         local tmp_links
-        tmp_links=$(make_temp_file)
+        make_temp_file tmp_links
         grep -v -- "$target_uuid" xray/vless_links.txt > "$tmp_links" || true
         apply_preserved_file_metadata "xray/vless_links.txt" "$tmp_links"
         mv "$tmp_links" xray/vless_links.txt
@@ -2473,7 +2545,7 @@ add_shadowsocks_user() {
     user_psk=$(openssl rand -base64 32)
 
     local tmp_ss
-    tmp_ss=$(make_temp_file)
+    make_temp_file tmp_ss
     jq --arg n "$user_name" --arg p "$user_psk" '.users += [{"name": $n, "password": $p}]' "$ss_config" > "$tmp_ss"
 
     apply_preserved_file_metadata "$ss_config" "$tmp_ss"
@@ -2481,7 +2553,7 @@ add_shadowsocks_user() {
 
     reload_shadowsocks_container
 
-    local server_psk method ss_port server_addr remarks remarks_url user_name_url password base64 link
+    local server_psk method ss_port server_addr remarks password base64 link
     server_psk=$(jq -r '.password' "$ss_config")
     method=$(jq -r '.method' "$ss_config")
     ss_port=$(jq -r '.server_port' "$ss_config")
@@ -2490,11 +2562,12 @@ add_shadowsocks_user() {
     if [[ -n "$server_addr" ]]; then
         read -p "Enter remarks prefix [Default: shadowsocks_rust]: " remarks
         remarks=${remarks:-shadowsocks_rust}
-        remarks_url=${remarks// /%20}
-        user_name_url=${user_name// /%20}
+        local server_uri_host fragment_url
+        server_uri_host=$(format_uri_host "$server_addr")
+        fragment_url=$(url_encode_component "${remarks}-${user_name}")
         password="${server_psk}:${user_psk}"
-        base64=$(printf "%s" "${method}:${password}" | base64 | tr -d '\n')
-        link="ss://${base64}@${server_addr}:${ss_port}#${remarks_url}-${user_name_url}"
+        base64=$(base64url_encode "${method}:${password}")
+        link="ss://${base64}@${server_uri_host}:${ss_port}#${fragment_url}"
         echo -e "\n${GREEN}New SS user link:${NC}"
         echo "$link"
         echo "$link" >> shadowsocks/ss_links.txt
@@ -2538,7 +2611,7 @@ remove_shadowsocks_user() {
 
     local target_user="${users[$((sel - 1))]}"
     local tmp_ss
-    tmp_ss=$(make_temp_file)
+    make_temp_file tmp_ss
     jq --arg n "$target_user" '.users |= map(select(.name != $n))' "$ss_config" > "$tmp_ss"
 
     apply_preserved_file_metadata "$ss_config" "$tmp_ss"
