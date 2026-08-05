@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.12.1"
+SCRIPT_VERSION="3.12.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -114,7 +114,7 @@ install_system_packages() {
 
 # Check and install dependencies
 check_dependencies() {
-    local dependencies=("curl" "openssl")
+    local dependencies=("curl" "openssl" "jq")
     local missing_deps=()
 
     for cmd in "${dependencies[@]}"; do
@@ -1371,64 +1371,72 @@ sync_xray_clients_from_quota_db() {
         echo -e "${RED}Quota database or Xray config not found.${NC}"
         return 1
     fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo -e "${RED}Cannot safely update Xray clients because 'jq' is not installed.${NC}" >&2
+        return 1
+    fi
 
-    local clients_json=""
-    local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
-    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
-        [ -z "$email" ] && continue
-        [ "$email" = "#" ] && continue
-        if [[ "$status" != "active" ]]; then
-            continue
-        fi
+    local clients_json
+    if ! clients_json=$(jq -Rn '
+        [
+            inputs
+            | select(length > 0)
+            | select(startswith("#") | not)
+            | split("|")
+            | select(length >= 9 and .[8] == "active")
+            | {id: .[1], flow: "", email: .[0]}
+        ]
+    ' < "$db_file"); then
+        echo -e "${RED}Failed to build the Xray client list from the quota database.${NC}" >&2
+        return 1
+    fi
 
-        local entry="                    {\"id\": \"$uuid\", \"flow\": \"\", \"email\": \"$email\"}"
-        if [[ -n "$clients_json" ]]; then
-            clients_json+=$'\n'
-            clients_json+="${entry},"
-        else
-            clients_json+="${entry},"
-        fi
-    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+    local target_count
+    if ! target_count=$(jq -er '
+        [
+            .inbounds[]?
+            | select(
+                .protocol == "vless"
+                and ((.settings.clients? | type) == "array")
+            )
+        ]
+        | length
+    ' "$config_file" 2>/dev/null); then
+        echo -e "${RED}Xray config must be valid JSON before clients can be synchronized.${NC}" >&2
+        return 1
+    fi
 
-    if [[ -n "$clients_json" ]]; then
-        clients_json=${clients_json%,}
-    else
-        clients_json="                    "
+    if [[ "$target_count" -ne 1 ]]; then
+        echo -e "${RED}Expected exactly one VLESS inbound with a clients array; found ${target_count}. No changes were made.${NC}" >&2
+        return 1
     fi
 
     local tmp_file
     make_temp_file tmp_file
+    if ! jq --argjson clients "$clients_json" '
+        (
+            .inbounds[]
+            | select(
+                .protocol == "vless"
+                and ((.settings.clients? | type) == "array")
+            )
+            | .settings.clients
+        ) = $clients
+    ' "$config_file" > "$tmp_file"; then
+        echo -e "${RED}Failed to update the VLESS clients array. No changes were made.${NC}" >&2
+        rm -f "$tmp_file"
+        return 1
+    fi
 
-    awk -v clients="$clients_json" '
-        BEGIN { in_clients = 0 }
-        {
-            if ($0 ~ /"clients"[[:space:]]*:[[:space:]]*\[/) {
-                print
-                print clients
-                in_clients = 1
-                next
-            }
-            if (in_clients == 1) {
-                if ($0 ~ /^[[:space:]]*\][[:space:]]*,?[[:space:]]*$/) {
-                    print
-                    in_clients = 0
-                }
-                next
-            }
-            print
-        }
-    ' "$config_file" > "$tmp_file"
-
-    # Validate the generated config is valid JSON
-    if command -v jq &>/dev/null && ! jq empty "$tmp_file" 2>/dev/null; then
-        echo -e "${RED}Error: Config file corruption detected after client sync. Aborting.${NC}" >&2
+    if ! jq -e empty "$tmp_file" >/dev/null 2>&1; then
+        echo -e "${RED}Generated Xray config failed JSON validation. No changes were made.${NC}" >&2
         rm -f "$tmp_file"
         return 1
     fi
 
     apply_preserved_file_metadata "$config_file" "$tmp_file"
     mv "$tmp_file" "$config_file"
-    echo -e "${GREEN}Updated Xray clients list from quota database.${NC}"
+    echo -e "${GREEN}Updated the VLESS clients list from the quota database.${NC}"
 }
 
 reload_xray_container() {
