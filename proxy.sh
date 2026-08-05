@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.11.0"
+SCRIPT_VERSION="3.12.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -961,6 +961,24 @@ EOL
 #   0: No lock present (safe to run Watchtower)
 #   1: Error occurred
 #   2: Lock released and container updated successfully
+restore_compose_and_restart() {
+    local dir=$1
+    local backup_file=$2
+
+    if ! cp -p "$backup_file" "$dir/docker-compose.yml"; then
+        echo -e "${RED}Failed to restore the previous docker-compose.yml.${NC}" >&2
+        return 1
+    fi
+
+    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+        echo -e "${YELLOW}Previous container configuration restored.${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}Previous compose file was restored, but the container could not be restarted. Manual recovery is required.${NC}" >&2
+    return 1
+}
+
 release_version_lock_if_needed() {
     local dir=$1
     local base_image=$2
@@ -979,28 +997,36 @@ release_version_lock_if_needed() {
     fi
 
     if [[ "$current_image" != "$expected_default" ]] && [[ "$current_image" != "$base_image" ]]; then
-        echo -e "${YELLOW}Releasing version lock ($current_image) and resetting to latest...${NC}"
-        local tmp_file
-        tmp_file=$(make_temp_file)
-        if sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
-            mv "$tmp_file" "$dir/docker-compose.yml"
+        if ! ensure_docker_compose; then
+            return 1
+        fi
 
-            if ! ensure_docker_compose; then
-                return 1
-            fi
-            echo "Recreating container with latest image..."
-            if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" down && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
-                echo -e "${GREEN}Reset to latest version successfully.${NC}"
-                return 2
-            else
-                echo -e "${RED}Failed to recreate container with latest image.${NC}"
-                return 1
-            fi
-        else
-            rm -f "$tmp_file"
+        echo -e "${YELLOW}Releasing version lock ($current_image) and resetting to latest...${NC}"
+        local tmp_file backup_file
+        tmp_file=$(mktemp)
+        backup_file=$(mktemp)
+        TMP_FILES+=("$tmp_file" "$backup_file")
+        cp -p "$dir/docker-compose.yml" "$backup_file"
+
+        if ! sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
+            rm -f "$tmp_file" "$backup_file"
             echo -e "${RED}Failed to update docker-compose.yml to release lock.${NC}"
             return 1
         fi
+        apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
+        mv "$tmp_file" "$dir/docker-compose.yml"
+
+        echo "Recreating container with latest image..."
+        if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+            rm -f "$backup_file"
+            echo -e "${GREEN}Reset to latest version successfully.${NC}"
+            return 2
+        fi
+
+        echo -e "${RED}Failed to recreate container with latest image. Rolling back...${NC}"
+        restore_compose_and_restart "$dir" "$backup_file" || true
+        rm -f "$backup_file"
+        return 1
     fi
     return 0
 }
@@ -1101,6 +1127,10 @@ change_container_version() {
         echo -e "${RED}Version tag cannot be empty.${NC}"
         return 1
     fi
+    if ! [[ "$target_version" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+        echo -e "${RED}Invalid container version tag.${NC}"
+        return 1
+    fi
 
     local new_image="$base_image"
     if [[ "$target_version" != "latest" ]]; then
@@ -1109,37 +1139,34 @@ change_container_version() {
 
     echo -e "Changing image to: ${YELLOW}${new_image}${NC}..."
 
-    # Use sed portably to update the image in docker-compose.yml
-    local tmp_file
-    tmp_file=$(make_temp_file)
-    if sed "s|image:.*|image: ${new_image}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
-        mv "$tmp_file" "$dir/docker-compose.yml"
-    else
-        rm -f "$tmp_file"
-        echo -e "${RED}Failed to update docker-compose.yml.${NC}"
-        return 1
-    fi
-
     if ! ensure_docker_compose; then
         return 1
     fi
 
+    local tmp_file backup_file
+    tmp_file=$(mktemp)
+    backup_file=$(mktemp)
+    TMP_FILES+=("$tmp_file" "$backup_file")
+    cp -p "$dir/docker-compose.yml" "$backup_file"
+
+    if ! sed "s|image:.*|image: ${new_image}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
+        rm -f "$tmp_file" "$backup_file"
+        echo -e "${RED}Failed to update docker-compose.yml.${NC}"
+        return 1
+    fi
+    apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
+    mv "$tmp_file" "$dir/docker-compose.yml"
+
     echo "Pulling new image version..."
-    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull ); then
-        echo "Recreating container..."
-        if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" down && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
-            echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
-            return 0
-        fi
+    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+        rm -f "$backup_file"
+        echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
+        return 0
     fi
-    echo -e "${RED}Failed to apply new version. Restoring compose file...${NC}"
-    local restore_tmp
-    restore_tmp=$(make_temp_file)
-    if sed "s|image:.*|image: ${current_image}|g" "$dir/docker-compose.yml" > "$restore_tmp"; then
-        mv "$restore_tmp" "$dir/docker-compose.yml"
-    else
-        rm -f "$restore_tmp"
-    fi
+
+    echo -e "${RED}Failed to apply new version. Rolling back...${NC}"
+    restore_compose_and_restart "$dir" "$backup_file" || true
+    rm -f "$backup_file"
     return 1
 }
 
@@ -1372,18 +1399,51 @@ reload_xray_container() {
     fi
 }
 
-# Save the quota database and optionally sync the Xray client list
-# and reload the container if any config changes were made.
+# Save quota state and apply access changes as one transaction. If config
+# synchronization or reload fails, restore the previous database and config so
+# the next quota check retries the enforcement change.
 finalize_quota_db_update() {
     local db_lines="$1"
     local config_changed="$2"
+    local db_file="xray/user_limits.db"
+    local config_file="xray/server.jsonc"
 
-    save_quota_db_content "$db_lines"
-
-    if [[ "$config_changed" -eq 1 ]]; then
-        sync_xray_clients_from_quota_db
-        reload_xray_container
+    if [[ "$config_changed" -ne 1 ]]; then
+        save_quota_db_content "$db_lines"
+        return 0
     fi
+
+    if [[ ! -f "$db_file" ]] || [[ ! -f "$config_file" ]]; then
+        echo -e "${RED}Cannot apply quota changes: database or Xray config not found.${NC}" >&2
+        return 1
+    fi
+
+    local db_backup config_backup
+    db_backup=$(mktemp)
+    config_backup=$(mktemp)
+    TMP_FILES+=("$db_backup" "$config_backup")
+    cp -p "$db_file" "$db_backup"
+    cp -p "$config_file" "$config_backup"
+
+    if ! save_quota_db_content "$db_lines" || ! sync_xray_clients_from_quota_db; then
+        echo -e "${RED}Failed to prepare quota enforcement. Restoring previous state.${NC}" >&2
+        cp -p "$db_backup" "$db_file"
+        cp -p "$config_backup" "$config_file"
+        return 1
+    fi
+
+    if ! reload_xray_container; then
+        echo -e "${RED}Quota reload failed. Restoring previous database and config.${NC}" >&2
+        cp -p "$db_backup" "$db_file"
+        cp -p "$config_backup" "$config_file"
+        if ! reload_xray_container; then
+            echo -e "${RED}Failed to reload the restored Xray configuration; manual recovery is required.${NC}" >&2
+        fi
+        return 1
+    fi
+
+    rm -f "$db_backup" "$config_backup"
+    return 0
 }
 
 collect_xray_user_stats() {
@@ -1834,6 +1894,10 @@ resolve_script_path() {
     local path="$0"
     if command -v realpath >/dev/null 2>&1; then
         path=$(realpath "$0" 2>/dev/null || echo "$0")
+    elif [[ "$path" != /* ]]; then
+        local script_dir
+        script_dir=$(cd -- "$(dirname -- "$path")" && pwd -P) || return 1
+        path="${script_dir}/$(basename -- "$path")"
     fi
     echo "$path"
 }
@@ -1865,6 +1929,7 @@ disable_xray_quota_systemd_silent() {
 
     sudo systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
     sudo rm -f /etc/systemd/system/xray-quota-check.timer /etc/systemd/system/xray-quota-check.service >/dev/null 2>&1 || true
+    sudo rm -f /usr/local/lib/proxy-sh/quota-check.sh >/dev/null 2>&1 || true
     sudo systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
@@ -1924,8 +1989,9 @@ configure_xray_quota_auto_check_cron() {
         return 1
     fi
 
-    local cron_cmd cron_expr
-    cron_cmd="bash $(printf '%q' "$script_path") --quota-check"
+    local script_dir cron_cmd cron_expr
+    script_dir=$(dirname "$script_path")
+    cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check"
 
     echo ""
     echo "Set automatic quota check interval (cron):"
@@ -1984,10 +2050,10 @@ configure_xray_quota_auto_check_systemd() {
         return 1
     fi
 
-    local script_path script_dir unit_interval escaped_script escaped_dir
+    local script_path script_dir unit_interval escaped_dir
+    local quota_runner="/usr/local/lib/proxy-sh/quota-check.sh"
     script_path=$(resolve_script_path)
     script_dir=$(dirname "$script_path")
-    printf -v escaped_script '%q' "$script_path"
     printf -v escaped_dir '%q' "$script_dir"
 
     if [[ ! -f "$script_path" ]]; then
@@ -2024,6 +2090,11 @@ configure_xray_quota_auto_check_systemd() {
             ;;
     esac
 
+    # The timer runs as root, so execute a root-owned copy rather than the
+    # potentially user-writable interactive script.
+    sudo install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh
+    sudo install -o root -g root -m 0755 "$script_path" "$quota_runner"
+
     sudo tee /etc/systemd/system/xray-quota-check.service >/dev/null << EOL
 [Unit]
 Description=Xray per-user quota check
@@ -2032,7 +2103,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -lc "cd $escaped_dir && bash $escaped_script --quota-check"
+ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-check"
 EOL
 
     sudo tee /etc/systemd/system/xray-quota-check.timer >/dev/null << EOL
@@ -2553,8 +2624,30 @@ delete_container() {
         return
     fi
 
-    ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" down ) || true
-    rm -rf "$dir"
+    if ! ensure_docker_compose; then
+        echo -e "${RED}Cannot safely delete ${service_name} without Docker Compose. Configuration was retained.${NC}"
+        return 1
+    fi
+
+    if ! ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" down ); then
+        echo -e "${RED}Failed to stop ${service_name}. Configuration was retained.${NC}"
+        return 1
+    fi
+
+    local remaining_containers
+    if ! remaining_containers=$(cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" ps -q); then
+        echo -e "${RED}Could not verify ${service_name} shutdown. Configuration was retained.${NC}"
+        return 1
+    fi
+    if [[ -n "$remaining_containers" ]]; then
+        echo -e "${RED}${service_name} still has running containers. Configuration was retained.${NC}"
+        return 1
+    fi
+
+    if ! rm -rf -- "$dir"; then
+        echo -e "${RED}Failed to remove ${dir}.${NC}"
+        return 1
+    fi
     echo -e "${GREEN}${service_name} container and config deleted successfully!${NC}"
 }
 
@@ -2574,18 +2667,39 @@ fetch_latest_script_version() {
 }
 
 perform_script_update() {
-    local cache_bust
+    local cache_bust script_path script_dir tmp_script
     cache_bust="?$(date +%s)"
+    script_path=$(resolve_script_path) || return 1
+    script_dir=$(dirname "$script_path")
+    tmp_script=$(mktemp "${script_dir}/.proxy.sh.update.XXXXXX") || {
+        echo -e "${RED}Cannot create an update file beside ${script_path}.${NC}"
+        return 1
+    }
+    TMP_FILES+=("$tmp_script")
 
     echo -e "${YELLOW}Updating script...${NC}"
-    if curl -fsSL --max-time 20 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" > proxy.sh; then
-        chmod +x proxy.sh
-        echo -e "${GREEN}Script updated successfully! Restarting...${NC}"
-        exec bash "$0"
-    else
-        echo -e "${RED}Failed to download update.${NC}"
+    if ! curl -fsSL --max-time 20 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" > "$tmp_script"; then
+        rm -f "$tmp_script"
+        echo -e "${RED}Failed to download update; the current script was not changed.${NC}"
         return 1
     fi
+
+    if ! bash -n "$tmp_script"; then
+        rm -f "$tmp_script"
+        echo -e "${RED}Downloaded update failed syntax validation; the current script was not changed.${NC}"
+        return 1
+    fi
+
+    apply_preserved_file_metadata "$script_path" "$tmp_script"
+    chmod u+x "$tmp_script"
+    if ! mv -f "$tmp_script" "$script_path"; then
+        rm -f "$tmp_script"
+        echo -e "${RED}Failed to replace ${script_path}; the current script was not changed.${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}Script updated successfully! Restarting...${NC}"
+    exec bash "$script_path"
 }
 
 auto_check_script_update() {
