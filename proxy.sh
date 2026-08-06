@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.12.2"
+SCRIPT_VERSION="3.13.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -25,12 +25,15 @@ SS_DOCKER_IMAGE="ghcr.io/shadowsocks/ssserver-rust:latest"
 
 # Global state & cleanup trap for temporary files
 TMP_FILES=()
+
 cleanup_tmp_files() {
     if [[ ${#TMP_FILES[@]} -gt 0 ]]; then
         rm -f "${TMP_FILES[@]}" 2>/dev/null || true
     fi
 }
 trap cleanup_tmp_files EXIT INT TERM
+
+# --- Generic utilities ---
 
 make_temp_file() {
     local result_var=$1
@@ -82,24 +85,39 @@ base64url_encode() {
     printf '%s' "$1" | base64 | tr -d '\n=' | tr '/+' '_-'
 }
 
-save_quota_db_content() {
-    local content="$1"
-    local db_file="xray/user_limits.db"
-    local tmp_db
-    make_temp_file tmp_db
-    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
-    if [[ -n "$content" ]]; then
-        printf "%s\n" "$content" >> "$tmp_db"
+apply_preserved_file_metadata() {
+    local target_file="$1"
+    local temp_file="$2"
+
+    if [[ -e "$target_file" ]]; then
+        local uid gid mode
+        uid=$(stat -c %u "$target_file" 2>/dev/null || true)
+        gid=$(stat -c %g "$target_file" 2>/dev/null || true)
+        mode=$(stat -c %a "$target_file" 2>/dev/null || true)
+
+        if [[ -n "$uid" ]] && [[ -n "$gid" ]]; then
+            chown "$uid:$gid" "$temp_file" 2>/dev/null || true
+        fi
+        if [[ -n "$mode" ]]; then
+            chmod "$mode" "$temp_file" 2>/dev/null || true
+        fi
     fi
-    apply_preserved_file_metadata "$db_file" "$tmp_db"
-    mv "$tmp_db" "$db_file"
 }
 
-# --- Functions ---
+resolve_script_path() {
+    local path="$0"
+    if command -v realpath >/dev/null 2>&1; then
+        path=$(realpath "$0" 2>/dev/null || echo "$0")
+    elif [[ "$path" != /* ]]; then
+        local script_dir
+        script_dir=$(cd -- "$(dirname -- "$path")" && pwd -P) || return 1
+        path="${script_dir}/$(basename -- "$path")"
+    fi
+    echo "$path"
+}
 
-# Generic package installer
-# Returns 0 on success, 1 if no supported package manager
-# was found or the install command failed.
+# --- System and dependency helpers ---
+
 install_system_packages() {
     if command -v apt-get &> /dev/null; then
         sudo apt-get update && sudo apt-get install -y "$@"
@@ -112,7 +130,6 @@ install_system_packages() {
     fi
 }
 
-# Check and install dependencies
 check_dependencies() {
     local dependencies=("curl" "openssl" "jq")
     local missing_deps=()
@@ -164,7 +181,6 @@ ensure_jq() {
     return 0
 }
 
-# Function to detect the Linux distribution
 check_distro() {
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
@@ -175,55 +191,8 @@ check_distro() {
     fi
 }
 
-# Function to check for and install Docker
-install_docker() {
-    # Check if Docker is installed
-    if command -v docker &> /dev/null; then
-        echo -e "${GREEN}Docker is already installed.${NC}"
-    else
-        echo -e "${YELLOW}Docker is not installed.${NC}"
-        read -p "$(echo -e ${YELLOW}Would you like to install Docker? [y/N]: ${NC})" install_confirm
-        if [[ "$install_confirm" != "y" && "$install_confirm" != "Y" ]]; then
-            echo -e "${RED}Docker installation cancelled.${NC}"
-            return 1
-        fi
-        install_docker_packages
-        return
-    fi
+# --- Docker and Compose infrastructure ---
 
-    # Check if Docker Compose is working
-    if docker compose version &> /dev/null 2>&1; then
-        echo -e "${GREEN}Docker Compose is working properly.${NC}"
-        return
-    elif command -v docker-compose &> /dev/null; then
-        if docker-compose version &> /dev/null 2>&1; then
-            echo -e "${GREEN}Docker Compose is working properly.${NC}"
-            return
-        else
-            echo -e "${YELLOW}Docker Compose is installed but not working (broken on newer Python versions).${NC}"
-            read -p "$(echo -e ${YELLOW}Would you like to upgrade to a working Docker Compose version? [y/N]: ${NC})" upgrade_confirm
-            if [[ "$upgrade_confirm" == "y" || "$upgrade_confirm" == "Y" ]]; then
-                echo -e "${YELLOW}Upgrading Docker Compose...${NC}"
-                install_docker_compose
-            else
-                echo -e "${RED}Docker Compose upgrade cancelled. Some features may not work.${NC}"
-            fi
-            return
-        fi
-    else
-        echo -e "${YELLOW}Docker Compose is not installed.${NC}"
-        read -p "$(echo -e ${YELLOW}Would you like to install Docker Compose? [y/N]: ${NC})" install_confirm
-        if [[ "$install_confirm" == "y" || "$install_confirm" == "Y" ]]; then
-            install_docker_compose
-        else
-            echo -e "${RED}Docker Compose installation cancelled. Some features may not work.${NC}"
-        fi
-        return
-    fi
-}
-
-# Function to install Docker packages
-# Set up Docker's official APT repository (GPG key + sources list).
 setup_docker_apt_repo() {
     if [[ -z "${DISTRO:-}" ]]; then
         check_distro || return 1
@@ -309,7 +278,6 @@ install_docker_packages() {
     fi
 }
 
-# Function to install Docker Compose
 install_docker_compose() {
     if [[ -z "${DISTRO:-}" ]]; then
         check_distro || return 1
@@ -353,15 +321,535 @@ install_docker_compose() {
     esac
 }
 
-# Check whether a domain belongs to the Microsoft domain blocklist.
-# Returns 0 if the domain matches, 1 otherwise.
+install_docker() {
+    # Check if Docker is installed
+    if command -v docker &> /dev/null; then
+        echo -e "${GREEN}Docker is already installed.${NC}"
+    else
+        echo -e "${YELLOW}Docker is not installed.${NC}"
+        read -p "$(echo -e ${YELLOW}Would you like to install Docker? [y/N]: ${NC})" install_confirm
+        if [[ "$install_confirm" != "y" && "$install_confirm" != "Y" ]]; then
+            echo -e "${RED}Docker installation cancelled.${NC}"
+            return 1
+        fi
+        install_docker_packages
+        return
+    fi
+
+    # Check if Docker Compose is working
+    if docker compose version &> /dev/null 2>&1; then
+        echo -e "${GREEN}Docker Compose is working properly.${NC}"
+        return
+    elif command -v docker-compose &> /dev/null; then
+        if docker-compose version &> /dev/null 2>&1; then
+            echo -e "${GREEN}Docker Compose is working properly.${NC}"
+            return
+        else
+            echo -e "${YELLOW}Docker Compose is installed but not working (broken on newer Python versions).${NC}"
+            read -p "$(echo -e ${YELLOW}Would you like to upgrade to a working Docker Compose version? [y/N]: ${NC})" upgrade_confirm
+            if [[ "$upgrade_confirm" == "y" || "$upgrade_confirm" == "Y" ]]; then
+                echo -e "${YELLOW}Upgrading Docker Compose...${NC}"
+                install_docker_compose
+            else
+                echo -e "${RED}Docker Compose upgrade cancelled. Some features may not work.${NC}"
+            fi
+            return
+        fi
+    else
+        echo -e "${YELLOW}Docker Compose is not installed.${NC}"
+        read -p "$(echo -e ${YELLOW}Would you like to install Docker Compose? [y/N]: ${NC})" install_confirm
+        if [[ "$install_confirm" == "y" || "$install_confirm" == "Y" ]]; then
+            install_docker_compose
+        else
+            echo -e "${RED}Docker Compose installation cancelled. Some features may not work.${NC}"
+        fi
+        return
+    fi
+}
+
+ensure_docker_compose() {
+    if [[ ${#DOCKER_COMPOSE_CMD[@]} -gt 0 ]]; then
+        return 0
+    fi
+
+    if ! command -v docker &> /dev/null; then
+        echo -e "${RED}Docker is not installed. Please run option 1 (Environment Check) first.${NC}"
+        return 1
+    fi
+    echo -e "${YELLOW}Checking Docker Compose availability...${NC}"
+
+    # Check for both docker-compose (hyphen) and docker compose (space) versions
+    # Prioritise the newer 'docker compose' version (with space)
+    if docker compose version &> /dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD=(docker compose)
+        echo -e "${GREEN}Using Docker Compose: ${DOCKER_COMPOSE_CMD[*]}${NC}"
+    elif command -v docker-compose &> /dev/null; then
+        echo -e "${YELLOW}Found docker-compose (old version), testing if it works...${NC}"
+        if docker-compose version &> /dev/null 2>&1; then
+            DOCKER_COMPOSE_CMD=(docker-compose)
+            echo -e "${GREEN}Using Docker Compose: ${DOCKER_COMPOSE_CMD[*]}${NC}"
+        else
+            echo -e "${RED}Docker Compose is installed but not working. Please install the newer version.${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}Docker Compose is not installed. Please run option 1 (Environment Check) first.${NC}"
+        return 1
+    fi
+    return 0
+}
+
+check_environment() {
+    echo -e "${YELLOW}Checking environment...${NC}"
+    check_distro
+    install_docker
+    echo -e "${GREEN}Environment check completed!${NC}"
+}
+
+# --- Shared container lifecycle ---
+
+reload_xray_container() {
+    if [[ ! -d "xray" ]] || [[ ! -f "xray/docker-compose.yml" ]]; then
+        echo -e "${RED}xray/docker-compose.yml not found.${NC}"
+        return 1
+    fi
+
+    if ! ensure_docker_compose; then
+        return 1
+    fi
+
+    if ( cd xray && sudo "${DOCKER_COMPOSE_CMD[@]}" restart xray ); then
+        echo -e "${GREEN}Xray container reloaded successfully.${NC}"
+        return 0
+    else
+        echo -e "${RED}Failed to reload Xray container.${NC}"
+        return 1
+    fi
+}
+
+reload_shadowsocks_container() {
+    if [[ ! -d "shadowsocks" ]] || [[ ! -f "shadowsocks/docker-compose.yml" ]]; then
+        echo -e "${RED}shadowsocks/docker-compose.yml not found.${NC}"
+        return 1
+    fi
+
+    if ! ensure_docker_compose; then
+        return 1
+    fi
+
+    if (cd shadowsocks && sudo "${DOCKER_COMPOSE_CMD[@]}" restart ssserver); then
+        echo -e "${GREEN}Shadowsocks container reloaded successfully.${NC}"
+        return 0
+    else
+        echo -e "${RED}Failed to reload Shadowsocks container.${NC}"
+        return 1
+    fi
+}
+
+restore_compose_and_restart() {
+    local dir=$1
+    local backup_file=$2
+
+    if ! cp -p "$backup_file" "$dir/docker-compose.yml"; then
+        echo -e "${RED}Failed to restore the previous docker-compose.yml.${NC}" >&2
+        return 1
+    fi
+
+    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+        echo -e "${YELLOW}Previous container configuration restored.${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}Previous compose file was restored, but the container could not be restarted. Manual recovery is required.${NC}" >&2
+    return 1
+}
+
+release_version_lock_if_needed() {
+    local dir=$1
+    local base_image=$2
+    local default_tag=$3
+
+    if [[ ! -f "$dir/docker-compose.yml" ]]; then
+        return 0
+    fi
+
+    local current_image
+    current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
+
+    local expected_default="$base_image"
+    if [[ -n "$default_tag" ]]; then
+        expected_default="${base_image}:${default_tag}"
+    fi
+
+    if [[ "$current_image" != "$expected_default" ]] && [[ "$current_image" != "$base_image" ]]; then
+        if ! ensure_docker_compose; then
+            return 1
+        fi
+
+        echo -e "${YELLOW}Releasing version lock ($current_image) and resetting to latest...${NC}"
+        local tmp_file backup_file
+        tmp_file=$(mktemp)
+        backup_file=$(mktemp)
+        TMP_FILES+=("$tmp_file" "$backup_file")
+        cp -p "$dir/docker-compose.yml" "$backup_file"
+
+        if ! sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
+            rm -f "$tmp_file" "$backup_file"
+            echo -e "${RED}Failed to update docker-compose.yml to release lock.${NC}"
+            return 1
+        fi
+        apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
+        mv "$tmp_file" "$dir/docker-compose.yml"
+
+        echo "Recreating container with latest image..."
+        if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+            rm -f "$backup_file"
+            echo -e "${GREEN}Reset to latest version successfully.${NC}"
+            return 2
+        fi
+
+        echo -e "${RED}Failed to recreate container with latest image. Rolling back...${NC}"
+        restore_compose_and_restart "$dir" "$backup_file" || true
+        rm -f "$backup_file"
+        return 1
+    fi
+    return 0
+}
+
+update_container() {
+    local container_name=$1
+    local compose_dir=$2
+    local base_image=$3
+    local default_tag=${4:-}
+
+    if ! sudo docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
+        echo -e "${RED}Container '${container_name}' not found. Cannot update.${NC}"
+        return 1
+    fi
+
+    # Release version lock if present
+    local lock_status=0
+    release_version_lock_if_needed "$compose_dir" "$base_image" "$default_tag" || lock_status=$?
+    if [[ "$lock_status" -eq 1 ]]; then
+        return 1
+    elif [[ "$lock_status" -eq 2 ]]; then
+        return 0
+    fi
+
+    echo "Updating ${container_name}..."
+
+    # Run Watchtower with the API fixed to ver. 1.44
+    if sudo docker run --rm \
+      -e DOCKER_API_VERSION=1.44 \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      containrrr/watchtower \
+      --run-once \
+      -c \
+      "$container_name"; then
+        echo -e "${GREEN}Update process finished successfully.${NC}"
+    else
+        echo -e "${RED}Watchtower failed to run.${NC}"
+        return 1
+    fi
+}
+
+update_xray() {
+    update_container "xray_server" "xray" "${XRAY_DOCKER_IMAGE%%:*}" ""
+}
+
+update_shadowsocks() {
+    update_container "ssserver" "shadowsocks" "${SS_DOCKER_IMAGE%%:*}" "latest"
+}
+
+change_container_version() {
+    echo ""
+    echo -e "${YELLOW}--- Change Container Version (Downgrade/Upgrade) ---${NC}"
+    echo "1) Xray"
+    echo "2) Shadowsocks"
+    echo "0) Back"
+    read -p "Select the container [0-2]: " container_choice
+
+    local dir=""
+    local container_name=""
+    local base_image=""
+
+    case $container_choice in
+        1)
+            dir="xray"
+            container_name="xray_server"
+            base_image="${XRAY_DOCKER_IMAGE%%:*}"
+            ;;
+        2)
+            dir="shadowsocks"
+            container_name="ssserver"
+            base_image="${SS_DOCKER_IMAGE%%:*}"
+            ;;
+        0)
+            return 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            return 1
+            ;;
+    esac
+
+    if [[ ! -d "$dir" ]] || [[ ! -f "$dir/docker-compose.yml" ]]; then
+        echo -e "${RED}Container directory or docker-compose.yml for ${dir} not found.${NC}"
+        return 1
+    fi
+
+    # Read current image configuration
+    local current_image
+    current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
+    echo -e "Current image in docker-compose.yml: ${GREEN}${current_image:-Unknown}${NC}"
+
+    echo ""
+    echo "Enter the specific version tag you want to downgrade/upgrade to:"
+    read -p "Target version tag: " target_version
+
+    target_version=$(echo "$target_version" | xargs)
+    if [[ -z "$target_version" ]]; then
+        echo -e "${RED}Version tag cannot be empty.${NC}"
+        return 1
+    fi
+    if ! [[ "$target_version" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+        echo -e "${RED}Invalid container version tag.${NC}"
+        return 1
+    fi
+
+    local new_image="$base_image"
+    if [[ "$target_version" != "latest" ]]; then
+        new_image="${base_image}:${target_version}"
+    fi
+
+    echo -e "Changing image to: ${YELLOW}${new_image}${NC}..."
+
+    if ! ensure_docker_compose; then
+        return 1
+    fi
+
+    local tmp_file backup_file
+    tmp_file=$(mktemp)
+    backup_file=$(mktemp)
+    TMP_FILES+=("$tmp_file" "$backup_file")
+    cp -p "$dir/docker-compose.yml" "$backup_file"
+
+    if ! sed "s|image:.*|image: ${new_image}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
+        rm -f "$tmp_file" "$backup_file"
+        echo -e "${RED}Failed to update docker-compose.yml.${NC}"
+        return 1
+    fi
+    apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
+    mv "$tmp_file" "$dir/docker-compose.yml"
+
+    echo "Pulling new image version..."
+    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+        rm -f "$backup_file"
+        echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}Failed to apply new version. Rolling back...${NC}"
+    restore_compose_and_restart "$dir" "$backup_file" || true
+    rm -f "$backup_file"
+    return 1
+}
+
+restore_container() {
+    local service_name=$1
+    local container_name=$2
+    local dir=$3
+    local docker_image=$4
+    local links_file=$5
+    local link_type=$6
+
+    echo -e "\n${YELLOW}Restoring ${service_name} deployment...${NC}"
+
+    # Check if container already exists
+    if sudo docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
+        echo -e "${YELLOW}${service_name} container already exists. Checking status...${NC}"
+        if sudo docker ps -q -f name="^/${container_name}$" | grep -q .; then
+            echo -e "${GREEN}${service_name} container is already running!${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
+            ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" start ) || return 1
+            echo -e "${GREEN}${service_name} container started successfully!${NC}"
+            return 0
+        fi
+    fi
+
+    echo "Pulling ${docker_image} image..."
+    sudo docker pull "$docker_image"
+
+    ( cd "$dir" || return 1
+
+    echo -e "${YELLOW}Starting ${service_name} container...${NC}"
+    if sudo "${DOCKER_COMPOSE_CMD[@]}" up -d; then
+        echo -e "${GREEN}${service_name} container has been restored and started!${NC}"
+        echo "Your existing configuration and links are preserved."
+        if [[ -f "$links_file" ]]; then
+            echo -e "\n${GREEN}Your ${link_type} links:${NC}"
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                echo "$line"
+                echo
+            done < "$links_file"
+        fi
+    else
+        echo -e "${RED}Failed to start ${service_name} container.${NC}"
+        return 1
+    fi
+
+    ) || return 1
+}
+
+restore_xray() {
+    restore_container "Xray" "xray_server" "xray" "$XRAY_DOCKER_IMAGE" "vless_links.txt" "VLESS"
+}
+
+restore_shadowsocks() {
+    restore_container "Shadowsocks" "ssserver" "shadowsocks" "$SS_DOCKER_IMAGE" "ss_links.txt" "SS"
+}
+
+restore_deployment() {
+    echo -e "${YELLOW}Restore Deployment - Re-deploy containers from existing config files${NC}"
+    echo -e "${YELLOW}Use this when Docker was reinstalled or containers were accidentally deleted.${NC}\n"
+
+    # Check for existing configurations
+    XRAY_CONFIG_EXISTS=0
+    SS_CONFIG_EXISTS=0
+
+    if [[ -d "xray" ]] && [[ -f "xray/docker-compose.yml" ]] && [[ -f "xray/server.jsonc" ]]; then
+        XRAY_CONFIG_EXISTS=1
+        echo -e "${GREEN}✓ Xray configuration found${NC}"
+        echo "  - xray/docker-compose.yml"
+        echo "  - xray/server.jsonc"
+        if [[ -f "xray/vless_links.txt" ]]; then
+            echo "  - xray/vless_links.txt"
+        fi
+    else
+        echo -e "${RED}✗ Xray configuration not found${NC}"
+    fi
+
+    if [[ -d "shadowsocks" ]] && [[ -f "shadowsocks/docker-compose.yml" ]] && [[ -f "shadowsocks/server.json" ]]; then
+        SS_CONFIG_EXISTS=1
+        echo -e "${GREEN}✓ Shadowsocks configuration found${NC}"
+        echo "  - shadowsocks/docker-compose.yml"
+        echo "  - shadowsocks/server.json"
+        if [[ -f "shadowsocks/ss_links.txt" ]]; then
+            echo "  - shadowsocks/ss_links.txt"
+        fi
+    else
+        echo -e "${RED}✗ Shadowsocks configuration not found${NC}"
+    fi
+
+    echo ""
+
+    if [[ "$XRAY_CONFIG_EXISTS" -eq 0 ]] && [[ "$SS_CONFIG_EXISTS" -eq 0 ]]; then
+        echo -e "${RED}No existing configurations found. Please install using options 2 or 3.${NC}"
+        return 1
+    fi
+
+    echo "Which deployment do you want to restore?"
+    if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]]; then
+        echo "1) Xray (VLESS-XHTTP-Reality)"
+    fi
+    if [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
+        echo "2) Shadowsocks (ssserver-rust)"
+    fi
+    if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]] && [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
+        echo "3) Both"
+    fi
+    echo "0) Cancel"
+    read -p "Enter your choice: " restore_choice
+
+    case $restore_choice in
+        1)
+            if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]]; then
+                restore_xray
+            else
+                echo -e "${RED}Xray configuration not available.${NC}"
+            fi
+            ;;
+        2)
+            if [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
+                restore_shadowsocks
+            else
+                echo -e "${RED}Shadowsocks configuration not available.${NC}"
+            fi
+            ;;
+        3)
+            if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]] && [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
+                restore_xray
+                restore_shadowsocks
+            else
+                echo -e "${RED}Both configurations are not available.${NC}"
+            fi
+            ;;
+        0)
+            echo -e "${YELLOW}Restore cancelled.${NC}"
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            ;;
+    esac
+}
+
+delete_container() {
+    local service_name=$1
+    local dir=$2
+
+    echo -e "${YELLOW}Deleting ${service_name} container and config...${NC}"
+
+    if [[ ! -d "$dir" ]]; then
+        echo -e "${RED}Directory '${dir}' not found. Nothing to delete.${NC}"
+        return
+    fi
+
+    if ! ensure_docker_compose; then
+        echo -e "${RED}Cannot safely delete ${service_name} without Docker Compose. Configuration was retained.${NC}"
+        return 1
+    fi
+
+    if ! ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" down ); then
+        echo -e "${RED}Failed to stop ${service_name}. Configuration was retained.${NC}"
+        return 1
+    fi
+
+    local remaining_containers
+    if ! remaining_containers=$(cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" ps -q); then
+        echo -e "${RED}Could not verify ${service_name} shutdown. Configuration was retained.${NC}"
+        return 1
+    fi
+    if [[ -n "$remaining_containers" ]]; then
+        echo -e "${RED}${service_name} still has running containers. Configuration was retained.${NC}"
+        return 1
+    fi
+
+    if ! rm -rf -- "$dir"; then
+        echo -e "${RED}Failed to remove ${dir}.${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}${service_name} container and config deleted successfully!${NC}"
+}
+
+delete_xray() {
+    delete_container "Xray" "xray"
+}
+
+delete_shadowsocks() {
+    delete_container "Shadowsocks" "shadowsocks"
+}
+
+# --- Xray installation ---
+
 is_microsoft_domain() {
     local domain_lower
     domain_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
     [[ "$domain_lower" == *microsoft* || "$domain_lower" == *azure.com || "$domain_lower" == *azure.net || "$domain_lower" == *office.com || "$domain_lower" == *office.net || "$domain_lower" == *live.com || "$domain_lower" == *msn.com || "$domain_lower" == *bing.com || "$domain_lower" == *outlook.com || "$domain_lower" == *windows.com || "$domain_lower" == *windows.net || "$domain_lower" == *office365.com || "$domain_lower" == *skype.com || "$domain_lower" == *xbox.com || "$domain_lower" == *msftncsi.com || "$domain_lower" == *msftconnecttest.com || "$domain_lower" == *sharepoint.com || "$domain_lower" == *onedrive.com ]]
 }
 
-# Function to install Xray VLESS-XHTTP-Reality
 install_xray() {
     echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
@@ -885,6 +1373,8 @@ EOL
 ) || return 1
 }
 
+# --- Shadowsocks installation ---
+
 install_shadowsocks() {
     echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
 
@@ -1007,261 +1497,7 @@ EOL
     ) || return 1
 }
 
-# Helper function to release any specific version lock and revert to latest
-# Returns:
-#   0: No lock present (safe to run Watchtower)
-#   1: Error occurred
-#   2: Lock released and container updated successfully
-restore_compose_and_restart() {
-    local dir=$1
-    local backup_file=$2
-
-    if ! cp -p "$backup_file" "$dir/docker-compose.yml"; then
-        echo -e "${RED}Failed to restore the previous docker-compose.yml.${NC}" >&2
-        return 1
-    fi
-
-    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
-        echo -e "${YELLOW}Previous container configuration restored.${NC}"
-        return 0
-    fi
-
-    echo -e "${RED}Previous compose file was restored, but the container could not be restarted. Manual recovery is required.${NC}" >&2
-    return 1
-}
-
-release_version_lock_if_needed() {
-    local dir=$1
-    local base_image=$2
-    local default_tag=$3
-
-    if [[ ! -f "$dir/docker-compose.yml" ]]; then
-        return 0
-    fi
-
-    local current_image
-    current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
-
-    local expected_default="$base_image"
-    if [[ -n "$default_tag" ]]; then
-        expected_default="${base_image}:${default_tag}"
-    fi
-
-    if [[ "$current_image" != "$expected_default" ]] && [[ "$current_image" != "$base_image" ]]; then
-        if ! ensure_docker_compose; then
-            return 1
-        fi
-
-        echo -e "${YELLOW}Releasing version lock ($current_image) and resetting to latest...${NC}"
-        local tmp_file backup_file
-        tmp_file=$(mktemp)
-        backup_file=$(mktemp)
-        TMP_FILES+=("$tmp_file" "$backup_file")
-        cp -p "$dir/docker-compose.yml" "$backup_file"
-
-        if ! sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
-            rm -f "$tmp_file" "$backup_file"
-            echo -e "${RED}Failed to update docker-compose.yml to release lock.${NC}"
-            return 1
-        fi
-        apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
-        mv "$tmp_file" "$dir/docker-compose.yml"
-
-        echo "Recreating container with latest image..."
-        if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
-            rm -f "$backup_file"
-            echo -e "${GREEN}Reset to latest version successfully.${NC}"
-            return 2
-        fi
-
-        echo -e "${RED}Failed to recreate container with latest image. Rolling back...${NC}"
-        restore_compose_and_restart "$dir" "$backup_file" || true
-        rm -f "$backup_file"
-        return 1
-    fi
-    return 0
-}
-
-update_container() {
-    local container_name=$1
-    local compose_dir=$2
-    local base_image=$3
-    local default_tag=${4:-}
-
-    if ! sudo docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
-        echo -e "${RED}Container '${container_name}' not found. Cannot update.${NC}"
-        return 1
-    fi
-
-    # Release version lock if present
-    local lock_status=0
-    release_version_lock_if_needed "$compose_dir" "$base_image" "$default_tag" || lock_status=$?
-    if [[ "$lock_status" -eq 1 ]]; then
-        return 1
-    elif [[ "$lock_status" -eq 2 ]]; then
-        return 0
-    fi
-
-    echo "Updating ${container_name}..."
-
-    # Run Watchtower with the API fixed to ver. 1.44
-    if sudo docker run --rm \
-      -e DOCKER_API_VERSION=1.44 \
-      -v /var/run/docker.sock:/var/run/docker.sock \
-      containrrr/watchtower \
-      --run-once \
-      -c \
-      "$container_name"; then
-        echo -e "${GREEN}Update process finished successfully.${NC}"
-    else
-        echo -e "${RED}Watchtower failed to run.${NC}"
-        return 1
-    fi
-}
-
-update_xray() {
-    update_container "xray_server" "xray" "${XRAY_DOCKER_IMAGE%%:*}" ""
-}
-
-update_shadowsocks() {
-    update_container "ssserver" "shadowsocks" "${SS_DOCKER_IMAGE%%:*}" "latest"
-}
-
-change_container_version() {
-    echo ""
-    echo -e "${YELLOW}--- Change Container Version (Downgrade/Upgrade) ---${NC}"
-    echo "1) Xray"
-    echo "2) Shadowsocks"
-    echo "0) Back"
-    read -p "Select the container [0-2]: " container_choice
-
-    local dir=""
-    local container_name=""
-    local base_image=""
-
-    case $container_choice in
-        1)
-            dir="xray"
-            container_name="xray_server"
-            base_image="${XRAY_DOCKER_IMAGE%%:*}"
-            ;;
-        2)
-            dir="shadowsocks"
-            container_name="ssserver"
-            base_image="${SS_DOCKER_IMAGE%%:*}"
-            ;;
-        0)
-            return 0
-            ;;
-        *)
-            echo -e "${RED}Invalid choice.${NC}"
-            return 1
-            ;;
-    esac
-
-    if [[ ! -d "$dir" ]] || [[ ! -f "$dir/docker-compose.yml" ]]; then
-        echo -e "${RED}Container directory or docker-compose.yml for ${dir} not found.${NC}"
-        return 1
-    fi
-
-    # Read current image configuration
-    local current_image
-    current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
-    echo -e "Current image in docker-compose.yml: ${GREEN}${current_image:-Unknown}${NC}"
-
-    echo ""
-    echo "Enter the specific version tag you want to downgrade/upgrade to:"
-    read -p "Target version tag: " target_version
-
-    target_version=$(echo "$target_version" | xargs)
-    if [[ -z "$target_version" ]]; then
-        echo -e "${RED}Version tag cannot be empty.${NC}"
-        return 1
-    fi
-    if ! [[ "$target_version" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-        echo -e "${RED}Invalid container version tag.${NC}"
-        return 1
-    fi
-
-    local new_image="$base_image"
-    if [[ "$target_version" != "latest" ]]; then
-        new_image="${base_image}:${target_version}"
-    fi
-
-    echo -e "Changing image to: ${YELLOW}${new_image}${NC}..."
-
-    if ! ensure_docker_compose; then
-        return 1
-    fi
-
-    local tmp_file backup_file
-    tmp_file=$(mktemp)
-    backup_file=$(mktemp)
-    TMP_FILES+=("$tmp_file" "$backup_file")
-    cp -p "$dir/docker-compose.yml" "$backup_file"
-
-    if ! sed "s|image:.*|image: ${new_image}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
-        rm -f "$tmp_file" "$backup_file"
-        echo -e "${RED}Failed to update docker-compose.yml.${NC}"
-        return 1
-    fi
-    apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
-    mv "$tmp_file" "$dir/docker-compose.yml"
-
-    echo "Pulling new image version..."
-    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
-        rm -f "$backup_file"
-        echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
-        return 0
-    fi
-
-    echo -e "${RED}Failed to apply new version. Rolling back...${NC}"
-    restore_compose_and_restart "$dir" "$backup_file" || true
-    rm -f "$backup_file"
-    return 1
-}
-
-check_environment() {
-    echo -e "${YELLOW}Checking environment...${NC}"
-    check_distro
-    install_docker
-    echo -e "${GREEN}Environment check completed!${NC}"
-}
-
-# Ensure DOCKER_COMPOSE_CMD is set
-ensure_docker_compose() {
-    if [[ ${#DOCKER_COMPOSE_CMD[@]} -gt 0 ]]; then
-        return 0
-    fi
-
-    if ! command -v docker &> /dev/null; then
-        echo -e "${RED}Docker is not installed. Please run option 1 (Environment Check) first.${NC}"
-        return 1
-    fi
-    echo -e "${YELLOW}Checking Docker Compose availability...${NC}"
-
-    # Check for both docker-compose (hyphen) and docker compose (space) versions
-    # Prioritise the newer 'docker compose' version (with space)
-    if docker compose version &> /dev/null 2>&1; then
-        DOCKER_COMPOSE_CMD=(docker compose)
-        echo -e "${GREEN}Using Docker Compose: ${DOCKER_COMPOSE_CMD[*]}${NC}"
-    elif command -v docker-compose &> /dev/null; then
-        echo -e "${YELLOW}Found docker-compose (old version), testing if it works...${NC}"
-        if docker-compose version &> /dev/null 2>&1; then
-            DOCKER_COMPOSE_CMD=(docker-compose)
-            echo -e "${GREEN}Using Docker Compose: ${DOCKER_COMPOSE_CMD[*]}${NC}"
-        else
-            echo -e "${RED}Docker Compose is installed but not working. Please install the newer version.${NC}"
-            return 1
-        fi
-    else
-        echo -e "${RED}Docker Compose is not installed. Please run option 1 (Environment Check) first.${NC}"
-        return 1
-    fi
-    return 0
-}
-
-# Xray quota helpers
+# --- Quota subsystem ---
 
 days_in_month() {
     local year=$1
@@ -1344,23 +1580,17 @@ read_xray_quota_timezone() {
     echo "$tz"
 }
 
-apply_preserved_file_metadata() {
-    local target_file="$1"
-    local temp_file="$2"
-
-    if [[ -e "$target_file" ]]; then
-        local uid gid mode
-        uid=$(stat -c %u "$target_file" 2>/dev/null || true)
-        gid=$(stat -c %g "$target_file" 2>/dev/null || true)
-        mode=$(stat -c %a "$target_file" 2>/dev/null || true)
-
-        if [[ -n "$uid" ]] && [[ -n "$gid" ]]; then
-            chown "$uid:$gid" "$temp_file" 2>/dev/null || true
-        fi
-        if [[ -n "$mode" ]]; then
-            chmod "$mode" "$temp_file" 2>/dev/null || true
-        fi
+save_quota_db_content() {
+    local content="$1"
+    local db_file="xray/user_limits.db"
+    local tmp_db
+    make_temp_file tmp_db
+    echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" > "$tmp_db"
+    if [[ -n "$content" ]]; then
+        printf "%s\n" "$content" >> "$tmp_db"
     fi
+    apply_preserved_file_metadata "$db_file" "$tmp_db"
+    mv "$tmp_db" "$db_file"
 }
 
 sync_xray_clients_from_quota_db() {
@@ -1439,28 +1669,6 @@ sync_xray_clients_from_quota_db() {
     echo -e "${GREEN}Updated the VLESS clients list from the quota database.${NC}"
 }
 
-reload_xray_container() {
-    if [[ ! -d "xray" ]] || [[ ! -f "xray/docker-compose.yml" ]]; then
-        echo -e "${RED}xray/docker-compose.yml not found.${NC}"
-        return 1
-    fi
-
-    if ! ensure_docker_compose; then
-        return 1
-    fi
-
-    if ( cd xray && sudo "${DOCKER_COMPOSE_CMD[@]}" restart xray ); then
-        echo -e "${GREEN}Xray container reloaded successfully.${NC}"
-        return 0
-    else
-        echo -e "${RED}Failed to reload Xray container.${NC}"
-        return 1
-    fi
-}
-
-# Save quota state and apply access changes as one transaction. If config
-# synchronization or reload fails, restore the previous database and config so
-# the next quota check retries the enforcement change.
 finalize_quota_db_update() {
     local db_lines="$1"
     local config_changed="$2"
@@ -1957,17 +2165,53 @@ change_xray_user_billing_cycle() {
     finalize_quota_db_update "$db_lines" "$config_changed"
 }
 
-resolve_script_path() {
-    local path="$0"
-    if command -v realpath >/dev/null 2>&1; then
-        path=$(realpath "$0" 2>/dev/null || echo "$0")
-    elif [[ "$path" != /* ]]; then
-        local script_dir
-        script_dir=$(cd -- "$(dirname -- "$path")" && pwd -P) || return 1
-        path="${script_dir}/$(basename -- "$path")"
-    fi
-    echo "$path"
+manage_xray_quotas() {
+    while true; do
+        echo ""
+        echo -e "${YELLOW}--- Xray Per-User Quota Management ---${NC}"
+        echo "1) Show quota status"
+        echo "2) Check/apply quotas now"
+        echo "3) Reset one user's current cycle usage"
+        echo "4) Change one user's monthly limit"
+        echo "5) Change one user's billing cycle dates"
+        echo "6) Configure automatic quota checks (systemd timer / cron)"
+        echo "7) Show automatic quota check configuration status"
+        echo "0) Back"
+        read -p "Enter your choice [0-7]: " quota_choice
+
+        case $quota_choice in
+            1)
+                show_xray_quota_status
+                ;;
+            2)
+                check_and_apply_xray_quotas
+                ;;
+            3)
+                reset_xray_user_usage
+                ;;
+            4)
+                change_xray_user_limit
+                ;;
+            5)
+                change_xray_user_billing_cycle
+                ;;
+            6)
+                configure_xray_quota_auto_check
+                ;;
+            7)
+                show_xray_quota_auto_check_status
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid choice.${NC}"
+                ;;
+        esac
+    done
 }
+
+# --- Scheduler subsystem ---
 
 systemd_available() {
     command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]]
@@ -2285,70 +2529,7 @@ show_xray_quota_auto_check_status() {
     fi
 }
 
-manage_xray_quotas() {
-    while true; do
-        echo ""
-        echo -e "${YELLOW}--- Xray Per-User Quota Management ---${NC}"
-        echo "1) Show quota status"
-        echo "2) Check/apply quotas now"
-        echo "3) Reset one user's current cycle usage"
-        echo "4) Change one user's monthly limit"
-        echo "5) Change one user's billing cycle dates"
-        echo "6) Configure automatic quota checks (systemd timer / cron)"
-        echo "7) Show automatic quota check configuration status"
-        echo "0) Back"
-        read -p "Enter your choice [0-7]: " quota_choice
-
-        case $quota_choice in
-            1)
-                show_xray_quota_status
-                ;;
-            2)
-                check_and_apply_xray_quotas
-                ;;
-            3)
-                reset_xray_user_usage
-                ;;
-            4)
-                change_xray_user_limit
-                ;;
-            5)
-                change_xray_user_billing_cycle
-                ;;
-            6)
-                configure_xray_quota_auto_check
-                ;;
-            7)
-                show_xray_quota_auto_check_status
-                ;;
-            0)
-                break
-                ;;
-            *)
-                echo -e "${RED}Invalid choice.${NC}"
-                ;;
-        esac
-    done
-}
-
-reload_shadowsocks_container() {
-    if [[ ! -d "shadowsocks" ]] || [[ ! -f "shadowsocks/docker-compose.yml" ]]; then
-        echo -e "${RED}shadowsocks/docker-compose.yml not found.${NC}"
-        return 1
-    fi
-
-    if ! ensure_docker_compose; then
-        return 1
-    fi
-
-    if (cd shadowsocks && sudo "${DOCKER_COMPOSE_CMD[@]}" restart ssserver); then
-        echo -e "${GREEN}Shadowsocks container reloaded successfully.${NC}"
-        return 0
-    else
-        echo -e "${RED}Failed to reload Shadowsocks container.${NC}"
-        return 1
-    fi
-}
+# --- User management ---
 
 add_xray_user() {
     local db_file="xray/user_limits.db"
@@ -2664,6 +2845,8 @@ manage_proxy_users() {
     done
 }
 
+# --- Display helpers ---
+
 show_saved_links() {
     local primary_path=$1
     local fallback_path=$2
@@ -2694,51 +2877,7 @@ show_ss_links() {
     show_saved_links "shadowsocks/ss_links.txt" "ss_links.txt" "SS"
 }
 
-delete_container() {
-    local service_name=$1
-    local dir=$2
-
-    echo -e "${YELLOW}Deleting ${service_name} container and config...${NC}"
-
-    if [[ ! -d "$dir" ]]; then
-        echo -e "${RED}Directory '${dir}' not found. Nothing to delete.${NC}"
-        return
-    fi
-
-    if ! ensure_docker_compose; then
-        echo -e "${RED}Cannot safely delete ${service_name} without Docker Compose. Configuration was retained.${NC}"
-        return 1
-    fi
-
-    if ! ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" down ); then
-        echo -e "${RED}Failed to stop ${service_name}. Configuration was retained.${NC}"
-        return 1
-    fi
-
-    local remaining_containers
-    if ! remaining_containers=$(cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" ps -q); then
-        echo -e "${RED}Could not verify ${service_name} shutdown. Configuration was retained.${NC}"
-        return 1
-    fi
-    if [[ -n "$remaining_containers" ]]; then
-        echo -e "${RED}${service_name} still has running containers. Configuration was retained.${NC}"
-        return 1
-    fi
-
-    if ! rm -rf -- "$dir"; then
-        echo -e "${RED}Failed to remove ${dir}.${NC}"
-        return 1
-    fi
-    echo -e "${GREEN}${service_name} container and config deleted successfully!${NC}"
-}
-
-delete_xray() {
-    delete_container "Xray" "xray"
-}
-
-delete_shadowsocks() {
-    delete_container "Shadowsocks" "shadowsocks"
-}
+# --- Self-update subsystem ---
 
 fetch_latest_script_version() {
     local cache_bust latest_version
@@ -2827,149 +2966,8 @@ update_script() {
     perform_script_update
 }
 
-# Function to restore deployment from existing config files
-restore_deployment() {
-    echo -e "${YELLOW}Restore Deployment - Re-deploy containers from existing config files${NC}"
-    echo -e "${YELLOW}Use this when Docker was reinstalled or containers were accidentally deleted.${NC}\n"
+# --- Entrypoint helpers ---
 
-    # Check for existing configurations
-    XRAY_CONFIG_EXISTS=0
-    SS_CONFIG_EXISTS=0
-
-    if [[ -d "xray" ]] && [[ -f "xray/docker-compose.yml" ]] && [[ -f "xray/server.jsonc" ]]; then
-        XRAY_CONFIG_EXISTS=1
-        echo -e "${GREEN}✓ Xray configuration found${NC}"
-        echo "  - xray/docker-compose.yml"
-        echo "  - xray/server.jsonc"
-        if [[ -f "xray/vless_links.txt" ]]; then
-            echo "  - xray/vless_links.txt"
-        fi
-    else
-        echo -e "${RED}✗ Xray configuration not found${NC}"
-    fi
-
-    if [[ -d "shadowsocks" ]] && [[ -f "shadowsocks/docker-compose.yml" ]] && [[ -f "shadowsocks/server.json" ]]; then
-        SS_CONFIG_EXISTS=1
-        echo -e "${GREEN}✓ Shadowsocks configuration found${NC}"
-        echo "  - shadowsocks/docker-compose.yml"
-        echo "  - shadowsocks/server.json"
-        if [[ -f "shadowsocks/ss_links.txt" ]]; then
-            echo "  - shadowsocks/ss_links.txt"
-        fi
-    else
-        echo -e "${RED}✗ Shadowsocks configuration not found${NC}"
-    fi
-
-    echo ""
-
-    if [[ "$XRAY_CONFIG_EXISTS" -eq 0 ]] && [[ "$SS_CONFIG_EXISTS" -eq 0 ]]; then
-        echo -e "${RED}No existing configurations found. Please install using options 2 or 3.${NC}"
-        return 1
-    fi
-
-    echo "Which deployment do you want to restore?"
-    if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]]; then
-        echo "1) Xray (VLESS-XHTTP-Reality)"
-    fi
-    if [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
-        echo "2) Shadowsocks (ssserver-rust)"
-    fi
-    if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]] && [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
-        echo "3) Both"
-    fi
-    echo "0) Cancel"
-    read -p "Enter your choice: " restore_choice
-
-    case $restore_choice in
-        1)
-            if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]]; then
-                restore_xray
-            else
-                echo -e "${RED}Xray configuration not available.${NC}"
-            fi
-            ;;
-        2)
-            if [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
-                restore_shadowsocks
-            else
-                echo -e "${RED}Shadowsocks configuration not available.${NC}"
-            fi
-            ;;
-        3)
-            if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]] && [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
-                restore_xray
-                restore_shadowsocks
-            else
-                echo -e "${RED}Both configurations are not available.${NC}"
-            fi
-            ;;
-        0)
-            echo -e "${YELLOW}Restore cancelled.${NC}"
-            ;;
-        *)
-            echo -e "${RED}Invalid choice.${NC}"
-            ;;
-    esac
-}
-
-restore_container() {
-    local service_name=$1
-    local container_name=$2
-    local dir=$3
-    local docker_image=$4
-    local links_file=$5
-    local link_type=$6
-
-    echo -e "\n${YELLOW}Restoring ${service_name} deployment...${NC}"
-
-    # Check if container already exists
-    if sudo docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
-        echo -e "${YELLOW}${service_name} container already exists. Checking status...${NC}"
-        if sudo docker ps -q -f name="^/${container_name}$" | grep -q .; then
-            echo -e "${GREEN}${service_name} container is already running!${NC}"
-            return 0
-        else
-            echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
-            ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" start ) || return 1
-            echo -e "${GREEN}${service_name} container started successfully!${NC}"
-            return 0
-        fi
-    fi
-
-    echo "Pulling ${docker_image} image..."
-    sudo docker pull "$docker_image"
-
-    ( cd "$dir" || return 1
-
-    echo -e "${YELLOW}Starting ${service_name} container...${NC}"
-    if sudo "${DOCKER_COMPOSE_CMD[@]}" up -d; then
-        echo -e "${GREEN}${service_name} container has been restored and started!${NC}"
-        echo "Your existing configuration and links are preserved."
-        if [[ -f "$links_file" ]]; then
-            echo -e "\n${GREEN}Your ${link_type} links:${NC}"
-            while IFS= read -r line; do
-                [ -z "$line" ] && continue
-                echo "$line"
-                echo
-            done < "$links_file"
-        fi
-    else
-        echo -e "${RED}Failed to start ${service_name} container.${NC}"
-        return 1
-    fi
-
-    ) || return 1
-}
-
-restore_xray() {
-    restore_container "Xray" "xray_server" "xray" "$XRAY_DOCKER_IMAGE" "vless_links.txt" "VLESS"
-}
-
-restore_shadowsocks() {
-    restore_container "Shadowsocks" "ssserver" "shadowsocks" "$SS_DOCKER_IMAGE" "ss_links.txt" "SS"
-}
-
-# Prohibit the root user
 handle_root_user_flow() {
     echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
     read -p "Do you want to create/use a non-root user now and relaunch the script? [y/N]: " root_flow_confirm
@@ -3060,160 +3058,172 @@ handle_root_user_flow() {
     exec sudo -u "$new_username" -i bash "$launch_script"
 }
 
-if [[ "${1:-}" = "--quota-check" ]]; then
-    if ensure_docker_compose; then
-        check_and_apply_xray_quotas
-    fi
-    exit 0
-elif [[ "${1:-}" = "--quota-check-status" ]]; then
-    show_xray_quota_auto_check_status
-    exit 0
-fi
+run_main_menu() {
+    while true; do
+        echo -e "${YELLOW}--- Proxy Installer v${SCRIPT_VERSION} ---${NC}"
+        echo "Please choose an option:"
+        echo "0) Update this script"
+        echo "1) Environment Check (Check distro and install Docker)"
+        echo "2) Install Xray (VLESS-XHTTP-Reality)"
+        echo "3) Install Shadowsocks (ssserver-rust)"
+        echo "4) Update / Change version of existing container (Xray / Shadowsocks)"
+        echo "5) Restore deployment from existing config"
+        echo "6) Show VLESS links for current config"
+        echo "7) Show SS links for current config"
+        echo "8) Delete container and config (Xray / Shadowsocks)"
+        echo "9) Manage Xray per-user data quotas"
+        echo "10) Manage users (Add/Remove for Xray / Shadowsocks)"
+        echo "11) Exit"
+        read -p "Enter your choice [0-11]: " choice
 
-if [[ "$EUID" -eq 0 ]]; then
-  handle_root_user_flow
-fi
+        case $choice in
+            0)
+                update_script
+                ;;
+            1)
+                check_environment
+                ;;
+            2)
+                if ! ensure_docker_compose; then
+                    continue
+                fi
+                install_xray
+                ;;
+            3)
+                if ! ensure_docker_compose; then
+                    continue
+                fi
+                install_shadowsocks
+                ;;
+            4)
+                if ! ensure_docker_compose; then
+                    continue
+                fi
+                echo ""
+                echo "Version / Update Management:"
+                echo "1) Update existing containers to latest"
+                echo "2) Downgrade / Change container version"
+                echo "0) Back"
+                read -p "Enter your choice [0-2]: " ver_choice
+                case $ver_choice in
+                    1)
+                        echo "Which container do you want to update?"
+                        echo "1) Xray"
+                        echo "2) Shadowsocks"
+                        echo "3) Both"
+                        read -p "Enter your choice [1-3]: " update_choice
+                        case $update_choice in
+                            1)
+                                update_xray
+                                ;;
+                            2)
+                                update_shadowsocks
+                                ;;
+                            3)
+                                update_xray
+                                update_shadowsocks
+                                ;;
+                            *)
+                                echo -e "${RED}Invalid choice.${NC}"
+                                ;;
+                        esac
+                        ;;
+                    2)
+                        change_container_version
+                        ;;
+                    0)
+                        ;;
+                    *)
+                        echo -e "${RED}Invalid choice.${NC}"
+                        ;;
+                esac
+                ;;
+            5)
+                if ! ensure_docker_compose; then
+                    continue
+                fi
+                restore_deployment
+                ;;
+            6)
+                show_links
+                ;;
+            7)
+                show_ss_links
+                ;;
+            8)
+                if ! ensure_docker_compose; then
+                    continue
+                fi
+                echo "Which container do you want to delete?"
+                echo "1) Xray"
+                echo "2) Shadowsocks"
+                echo "3) Both"
+                read -p "Enter your choice [1-3]: " delete_choice
+                case $delete_choice in
+                    1)
+                        delete_xray
+                        ;;
+                    2)
+                        delete_shadowsocks
+                        ;;
+                    3)
+                        delete_xray
+                        delete_shadowsocks
+                        ;;
+                    *)
+                        echo -e "${RED}Invalid choice.${NC}"
+                        ;;
+                esac
+                ;;
+            9)
+                if ! ensure_docker_compose; then
+                    continue
+                fi
+                manage_xray_quotas
+                ;;
+            10)
+                if ! ensure_docker_compose; then
+                    continue
+                fi
+                manage_proxy_users
+                ;;
+            11)
+                echo -e "${GREEN}Goodbye!${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Invalid choice.${NC}"
+                ;;
+        esac
 
-check_dependencies
+        echo ""
+    done
+}
 
-auto_check_script_update
-
-while true; do
-    echo -e "${YELLOW}--- Proxy Installer v${SCRIPT_VERSION} ---${NC}"
-    echo "Please choose an option:"
-    echo "0) Update this script"
-    echo "1) Environment Check (Check distro and install Docker)"
-    echo "2) Install Xray (VLESS-XHTTP-Reality)"
-    echo "3) Install Shadowsocks (ssserver-rust)"
-    echo "4) Update / Change version of existing container (Xray / Shadowsocks)"
-    echo "5) Restore deployment from existing config"
-    echo "6) Show VLESS links for current config"
-    echo "7) Show SS links for current config"
-    echo "8) Delete container and config (Xray / Shadowsocks)"
-    echo "9) Manage Xray per-user data quotas"
-    echo "10) Manage users (Add/Remove for Xray / Shadowsocks)"
-    echo "11) Exit"
-    read -p "Enter your choice [0-11]: " choice
-
-    case $choice in
-        0)
-            update_script
-            ;;
-        1)
-            check_environment
-            ;;
-        2)
+main() {
+    case "${1:-}" in
+        --quota-check)
             if ! ensure_docker_compose; then
-                continue
+                return 1
             fi
-            install_xray
+            check_and_apply_xray_quotas
+            return
             ;;
-        3)
-            if ! ensure_docker_compose; then
-                continue
-            fi
-            install_shadowsocks
-            ;;
-        4)
-            if ! ensure_docker_compose; then
-                continue
-            fi
-            echo ""
-            echo "Version / Update Management:"
-            echo "1) Update existing containers to latest"
-            echo "2) Downgrade / Change container version"
-            echo "0) Back"
-            read -p "Enter your choice [0-2]: " ver_choice
-            case $ver_choice in
-                1)
-                    echo "Which container do you want to update?"
-                    echo "1) Xray"
-                    echo "2) Shadowsocks"
-                    echo "3) Both"
-                    read -p "Enter your choice [1-3]: " update_choice
-                    case $update_choice in
-                        1)
-                            update_xray
-                            ;;
-                        2)
-                            update_shadowsocks
-                            ;;
-                        3)
-                            update_xray
-                            update_shadowsocks
-                            ;;
-                        *)
-                            echo -e "${RED}Invalid choice.${NC}"
-                            ;;
-                    esac
-                    ;;
-                2)
-                    change_container_version
-                    ;;
-                0)
-                    ;;
-                *)
-                    echo -e "${RED}Invalid choice.${NC}"
-                    ;;
-            esac
-            ;;
-        5)
-            if ! ensure_docker_compose; then
-                continue
-            fi
-            restore_deployment
-            ;;
-        6)
-            show_links
-            ;;
-        7)
-            show_ss_links
-            ;;
-        8)
-            if ! ensure_docker_compose; then
-                continue
-            fi
-            echo "Which container do you want to delete?"
-            echo "1) Xray"
-            echo "2) Shadowsocks"
-            echo "3) Both"
-            read -p "Enter your choice [1-3]: " delete_choice
-            case $delete_choice in
-                1)
-                    delete_xray
-                    ;;
-                2)
-                    delete_shadowsocks
-                    ;;
-                3)
-                    delete_xray
-                    delete_shadowsocks
-                    ;;
-                *)
-                    echo -e "${RED}Invalid choice.${NC}"
-                    ;;
-            esac
-            ;;
-        9)
-            if ! ensure_docker_compose; then
-                continue
-            fi
-            manage_xray_quotas
-            ;;
-        10)
-            if ! ensure_docker_compose; then
-                continue
-            fi
-            manage_proxy_users
-            ;;
-        11)
-            echo -e "${GREEN}Goodbye!${NC}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Invalid choice.${NC}"
+        --quota-check-status)
+            show_xray_quota_auto_check_status
+            return
             ;;
     esac
 
-    echo ""
-done
+    if [[ "$EUID" -eq 0 ]]; then
+        handle_root_user_flow
+    fi
+
+    check_dependencies
+    auto_check_script_update
+    run_main_menu
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
