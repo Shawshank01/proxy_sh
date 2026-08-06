@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.13.0"
+SCRIPT_VERSION="3.13.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1511,12 +1511,7 @@ add_months_clamped_epoch() {
     local timezone=$3
 
     local ay am ad ah amin asec
-    ay=$(TZ="$timezone" date -d "@$anchor_epoch" +%Y)
-    am=$(TZ="$timezone" date -d "@$anchor_epoch" +%m)
-    ad=$(TZ="$timezone" date -d "@$anchor_epoch" +%d)
-    ah=$(TZ="$timezone" date -d "@$anchor_epoch" +%H)
-    amin=$(TZ="$timezone" date -d "@$anchor_epoch" +%M)
-    asec=$(TZ="$timezone" date -d "@$anchor_epoch" +%S)
+    read -r ay am ad ah amin asec < <(TZ="$timezone" date -d "@$anchor_epoch" +'%Y %m %d %H %M %S')
 
     local total_months=$((10#$ay * 12 + 10#$am - 1 + add_months))
     local ny=$((total_months / 12))
@@ -1538,27 +1533,29 @@ calculate_cycle_bounds() {
     local now_epoch=$2
     local timezone=$3
 
-    local month_offset=0
-    local start_epoch next_epoch
-    start_epoch=$(add_months_clamped_epoch "$anchor_epoch" "$month_offset" "$timezone")
+    local ay am ny nm
+    read -r ay am < <(TZ="$timezone" date -d "@$anchor_epoch" +'%Y %m')
+    read -r ny nm < <(TZ="$timezone" date -d "@$now_epoch"    +'%Y %m')
 
-    # Safety for unusual clock/timezone conditions
-    if [[ "$start_epoch" -gt "$now_epoch" ]]; then
-        local end_epoch
-        end_epoch=$(add_months_clamped_epoch "$anchor_epoch" $((month_offset + 1)) "$timezone")
-        echo "${start_epoch}|${end_epoch}"
-        return
+    local elapsed_months=$(( (10#$ny * 12 + 10#$nm) - (10#$ay * 12 + 10#$am) ))
+    if [[ "$elapsed_months" -lt 0 ]]; then
+        elapsed_months=0
     fi
 
-    while true; do
-        next_epoch=$(add_months_clamped_epoch "$anchor_epoch" $((month_offset + 1)) "$timezone")
-        if [[ "$now_epoch" -lt "$next_epoch" ]]; then
-            echo "${start_epoch}|${next_epoch}"
-            return
+    local start_epoch
+    start_epoch=$(add_months_clamped_epoch "$anchor_epoch" "$elapsed_months" "$timezone")
+
+    if [[ "$start_epoch" -gt "$now_epoch" ]]; then
+        elapsed_months=$(( elapsed_months - 1 ))
+        if [[ "$elapsed_months" -lt 0 ]]; then
+            elapsed_months=0
         fi
-        month_offset=$((month_offset + 1))
-        start_epoch=$next_epoch
-    done
+        start_epoch=$(add_months_clamped_epoch "$anchor_epoch" "$elapsed_months" "$timezone")
+    fi
+
+    local end_epoch
+    end_epoch=$(add_months_clamped_epoch "$anchor_epoch" $(( elapsed_months + 1 )) "$timezone")
+    echo "${start_epoch}|${end_epoch}"
 }
 
 read_xray_quota_timezone() {
