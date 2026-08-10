@@ -89,7 +89,7 @@ This script is designed to run as a **non-root** user.
 Copy the `vless://` or `ss://` link and paste it into the client and enjoy!  
 > Some clients may require further configuration steps after pasting the link.
 
-## Configuration Details
+## Xray Configuration Details
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
 - The configuration uses the Reality protocol for obfuscation.
 - Xray per-user quota enforcement uses Xray user traffic stats (`StatsService`) and stores state in:
@@ -99,17 +99,18 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 - Quota checks run when you execute menu option `9 -> 2` (recommended to automate with a systemd timer on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `9 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
-    - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick one that makes sense for your server location; e.g., a Korean site if your VPS is in South Korea so packet routes look natural.  
-    Example: `www.ssg.com`  
-    - The installer probes your chosen domain with:
+    - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick a direct origin website that makes sense for your server location; e.g., `dl.google.com` or `swdist.apple.com`.  
+    - ⚠️ **Do NOT use CDN or SaaS domains**: Avoid using any domains hosted by major CDN providers (such as **Akamai**, **Fastly**, **Amazon CloudFront**, **Cloudflare**, **EdgeCast** / Edge networks) or SaaS platforms with built-in enterprise-grade CDNs (such as **Shopify**, **Wix**, **Squarespace**, **Vercel**, **Netlify**, and **GitHub Pages**). Using CDN or SaaS-backed targets makes your server vulnerable to REALITY fallback bandwidth leeching and traffic hijacking.
+    - You can manually check the chosen domain by using:
       ```bash
+      curl -I --http2 "https://<target-domain>"
       sudo docker run --rm teddysun/xray:latest xray tls ping <target-domain>
       ```
-      and uses the result to fill `target` and `serverNames` automatically.
     - **Domain validation**: The script automatically checks:
-      - ⚠️ **Chinese domains**: Warns if the domain is `.cn`, `.com.cn`, or a known Chinese site (Baidu, QQ, Taobao, etc.)
       - ✓ **TLSv1.3**: Verifies the target supports TLS 1.3 (required for Reality)
       - ✓ **HTTP/2**: Checks for H2 support (recommended for best performance)
+      - ✗ **Chinese domains**: Warns if the domain is `.cn`, `.com.cn`, or a known Chinese site (Baidu, QQ, Taobao, etc.)
+      - ✗ **Microsoft domains**: Blocks Microsoft-related domains (e.g., `microsoft.com`, `azure.com`, `office.com`, `bing.com`) as they are rejected for Reality target / SNI
       - ✗ **Connection errors**: Detects timeouts or connection failures
     - Wildcards from the certificate are ignored (not supported by Xray). If only wildcards are present, the script will ask you for concrete hostnames.
 
