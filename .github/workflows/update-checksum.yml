@@ -18,12 +18,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate Checksum
+      - name: Generate Checksum and Commit via GitHub API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sha256sum proxy.sh > proxy.sh.sha256
+          NEW_HASH=$(sha256sum proxy.sh | awk '{print $1}')
+          OLD_HASH=$(cat proxy.sh.sha256 2>/dev/null | awk '{print $1}' || true)
 
-      - name: Commit and push if changed
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update proxy.sh.sha256 checksum [skip ci]"
-          file_pattern: "proxy.sh.sha256"
+          if [ "$NEW_HASH" != "$OLD_HASH" ]; then
+            echo "Checksum mismatch detected. Updating proxy.sh.sha256 via API..."
+            CONTENT=$(printf "%s  proxy.sh\n" "$NEW_HASH" | base64 -w 0)
+            SHA=$(gh api repos/${{ github.repository }}/contents/proxy.sh.sha256 --jq .sha 2>/dev/null || echo "")
+
+            if [ -n "$SHA" ]; then
+              gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sha256 \
+                -f message="chore: update proxy.sh.sha256 checksum [skip ci]" \
+                -f content="$CONTENT" \
+                -f sha="$SHA" \
+                -f branch="main"
+            else
+              gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sha256 \
+                -f message="chore: update proxy.sh.sha256 checksum [skip ci]" \
+                -f content="$CONTENT" \
+                -f branch="main"
+            fi
+            echo "Successfully updated and signed checksum commit."
+          else
+            echo "Checksum is already up to date. No commit needed."
+          fi
