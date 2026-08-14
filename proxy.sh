@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.8"
+SCRIPT_VERSION="3.15.9"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1844,6 +1844,14 @@ _finalize_quota_db_update_internal() {
     local db_file="xray/user_limits.db"
     local config_file="xray/server.jsonc"
 
+    # Safety Guard: Prevent overwriting populated DB with empty content
+    local existing_records
+    existing_records=$(get_quota_db_records)
+    if [[ -z "$db_lines" ]] && [[ -n "$existing_records" ]]; then
+        echo -e "${RED}CRITICAL: Quota update produced empty database while records exist on disk. Aborting update to protect data.${NC}" >&2
+        return 1
+    fi
+
     if [[ "$config_changed" -ne 1 ]]; then
         save_quota_db_content "$db_lines"
         return 0
@@ -2010,6 +2018,13 @@ _check_and_apply_xray_quotas_internal() {
 
     rm -f "$stats_map_file"
 
+    local db_records
+    db_records=$(get_quota_db_records)
+    if [[ -z "$db_records" ]] && grep -q '^[^#[:space:]]' "$db_file" 2>/dev/null; then
+        echo -e "${RED}CRITICAL: Failed to read existing records from ${db_file}. Aborting to protect data.${NC}" >&2
+        return 1
+    fi
+
     local db_lines=""
     local config_changed=0
     local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
@@ -2074,7 +2089,7 @@ _check_and_apply_xray_quotas_internal() {
             db_lines+=$'\n'
         fi
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-    done < <(get_quota_db_records)
+    done <<< "$db_records"
 
     finalize_quota_db_update "$db_lines" "$config_changed"
 
@@ -2174,6 +2189,13 @@ reset_xray_user_usage() {
     make_temp_file stats_map_file
     collect_xray_user_stats "$stats_map_file"
 
+    local db_records
+    db_records=$(get_quota_db_records)
+    if [[ -z "$db_records" ]] && grep -q '^[^#[:space:]]' "$db_file" 2>/dev/null; then
+        echo -e "${RED}CRITICAL: Failed to read existing records from ${db_file}. Aborting to protect data.${NC}" >&2
+        return 1
+    fi
+
     local db_lines=""
     local config_changed=0
     local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
@@ -2214,7 +2236,7 @@ reset_xray_user_usage() {
             db_lines+=$'\n'
         fi
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-    done < <(get_quota_db_records)
+    done <<< "$db_records"
 
     finalize_quota_db_update "$db_lines" "$config_changed"
 }
@@ -2230,6 +2252,13 @@ change_xray_user_limit() {
         return 1
     fi
     new_limit_gb=$((10#$new_limit_gb))
+
+    local db_records
+    db_records=$(get_quota_db_records)
+    if [[ -z "$db_records" ]] && grep -q '^[^#[:space:]]' "$db_file" 2>/dev/null; then
+        echo -e "${RED}CRITICAL: Failed to read existing records from ${db_file}. Aborting to protect data.${NC}" >&2
+        return 1
+    fi
 
     local db_lines=""
     local config_changed=0
@@ -2270,7 +2299,7 @@ change_xray_user_limit() {
             db_lines+=$'\n'
         fi
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-    done < <(get_quota_db_records)
+    done <<< "$db_records"
 
     finalize_quota_db_update "$db_lines" "$config_changed"
 }
@@ -2326,6 +2355,13 @@ change_xray_user_billing_cycle() {
     make_temp_file stats_map_file
     collect_xray_user_stats "$stats_map_file"
 
+    local db_records
+    db_records=$(get_quota_db_records)
+    if [[ -z "$db_records" ]] && grep -q '^[^#[:space:]]' "$db_file" 2>/dev/null; then
+        echo -e "${RED}CRITICAL: Failed to read existing records from ${db_file}. Aborting to protect data.${NC}" >&2
+        return 1
+    fi
+
     local db_lines=""
     local config_changed=0
     local now_epoch
@@ -2378,7 +2414,7 @@ change_xray_user_billing_cycle() {
             db_lines+=$'\n'
         fi
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-    done < <(get_quota_db_records)
+    done <<< "$db_records"
 
     finalize_quota_db_update "$db_lines" "$config_changed"
 }
