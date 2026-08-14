@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.16.0"
+SCRIPT_VERSION="3.16.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -51,7 +51,9 @@ cleanup_script_tmp_dir() {
         rm -rf "$SCRIPT_TMP_DIR" 2>/dev/null || true
     fi
 }
-trap cleanup_script_tmp_dir EXIT INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap cleanup_script_tmp_dir EXIT
 
 # --- Generic utilities ---
 
@@ -991,7 +993,7 @@ install_xray() {
     read -p "How many users do you need? [Default: $DEFAULT_UUIDS]: " num_uuids
     num_uuids=${num_uuids:-$DEFAULT_UUIDS}
 
-    if ! [[ "$num_uuids" =~ ^[0-9]+$ ]] || [ "$num_uuids" -lt 1 ]]; then
+    if ! [[ "$num_uuids" =~ ^[0-9]+$ ]] || [[ "$num_uuids" -lt 1 ]]; then
         echo -e "${RED}User count must be a positive integer.${NC}"
         return 1
     fi
@@ -1067,7 +1069,7 @@ install_xray() {
             while true; do
                 read -p "Enter monthly limit for ${user_email} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb
                 user_limit_gb=${user_limit_gb:-$DEFAULT_USER_LIMIT_GB}
-                if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [ "$user_limit_gb" -gt 0 ]]; then
+                if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [[ "$user_limit_gb" -gt 0 ]]; then
                     break
                 fi
                 echo -e "${RED}Please enter a positive integer GB value.${NC}"
@@ -2831,7 +2833,7 @@ add_xray_user() {
         while true; do
             read -p "Enter monthly limit for ${user_id} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb
             user_limit_gb=${user_limit_gb:-$DEFAULT_USER_LIMIT_GB}
-            if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [ "$((10#$user_limit_gb))" -gt 0 ]]; then
+            if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [[ "$((10#$user_limit_gb))" -gt 0 ]]; then
                 user_limit_gb=$((10#$user_limit_gb))
                 break
             fi
@@ -3036,7 +3038,7 @@ remove_shadowsocks_user() {
     fi
 
     read -p "Select user to remove [1-${#users[@]}]: " sel
-    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#users[@]} ]]; then
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#users[@]} ]]; then
         echo -e "${RED}Invalid selection.${NC}"
         return 1
     fi
