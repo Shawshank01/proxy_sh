@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.5"
+SCRIPT_VERSION="3.15.6"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -882,7 +882,68 @@ delete_shadowsocks() {
 is_microsoft_domain() {
     local domain_lower
     domain_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-    [[ "$domain_lower" == *microsoft* || "$domain_lower" == *azure.com || "$domain_lower" == *azure.net || "$domain_lower" == *office.com || "$domain_lower" == *office.net || "$domain_lower" == *live.com || "$domain_lower" == *msn.com || "$domain_lower" == *bing.com || "$domain_lower" == *outlook.com || "$domain_lower" == *windows.com || "$domain_lower" == *windows.net || "$domain_lower" == *office365.com || "$domain_lower" == *skype.com || "$domain_lower" == *xbox.com || "$domain_lower" == *msftncsi.com || "$domain_lower" == *msftconnecttest.com || "$domain_lower" == *sharepoint.com || "$domain_lower" == *onedrive.com ]]
+    local blocked_roots=(
+        "microsoft.com"
+        "microsoftonline.com"
+        "azure.com"
+        "azure.net"
+        "azureedge.net"
+        "office.com"
+        "office.net"
+        "office365.com"
+        "live.com"
+        "msn.com"
+        "bing.com"
+        "outlook.com"
+        "windows.com"
+        "windows.net"
+        "skype.com"
+        "xbox.com"
+        "msftncsi.com"
+        "msftconnecttest.com"
+        "sharepoint.com"
+        "onedrive.com"
+    )
+
+    for root in "${blocked_roots[@]}"; do
+        if [[ "$domain_lower" == "$root" || "$domain_lower" == *."$root" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_chinese_domain() {
+    local domain_lower
+    domain_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    local cn_tlds=(".cn" ".com.cn" ".net.cn" ".org.cn" ".中国" ".中國")
+    local cn_roots=(
+        "baidu.com"
+        "qq.com"
+        "taobao.com"
+        "tmall.com"
+        "jd.com"
+        "163.com"
+        "sina.com"
+        "weibo.com"
+        "alipay.com"
+        "bilibili.com"
+        "douyin.com"
+        "tiktok.com"
+    )
+
+    for tld in "${cn_tlds[@]}"; do
+        if [[ "$domain_lower" == *"$tld" ]]; then
+            return 0
+        fi
+    done
+
+    for root in "${cn_roots[@]}"; do
+        if [[ "$domain_lower" == "$root" || "$domain_lower" == *."$root" ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 install_xray() {
@@ -1037,10 +1098,8 @@ install_xray() {
 
         # Check for Chinese domains before probing
         DOMAIN_WARNING=""
-        if [[ "$PING_HOST" == *.cn || "$PING_HOST" == *.com.cn || "$PING_HOST" == *.net.cn || "$PING_HOST" == *.org.cn || "$PING_HOST" == *.中国 || "$PING_HOST" == *.中國 ]]; then
-            DOMAIN_WARNING="${RED}⚠ WARNING: This appears to be a Chinese domain (.cn). Reality target must be a foreign website outside China!${NC}"
-        elif [[ "$PING_HOST" == *baidu.com || "$PING_HOST" == *qq.com || "$PING_HOST" == *taobao.com || "$PING_HOST" == *tmall.com || "$PING_HOST" == *jd.com || "$PING_HOST" == *163.com || "$PING_HOST" == *sina.com || "$PING_HOST" == *weibo.com || "$PING_HOST" == *alipay.com || "$PING_HOST" == *bilibili.com || "$PING_HOST" == *douyin.com || "$PING_HOST" == *tiktok.com ]]; then
-            DOMAIN_WARNING="${RED}⚠ WARNING: This appears to be a Chinese website. Reality target must be a foreign website outside China!${NC}"
+        if is_chinese_domain "$PING_HOST"; then
+            DOMAIN_WARNING="${RED}⚠ WARNING: '$PING_HOST' appears to be a Chinese website/domain. Reality target must be a foreign website outside China!${NC}"
         fi
 
         if [[ -n "$DOMAIN_WARNING" ]]; then
