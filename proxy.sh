@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.6"
+SCRIPT_VERSION="3.15.7"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -241,23 +241,37 @@ setup_docker_apt_repo() {
 
     local repo_url repo_codename
     if [[ "$DISTRO" = "linuxmint" ]]; then
-        local ubuntu_codename
-        ubuntu_codename=$(grep -oP 'UBUNTU_CODENAME=\K[^"]+' /etc/os-release 2>/dev/null || echo "jammy")
+        local ubuntu_codename=""
+        if [[ -f /etc/os-release ]]; then
+            ubuntu_codename=$(grep -E '^UBUNTU_CODENAME=' /etc/os-release | cut -d'=' -f2 | tr -d '"\r\n' || true)
+        fi
+        if [[ -z "$ubuntu_codename" && -f /etc/upstream-release/lsb-release ]]; then
+            ubuntu_codename=$(grep -E '^DISTRIB_CODENAME=' /etc/upstream-release/lsb-release | cut -d'=' -f2 | tr -d '"\r\n' || true)
+        fi
+        if [[ -z "$ubuntu_codename" ]]; then
+            echo -e "${RED}Could not determine underlying Ubuntu codename for Linux Mint.${NC}" >&2
+            return 1
+        fi
         echo -e "${YELLOW}Linux Mint detected, using Ubuntu codename: $ubuntu_codename${NC}"
         repo_url="https://download.docker.com/linux/ubuntu"
         repo_codename="$ubuntu_codename"
     elif [[ "$DISTRO" = "debian" ]]; then
         repo_url="https://download.docker.com/linux/debian"
-        repo_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+        repo_codename=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
     else
         repo_url="https://download.docker.com/linux/ubuntu"
-        repo_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+        repo_codename=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
+    fi
+
+    if [[ -z "$repo_codename" ]]; then
+        echo -e "${RED}Could not determine distribution codename from /etc/os-release.${NC}" >&2
+        return 1
     fi
 
     curl -fsSL "${repo_url}/gpg" | $SUDO gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     $SUDO chmod a+r /etc/apt/keyrings/docker.gpg
 
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $repo_url $repo_codename stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $repo_url $repo_codename stable" | $SUDO tee /etc/apt/sources.list.d/docker.list > /dev/null
 }
 
 install_docker_packages() {
@@ -637,7 +651,11 @@ change_container_version() {
     # Read current image configuration
     local current_image
     current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
-    echo -e "Current image in docker-compose.yml: ${GREEN}${current_image:-Unknown}${NC}"
+    if [[ -z "$current_image" ]]; then
+        echo -e "${RED}Could not find 'image:' configuration in $dir/docker-compose.yml.${NC}" >&2
+        return 1
+    fi
+    echo -e "Current image in docker-compose.yml: ${GREEN}${current_image}${NC}"
 
     echo ""
     echo "Enter the specific version tag you want to downgrade/upgrade to:"
@@ -1661,7 +1679,7 @@ with_xray_quota_lock() {
 
     [[ -d "xray" ]] || mkdir -p "xray"
 
-    export _XRAY_QUOTA_LOCK_HELD=1
+    _XRAY_QUOTA_LOCK_HELD=1
 
     if command -v flock >/dev/null 2>&1; then
         local lock_fd
@@ -1671,10 +1689,10 @@ with_xray_quota_lock() {
             local ret=$?
             flock -u "$lock_fd" 2>/dev/null || true
             exec {lock_fd}>&-
-            export _XRAY_QUOTA_LOCK_HELD=0
+            _XRAY_QUOTA_LOCK_HELD=0
             return $ret
         else
-            export _XRAY_QUOTA_LOCK_HELD=0
+            _XRAY_QUOTA_LOCK_HELD=0
             echo -e "${RED}Error: Quota database is locked by another process (timed out).${NC}" >&2
             exec {lock_fd}>&-
             return 1
@@ -1691,7 +1709,7 @@ with_xray_quota_lock() {
             sleep 0.1
             waited=$((waited + 1))
             if [[ "$waited" -ge $((max_wait * 10)) ]]; then
-                export _XRAY_QUOTA_LOCK_HELD=0
+                _XRAY_QUOTA_LOCK_HELD=0
                 echo -e "${RED}Error: Quota database is locked by another process (timed out).${NC}" >&2
                 return 1
             fi
@@ -1699,7 +1717,7 @@ with_xray_quota_lock() {
         "$@"
         local ret=$?
         rm -rf "$lock_dir" 2>/dev/null || true
-        export _XRAY_QUOTA_LOCK_HELD=0
+        _XRAY_QUOTA_LOCK_HELD=0
         return $ret
     fi
 }
