@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.3"
+SCRIPT_VERSION="3.15.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -531,7 +531,7 @@ release_version_lock_if_needed() {
         make_temp_file backup_file
         cp -p "$dir/docker-compose.yml" "$backup_file"
 
-        if ! sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
+        if ! awk -v new_img="$expected_default" '/^[[:space:]]*image:[[:space:]]*/ { sub(/image:[[:space:]]*.*/, "image: " new_img) } { print }' "$dir/docker-compose.yml" > "$tmp_file"; then
             rm -f "$tmp_file" "$backup_file"
             echo -e "${RED}Failed to update docker-compose.yml to release lock.${NC}"
             return 1
@@ -669,7 +669,7 @@ change_container_version() {
     make_temp_file backup_file
     cp -p "$dir/docker-compose.yml" "$backup_file"
 
-    if ! sed "s|image:.*|image: ${new_image}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
+    if ! awk -v new_img="$new_image" '/^[[:space:]]*image:[[:space:]]*/ { sub(/image:[[:space:]]*.*/, "image: " new_img) } { print }' "$dir/docker-compose.yml" > "$tmp_file"; then
         rm -f "$tmp_file" "$backup_file"
         echo -e "${RED}Failed to update docker-compose.yml.${NC}"
         return 1
@@ -898,8 +898,10 @@ install_xray() {
 
     echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
+    local orig_dir="$PWD"
+    trap 'cd "$orig_dir" 2>/dev/null || true' RETURN
     mkdir -p xray
-    ( cd xray || return 1
+    cd xray || return 1
 
     echo "Pulling $XRAY_DOCKER_IMAGE image..."
     $SUDO docker pull "$XRAY_DOCKER_IMAGE"
@@ -1353,7 +1355,7 @@ EOL
     done
 
     echo -e "\nSaving links to vless_links.txt..."
-    echo -e "$LINKS" > vless_links.txt
+    printf "%b" "$LINKS" > vless_links.txt
     echo "Links saved successfully!"
 
     cat > user_limits.conf << EOL
@@ -1375,7 +1377,8 @@ EOL
     else
         echo -e "${RED}Container start cancelled.${NC}"
     fi
-) || return 1
+
+    cd "$orig_dir" 2>/dev/null || true
 }
 
 # --- Shadowsocks installation ---
@@ -1387,8 +1390,10 @@ install_shadowsocks() {
 
     echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
 
+    local orig_dir="$PWD"
+    trap 'cd "$orig_dir" 2>/dev/null || true' RETURN
     mkdir -p shadowsocks
-    ( cd shadowsocks || return 1
+    cd shadowsocks || return 1
 
     echo "Pulling $SS_DOCKER_IMAGE image..."
     $SUDO docker pull "$SS_DOCKER_IMAGE"
@@ -1497,7 +1502,7 @@ EOL
             done
 
             echo -e "\nSaving links to ss_links.txt..."
-            echo -e "$LINKS" > ss_links.txt
+            printf "%b" "$LINKS" > ss_links.txt
             echo "Links saved successfully!"
         else
             echo -e "${RED}Failed to start Shadowsocks container.${NC}"
@@ -1505,8 +1510,6 @@ EOL
     else
         echo -e "${RED}Container start cancelled.${NC}"
     fi
-
-    ) || return 1
 }
 
 # --- Quota subsystem ---
@@ -1817,36 +1820,53 @@ collect_xray_user_stats() {
         stats_error=$(echo "$raw_stats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
     fi
 
-    local pending_user=""
-    local pending_dir=""
-    local line name_info value_info user dir value
+    if [[ -z "$stats_error" ]]; then
+        awk '
+            /user>>>.*>>>traffic>>>(uplink|downlink)/ {
+                line = $0
+                match(line, /user>>>([^>"]+)>>>traffic>>>(uplink|downlink)/)
+                s = substr(line, RSTART, RLENGTH)
+                split(s, parts, ">>>")
+                user = parts[2]
+                dir = parts[4]
 
-    while IFS= read -r line; do
-        name_info=$(echo "$line" | sed -nE 's/.*user>>>([^>"]+)>>>traffic>>>(uplink|downlink).*/\1|\2/p')
-        if [[ -n "$name_info" ]]; then
-            user=${name_info%%|*}
-            dir=${name_info##*|}
-            pending_user="$user"
-            pending_dir="$dir"
-
-            value_info=$(echo "$line" | sed -nE 's/.*["[:space:]]value["[:space:]]*:[[:space:]]*"?([0-9]+)"?.*/\1/p')
-            if [[ -n "$value_info" ]]; then
-                echo "${pending_user}|${pending_dir}|${value_info}" >> "$map_file"
-                pending_user=""
-                pending_dir=""
-            fi
-            continue
-        fi
-
-        if [[ -n "$pending_user" ]]; then
-            value=$(echo "$line" | sed -nE 's/.*["[:space:]]value["[:space:]]*:[[:space:]]*"?([0-9]+)"?.*/\1/p')
-            if [[ -n "$value" ]]; then
-                echo "${pending_user}|${pending_dir}|${value}" >> "$map_file"
-                pending_user=""
-                pending_dir=""
-            fi
-        fi
-    done <<< "$raw_stats"
+                if (match(line, /"value":[[:space:]]*"?([0-9]+)"?/)) {
+                    val_str = substr(line, RSTART, RLENGTH)
+                    gsub(/[^0-9]/, "", val_str)
+                    if (val_str != "") {
+                        print user "|" dir "|" val_str
+                        user = ""; dir = ""
+                    }
+                } else if (match(line, /value:[[:space:]]*([0-9]+)/)) {
+                    val_str = substr(line, RSTART, RLENGTH)
+                    gsub(/[^0-9]/, "", val_str)
+                    if (val_str != "") {
+                        print user "|" dir "|" val_str
+                        user = ""; dir = ""
+                    }
+                }
+                next
+            }
+            user != "" && /"value":/ {
+                val_str = $0
+                gsub(/[^0-9]/, "", val_str)
+                if (val_str != "") {
+                    print user "|" dir "|" val_str
+                    user = ""; dir = ""
+                }
+                next
+            }
+            user != "" && /value:[[:space:]]*[0-9]+/ {
+                val_str = $0
+                gsub(/[^0-9]/, "", val_str)
+                if (val_str != "") {
+                    print user "|" dir "|" val_str
+                    user = ""; dir = ""
+                }
+                next
+            }
+        ' <<< "$raw_stats" > "$map_file"
+    fi
 
     if [[ -s "$map_file" ]]; then
         stats_count=$(wc -l < "$map_file" | tr -d ' ')
