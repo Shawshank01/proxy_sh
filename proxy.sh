@@ -528,6 +528,9 @@ release_version_lock_if_needed() {
 
     local current_image
     current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
+    if [[ -z "$current_image" ]]; then
+        return 0
+    fi
 
     local expected_default="$base_image"
     if [[ -n "$default_tag" ]]; then
