@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.13.1"
+SCRIPT_VERSION="3.13.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -901,14 +901,31 @@ install_xray() {
         return 1
     fi
 
+    # Generate server-level shared shortIds
+    SHORTIDS_JSON=""
+    SERVER_SHORTIDS=()
+    declare -A USED_SHORTIDS
+    for sid_idx in $(seq 1 $DEFAULT_SHORTIDS); do
+        while true; do
+            shortid=$(openssl rand -hex 4) # Generates 8 characters
+            if [[ -z "${USED_SHORTIDS[$shortid]:-}" ]]; then
+                USED_SHORTIDS[$shortid]=1
+                break
+            fi
+        done
+
+        if [[ -n "$SHORTIDS_JSON" ]]; then
+            SHORTIDS_JSON+=","
+        fi
+        SHORTIDS_JSON+="\"$shortid\""
+        SERVER_SHORTIDS+=("$shortid")
+    done
+
     CLIENTS_JSON=""
     QUOTA_DB_LINES=""
-    SHORTIDS_JSON=""
     declare -A USED_EMAILS
-    declare -A USED_SHORTIDS
     USER_UUIDS=()
     USER_EMAILS=()
-    USER_SHORTIDS=()
 
     for i in $(seq 1 $num_uuids); do
         uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
@@ -921,34 +938,6 @@ install_xray() {
             fi
         done
         echo "Generated user ID for user ${i}: ${user_email}"
-
-        read -p "How many shortIds for generated links of ${user_email}? [Default: 1]: " user_shortids_count
-        user_shortids_count=${user_shortids_count:-1}
-        if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]] || [ "$user_shortids_count" -lt 1 ]]; then
-            echo -e "${RED}shortId count for ${user_email} must be a positive integer.${NC}"
-            return 1
-        fi
-
-        user_shortids_csv=""
-        for sid_idx in $(seq 1 $user_shortids_count); do
-            while true; do
-                shortid=$(openssl rand -hex 4) # Generates 8 characters
-                if [[ -z "${USED_SHORTIDS[$shortid]:-}" ]]; then
-                    USED_SHORTIDS[$shortid]=1
-                    break
-                fi
-            done
-
-            if [[ -n "$SHORTIDS_JSON" ]]; then
-                SHORTIDS_JSON+=","
-            fi
-            SHORTIDS_JSON+="\"$shortid\""
-
-            if [[ -n "$user_shortids_csv" ]]; then
-                user_shortids_csv+=","
-            fi
-            user_shortids_csv+="$shortid"
-        done
 
         read -p "Set monthly data limit for ${user_email}? [Y/n]: " set_limit
         user_limit_gb=0
@@ -981,7 +970,6 @@ install_xray() {
 
         USER_UUIDS+=("$uuid")
         USER_EMAILS+=("$user_email")
-        USER_SHORTIDS+=("$user_shortids_csv")
     done
 
     # Generate random XHTTP path for security
@@ -1320,7 +1308,7 @@ EOL
         return 1
     fi
 
-    # Generate links using each user's assigned shortIds only
+    # Generate links using the shared server shortIds
     echo -e "\n${GREEN}VLESS Links:${NC}"
     LINKS=""
     local server_uri_host sni_url public_key_url xhttp_path_url
@@ -1335,8 +1323,7 @@ EOL
         local fragment_url
         fragment_url=$(url_encode_component "${REMARKS}-${user_email}")
 
-        IFS=',' read -r -a sid_list <<< "${USER_SHORTIDS[$idx]}"
-        for shortid in "${sid_list[@]}"; do
+        for shortid in "${SERVER_SHORTIDS[@]}"; do
             link="vless://$uuid@$server_uri_host:443?security=reality&sni=$sni_url&pbk=$public_key_url&sid=$shortid&type=xhttp&path=$xhttp_path_url#${fragment_url}"
             echo "$link"
             echo
@@ -2211,7 +2198,7 @@ manage_xray_quotas() {
 # --- Scheduler subsystem ---
 
 systemd_available() {
-    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]]
+    command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
 }
 
 disable_xray_quota_cron_silent() {
@@ -2548,54 +2535,6 @@ add_xray_user() {
     local uuid
     uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
 
-    read -p "How many shortIds for generated links of ${user_id}? [Default: 1]: " user_shortids_count
-    user_shortids_count=${user_shortids_count:-1}
-    if ! [[ "$user_shortids_count" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}shortId count must be a positive integer.${NC}"
-        return 1
-    fi
-    local clean_sid_count=$((10#$user_shortids_count))
-    if [[ "$clean_sid_count" -lt 1 ]]; then
-        echo -e "${RED}shortId count must be a positive integer.${NC}"
-        return 1
-    fi
-
-    # Generate new shortIds for this user and add them to the config
-    local new_shortids=()
-    if ensure_jq; then
-        local existing_shortids
-        existing_shortids=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[]' "$config_file" 2>/dev/null || true)
-        for sid_idx in $(seq 1 $clean_sid_count); do
-            local new_sid
-            while true; do
-                new_sid=$(openssl rand -hex 4)
-                # Ensure it doesn't collide with existing shortIds
-                if ! echo "$existing_shortids" | grep -qx "$new_sid"; then
-                    break
-                fi
-            done
-            new_shortids+=("$new_sid")
-            existing_shortids+=$'\n'"$new_sid"
-        done
-
-        # Add new shortIds to the config's shortIds array
-        local sid_add_json="[]"
-        for sid in "${new_shortids[@]}"; do
-            sid_add_json=$(echo "$sid_add_json" | jq --arg s "$sid" '. + [$s]')
-        done
-        local tmp_config
-        make_temp_file tmp_config
-        jq --argjson newids "$sid_add_json" '(.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds) += $newids' "$config_file" > "$tmp_config"
-        apply_preserved_file_metadata "$config_file" "$tmp_config"
-        mv "$tmp_config" "$config_file"
-    else
-        # Fallback: generate shortids but cannot add to config without jq
-        for sid_idx in $(seq 1 $clean_sid_count); do
-            new_shortids+=("$(openssl rand -hex 4)")
-        done
-        echo -e "${YELLOW}Warning: 'jq' unavailable, new shortIds could not be added to server.jsonc automatically.${NC}"
-    fi
-
     read -p "Set monthly data limit for ${user_id}? [Y/n]: " set_limit
     local user_limit_gb=0
     if [[ -z "$set_limit" || "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
@@ -2642,13 +2581,22 @@ add_xray_user() {
             xhttp_path=${xhttp_path#/}
             private_key=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.privateKey // empty' "$config_file" | head -n1)
 
+            local server_shortids=()
+            while IFS= read -r sid; do
+                [[ -n "$sid" ]] && server_shortids+=("$sid")
+            done < <(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[] // empty' "$config_file" 2>/dev/null || true)
+
+            if [[ ${#server_shortids[@]} -eq 0 ]]; then
+                server_shortids+=("")
+            fi
+
             if [[ -n "$private_key" ]]; then
                 local derived
                 derived=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$private_key")
                 public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
             fi
 
-            if [[ -n "$sni_domain" ]] && [[ -n "$xhttp_path" ]] && [[ ${#new_shortids[@]} -gt 0 ]] && [[ -n "$public_key" ]]; then
+            if [[ -n "$sni_domain" ]] && [[ -n "$xhttp_path" ]] && [[ ${#server_shortids[@]} -gt 0 ]] && [[ -n "$public_key" ]]; then
                 local server_uri_host sni_url public_key_url xhttp_path_url fragment_url
                 server_uri_host=$(format_uri_host "$server_addr")
                 sni_url=$(url_encode_component "$sni_domain")
@@ -2657,7 +2605,7 @@ add_xray_user() {
                 fragment_url=$(url_encode_component "${remarks}-${user_id}")
 
                 echo -e "\n${GREEN}New user link(s):${NC}"
-                for shortid in "${new_shortids[@]}"; do
+                for shortid in "${server_shortids[@]}"; do
                     local link
                     link="vless://${uuid}@${server_uri_host}:443?security=reality&sni=${sni_url}&pbk=${public_key_url}&sid=${shortid}&type=xhttp&path=${xhttp_path_url}#${fragment_url}"
                     echo "$link"
