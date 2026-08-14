@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.14.1"
+SCRIPT_VERSION="3.15.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -45,6 +45,20 @@ cleanup_tmp_files() {
 trap cleanup_tmp_files EXIT INT TERM
 
 # --- Generic utilities ---
+
+generate_uuid() {
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    elif command -v uuidgen >/dev/null 2>&1; then
+        uuidgen | tr '[:upper:]' '[:lower:]'
+    else
+        local hex
+        hex=$(openssl rand -hex 16)
+        printf '%s-%s-4%s-%s%s-%s\n' \
+            "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
+            "$(printf '%x' $(( (0x${hex:16:2} & 0x3f) | 0x80 )))" "${hex:18:2}" "${hex:20:12}"
+    fi
+}
 
 make_temp_file() {
     local result_var=$1
@@ -533,6 +547,10 @@ update_container() {
     local base_image=$3
     local default_tag=${4:-}
 
+    if ! ensure_docker_compose; then
+        return 1
+    fi
+
     if ! $SUDO docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
         echo -e "${RED}Container '${container_name}' not found. Cannot update.${NC}"
         return 1
@@ -547,19 +565,13 @@ update_container() {
         return 0
     fi
 
-    echo "Updating ${container_name}..."
+    echo "Updating ${container_name} to latest image..."
 
-    # Run Watchtower with the API fixed to ver. 1.44
-    if $SUDO docker run --rm \
-      -e DOCKER_API_VERSION=1.44 \
-      -v /var/run/docker.sock:/var/run/docker.sock \
-      containrrr/watchtower \
-      --run-once \
-      -c \
-      "$container_name"; then
-        echo -e "${GREEN}Update process finished successfully.${NC}"
+    if ( cd "$compose_dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+        echo -e "${GREEN}${container_name} updated successfully.${NC}"
+        return 0
     else
-        echo -e "${RED}Watchtower failed to run.${NC}"
+        echo -e "${RED}Failed to update ${container_name}.${NC}"
         return 1
     fi
 }
@@ -932,7 +944,7 @@ install_xray() {
     USER_EMAILS=()
 
     for i in $(seq 1 $num_uuids); do
-        uuid=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
+        uuid=$(generate_uuid)
 
         while true; do
             user_email="u$(openssl rand -hex 8)"
@@ -1474,9 +1486,20 @@ EOL
 # --- Quota subsystem ---
 
 days_in_month() {
-    local year=$1
-    local month=$2
-    date -d "${year}-$(printf "%02d" "$month")-01 +1 month -1 day" +%d
+    local year=$((10#$1))
+    local month=$((10#$2))
+    case $month in
+        1|3|5|7|8|10|12) echo 31 ;;
+        4|6|9|11) echo 30 ;;
+        2)
+            if (( (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) )); then
+                echo 29
+            else
+                echo 28
+            fi
+            ;;
+        *) echo 30 ;;
+    esac
 }
 
 add_months_clamped_epoch() {
@@ -1797,21 +1820,23 @@ check_and_apply_xray_quotas() {
     while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
         [ -z "$email" ] && continue
 
-        local cycle_bounds
-        cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone")
-        local new_cycle_start="${cycle_bounds%%|*}"
-        local new_cycle_end="${cycle_bounds##*|}"
-
         local cycle_rotated=0
-        if [[ "$cycle_start" != "$new_cycle_start" ]] || [[ "$cycle_end" != "$new_cycle_end" ]]; then
-            cycle_usage=0
-            cycle_start=$new_cycle_start
-            cycle_end=$new_cycle_end
-            cycle_rotated=1
-            if [[ "$status" = "suspended" ]]; then
-                status="active"
-                config_changed=1
-                echo -e "${GREEN}Re-enabled user ${email} for new cycle.${NC}"
+        if [[ -z "$cycle_start" || -z "$cycle_end" || "$now_epoch" -ge "$cycle_end" || "$now_epoch" -lt "$cycle_start" ]]; then
+            local cycle_bounds
+            cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone")
+            local new_cycle_start="${cycle_bounds%%|*}"
+            local new_cycle_end="${cycle_bounds##*|}"
+
+            if [[ "$cycle_start" != "$new_cycle_start" ]] || [[ "$cycle_end" != "$new_cycle_end" ]]; then
+                cycle_usage=0
+                cycle_start=$new_cycle_start
+                cycle_end=$new_cycle_end
+                cycle_rotated=1
+                if [[ "$status" = "suspended" ]]; then
+                    status="active"
+                    config_changed=1
+                    echo -e "${GREEN}Re-enabled user ${email} for new cycle.${NC}"
+                fi
             fi
         fi
 
@@ -2535,7 +2560,7 @@ add_xray_user() {
     done
 
     local uuid
-    uuid=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
+    uuid=$(generate_uuid)
 
     read -p "Set monthly data limit for ${user_id}? [Y/n]: " set_limit
     local user_limit_gb=0
@@ -2594,7 +2619,11 @@ add_xray_user() {
 
             if [[ -n "$private_key" ]]; then
                 local derived
-                derived=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$private_key")
+                if $SUDO docker ps -q -f name="^/xray_server$" | grep -q .; then
+                    derived=$($SUDO docker exec xray_server xray x25519 -i "$private_key")
+                else
+                    derived=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$private_key")
+                fi
                 public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
             fi
 
