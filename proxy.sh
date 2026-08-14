@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.9"
+SCRIPT_VERSION="3.16.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1740,6 +1740,9 @@ parse_quota_db_line() {
         return 1
     fi
     if ! [[ "$limit_gb" =~ ^[0-9]+$ && "$anchor_epoch" =~ ^[0-9]+$ && "$cycle_start" =~ ^[0-9]+$ && "$cycle_end" =~ ^[0-9]+$ && "$cycle_usage" =~ ^[0-9]+$ && "$last_total" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    if [[ "$status" != "active" && "$status" != "suspended" ]]; then
         return 1
     fi
     return 0
