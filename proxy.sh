@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.16.1"
+SCRIPT_VERSION="3.16.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -68,6 +68,16 @@ generate_uuid() {
         printf '%s-%s-4%s-%s%s-%s\n' \
             "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
             "$(printf '%x' $(( (0x${hex:16:2} & 0x3f) | 0x80 )))" "${hex:18:2}" "${hex:20:12}"
+    fi
+}
+
+ensure_service_dir() {
+    local dir=$1
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir" 2>/dev/null || $SUDO mkdir -p "$dir"
+    fi
+    if [[ "$EUID" -ne 0 ]] && [[ -n "$SUDO" ]] && [[ -d "$dir" ]]; then
+        $SUDO chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
     fi
 }
 
@@ -984,7 +994,7 @@ install_xray() {
 
     local orig_dir="$PWD"
     trap 'cd "$orig_dir" 2>/dev/null || true' RETURN
-    mkdir -p xray
+    ensure_service_dir "xray"
     cd xray || return 1
 
     echo "Pulling $XRAY_DOCKER_IMAGE image..."
@@ -1460,7 +1470,7 @@ install_shadowsocks() {
 
     local orig_dir="$PWD"
     trap 'cd "$orig_dir" 2>/dev/null || true' RETURN
-    mkdir -p shadowsocks
+    ensure_service_dir "shadowsocks"
     cd shadowsocks || return 1
 
     echo "Pulling $SS_DOCKER_IMAGE image..."
@@ -1682,7 +1692,7 @@ with_xray_quota_lock() {
     local lock_dir="xray/.user_limits.lock.d"
     local max_wait=10
 
-    [[ -d "xray" ]] || mkdir -p "xray"
+    ensure_service_dir "xray"
 
     _XRAY_QUOTA_LOCK_HELD=1
 
