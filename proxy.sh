@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.0"
+SCRIPT_VERSION="3.15.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1574,6 +1574,62 @@ read_xray_quota_timezone() {
     echo "$tz"
 }
 
+with_xray_quota_lock() {
+    # Re-entrant lock check: if this process already holds the lock, execute directly
+    if [[ "${_XRAY_QUOTA_LOCK_HELD:-0}" -eq 1 ]]; then
+        "$@"
+        return $?
+    fi
+
+    local lock_file="xray/.user_limits.lock"
+    local lock_dir="xray/.user_limits.lock.d"
+    local max_wait=10
+
+    [[ -d "xray" ]] || mkdir -p "xray"
+
+    export _XRAY_QUOTA_LOCK_HELD=1
+
+    if command -v flock >/dev/null 2>&1; then
+        local lock_fd
+        exec {lock_fd}>"$lock_file"
+        if flock -x -w "$max_wait" "$lock_fd"; then
+            "$@"
+            local ret=$?
+            flock -u "$lock_fd" 2>/dev/null || true
+            exec {lock_fd}>&-
+            export _XRAY_QUOTA_LOCK_HELD=0
+            return $ret
+        else
+            export _XRAY_QUOTA_LOCK_HELD=0
+            echo -e "${RED}Error: Quota database is locked by another process (timed out).${NC}" >&2
+            exec {lock_fd}>&-
+            return 1
+        fi
+    else
+        local waited=0
+        while ! mkdir "$lock_dir" 2>/dev/null; do
+            if [[ -d "$lock_dir" ]]; then
+                local lock_age=$(( $(date +%s) - $(date -r "$lock_dir" +%s 2>/dev/null || date +%s) ))
+                if [[ "$lock_age" -gt 60 ]]; then
+                    rm -rf "$lock_dir" 2>/dev/null || true
+                fi
+            fi
+            sleep 0.1
+            waited=$((waited + 1))
+            if [[ "$waited" -ge $((max_wait * 10)) ]]; then
+                export _XRAY_QUOTA_LOCK_HELD=0
+                echo -e "${RED}Error: Quota database is locked by another process (timed out).${NC}" >&2
+                return 1
+            fi
+        done
+        "$@"
+        local ret=$?
+        rm -rf "$lock_dir" 2>/dev/null || true
+        export _XRAY_QUOTA_LOCK_HELD=0
+        return $ret
+    fi
+}
+
 save_quota_db_content() {
     local content="$1"
     local db_file="xray/user_limits.db"
@@ -1664,6 +1720,10 @@ sync_xray_clients_from_quota_db() {
 }
 
 finalize_quota_db_update() {
+    with_xray_quota_lock _finalize_quota_db_update_internal "$@"
+}
+
+_finalize_quota_db_update_internal() {
     local db_lines="$1"
     local config_changed="$2"
     local db_file="xray/user_limits.db"
@@ -1771,6 +1831,10 @@ collect_xray_user_stats() {
 }
 
 check_and_apply_xray_quotas() {
+    with_xray_quota_lock _check_and_apply_xray_quotas_internal
+}
+
+_check_and_apply_xray_quotas_internal() {
     local db_file="xray/user_limits.db"
     local conf_file="xray/user_limits.conf"
 
@@ -2584,16 +2648,18 @@ add_xray_user() {
     local cycle_start="${cycle_bounds%%|*}"
     local cycle_end="${cycle_bounds##*|}"
 
-    local existing_db
-    existing_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' || true)
-    if [[ -n "$existing_db" ]]; then
-        existing_db+=$'\n'
-    fi
-    existing_db+="${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${cycle_start}|${cycle_end}|0|0|active"
-    save_quota_db_content "$existing_db"
-
-    sync_xray_clients_from_quota_db
-    reload_xray_container
+    apply_add_user() {
+        local existing_db
+        existing_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' || true)
+        if [[ -n "$existing_db" ]]; then
+            existing_db+=$'\n'
+        fi
+        existing_db+="${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${cycle_start}|${cycle_end}|0|0|active"
+        save_quota_db_content "$existing_db"
+        sync_xray_clients_from_quota_db
+        reload_xray_container
+    }
+    with_xray_quota_lock apply_add_user
 
     local server_addr remarks sni_domain xhttp_path private_key public_key
     read -p "Enter server IP/domain for new user's links (leave empty to skip link output): " server_addr
@@ -2667,12 +2733,14 @@ remove_xray_user() {
     local target_uuid
     target_uuid=$(grep "^${target_email}|" "$db_file" | head -n1 | cut -d'|' -f2)
 
-    local filtered_db
-    filtered_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" || true)
-    save_quota_db_content "$filtered_db"
-
-    sync_xray_clients_from_quota_db
-    reload_xray_container
+    apply_remove_user() {
+        local filtered_db
+        filtered_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" || true)
+        save_quota_db_content "$filtered_db"
+        sync_xray_clients_from_quota_db
+        reload_xray_container
+    }
+    with_xray_quota_lock apply_remove_user
 
     if [[ -f "xray/vless_links.txt" ]] && [[ -n "$target_uuid" ]]; then
         local tmp_links
