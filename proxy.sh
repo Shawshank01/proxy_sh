@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.16.3"
+SCRIPT_VERSION="3.16.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2349,14 +2349,14 @@ change_xray_user_billing_cycle() {
     if [[ "$cycle_choice" = "1" ]]; then
         new_anchor_epoch=$(date +%s)
     elif [[ "$cycle_choice" = "2" ]]; then
-        read -p "Enter the day of the month [1-28]: " cycle_day
+        read -p "Enter the day of the month [1-31]: " cycle_day
         if ! [[ "$cycle_day" =~ ^[0-9]+$ ]]; then
-            echo -e "${RED}Invalid day. Must be between 1 and 28.${NC}"
+            echo -e "${RED}Invalid day. Must be between 1 and 31.${NC}"
             return 1
         fi
         local clean_day=$((10#$cycle_day))
-        if [[ "$clean_day" -lt 1 ]] || [[ "$clean_day" -gt 28 ]]; then
-            echo -e "${RED}Invalid day. Must be between 1 and 28.${NC}"
+        if [[ "$clean_day" -lt 1 ]] || [[ "$clean_day" -gt 31 ]]; then
+            echo -e "${RED}Invalid day. Must be between 1 and 31.${NC}"
             return 1
         fi
         new_anchor_epoch=$(TZ="$timezone" date -d "2000-01-$(printf "%02d" "$clean_day") 00:00:00" +%s)
