@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.2"
+SCRIPT_VERSION="3.15.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -751,9 +751,9 @@ restore_deployment() {
     echo -e "${YELLOW}Restore Deployment - Re-deploy containers from existing config files${NC}"
     echo -e "${YELLOW}Use this when Docker was reinstalled or containers were accidentally deleted.${NC}\n"
 
-    # Check for existing configurations
-    XRAY_CONFIG_EXISTS=0
-    SS_CONFIG_EXISTS=0
+    local XRAY_CONFIG_EXISTS=0
+    local SS_CONFIG_EXISTS=0
+    local restore_choice
 
     if [[ -d "xray" ]] && [[ -f "xray/docker-compose.yml" ]] && [[ -f "xray/server.jsonc" ]]; then
         XRAY_CONFIG_EXISTS=1
@@ -886,6 +886,16 @@ is_microsoft_domain() {
 }
 
 install_xray() {
+    local num_uuids QUOTA_TIMEZONE KEYS PRIVATE_KEY PUBLIC_KEY DERIVED
+    local SERVER_SHORTIDS USED_SHORTIDS sid_idx shortid
+    local QUOTA_DB_LINES USED_EMAILS USER_UUIDS USER_EMAILS
+    local i uuid user_email set_limit user_limit_gb user_anchor_now cycle_bounds user_cycle_start user_cycle_end
+    local XHTTP_PATH REALITY_TARGET REALITY_SERVER_NAMES
+    local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
+    local PARSED_SERVER_NAMES ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry VALID_SERVER_NAMES
+    local enable_ipv6 LISTEN_ADDR client_pairs idx shortids_json server_names_json clients_json
+    local SERVER_ADDR REMARKS SNI_DOMAIN TARGET_VALUE LINKS link server_uri_host sni_url public_key_url xhttp_path_url fragment_url start_confirm
+
     echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
     mkdir -p xray
@@ -1371,6 +1381,10 @@ EOL
 # --- Shadowsocks installation ---
 
 install_shadowsocks() {
+    local num_users ss_port enable_ss_ipv6 SS_LISTEN_ADDR SS_METHOD SERVER_PSK
+    local ss_users_args USER_PSKS USER_LABELS i user_psk default_label user_label ss_users_json
+    local SERVER_ADDR REMARKS start_confirm LINKS server_uri_host fragment_url PASSWORD BASE64 link
+
     echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
 
     mkdir -p shadowsocks
@@ -2237,6 +2251,7 @@ change_xray_user_billing_cycle() {
 }
 
 manage_xray_quotas() {
+    local quota_choice
     while true; do
         echo ""
         echo -e "${YELLOW}--- Xray Per-User Quota Management ---${NC}"
@@ -2526,6 +2541,7 @@ EOL
 }
 
 configure_xray_quota_auto_check() {
+    local scheduler_choice
     echo ""
     echo "Choose scheduler for automatic quota checks:"
     if systemd_available; then
@@ -2867,6 +2883,7 @@ remove_shadowsocks_user() {
 }
 
 manage_proxy_users() {
+    local user_mgmt_choice
     while true; do
         echo ""
         echo -e "${YELLOW}--- User Management (Add/Remove) ---${NC}"
@@ -3058,6 +3075,7 @@ update_script() {
 # --- Entrypoint ---
 
 run_main_menu() {
+    local choice ver_choice update_choice delete_choice
     while true; do
         echo -e "${YELLOW}--- Proxy Installer v${SCRIPT_VERSION} ---${NC}"
         echo "Please choose an option:"
