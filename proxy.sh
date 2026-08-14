@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.14.0"
+SCRIPT_VERSION="3.14.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -17,6 +17,17 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
+
+# Privilege check & sudo helper
+SUDO=""
+if [[ "$EUID" -ne 0 ]]; then
+    if command -v $SUDO >/dev/null 2>&1; then
+        SUDO="sudo"
+    else
+        echo -e "${RED}This script requires root privileges or sudo.${NC}"
+        exit 1
+    fi
+fi
 
 # Global variable for Docker Compose command
 DOCKER_COMPOSE_CMD=()
@@ -120,11 +131,11 @@ resolve_script_path() {
 
 install_system_packages() {
     if command -v apt-get &> /dev/null; then
-        sudo apt-get update && sudo apt-get install -y "$@"
+        $SUDO apt-get update && $SUDO apt-get install -y "$@"
     elif command -v dnf &> /dev/null; then
-        sudo dnf install -y "$@"
+        $SUDO dnf install -y "$@"
     elif command -v yum &> /dev/null; then
-        sudo yum install -y "$@"
+        $SUDO yum install -y "$@"
     else
         return 1
     fi
@@ -198,7 +209,7 @@ setup_docker_apt_repo() {
         check_distro || return 1
     fi
 
-    sudo install -m 0755 -d /etc/apt/keyrings
+    $SUDO install -m 0755 -d /etc/apt/keyrings
 
     local repo_url repo_codename
     if [[ "$DISTRO" = "linuxmint" ]]; then
@@ -215,8 +226,8 @@ setup_docker_apt_repo() {
         repo_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
     fi
 
-    curl -fsSL "${repo_url}/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    sudo chmod a+r /etc/apt/keyrings/docker.gpg
+    curl -fsSL "${repo_url}/gpg" | $SUDO gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    $SUDO chmod a+r /etc/apt/keyrings/docker.gpg
 
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $repo_url $repo_codename stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 }
@@ -230,8 +241,8 @@ install_docker_packages() {
     case "$DISTRO" in
         ubuntu|debian|linuxmint)
 
-            sudo apt-get update
-            if ! sudo apt-get install -y ca-certificates curl gnupg; then
+            $SUDO apt-get update
+            if ! $SUDO apt-get install -y ca-certificates curl gnupg; then
                 echo -e "${RED}Failed to install prerequisites. Please install them manually.${NC}"
                 return 1
             fi
@@ -239,16 +250,16 @@ install_docker_packages() {
             setup_docker_apt_repo
 
             # Update and install Docker
-            sudo apt-get update
-            if ! sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+            $SUDO apt-get update
+            if ! $SUDO apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
                 echo -e "${RED}Failed to install Docker. Please install it manually.${NC}"
                 return 1
             fi
             ;;
         centos|rhel|fedora)
-            sudo dnf -y install dnf-plugins-core
-            sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-            sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            $SUDO dnf -y install dnf-plugins-core
+            $SUDO dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+            $SUDO dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             ;;
         *)
             echo -e "${RED}Unsupported distribution for automatic Docker installation. Please install Docker and Docker Compose manually.${NC}"
@@ -257,13 +268,13 @@ install_docker_packages() {
     esac
 
     # Start and enable Docker service
-    if sudo systemctl start docker 2>/dev/null; then
+    if $SUDO systemctl start docker 2>/dev/null; then
         echo -e "${GREEN}Docker service started successfully.${NC}"
     else
         echo -e "${YELLOW}Could not start Docker service. You may need to start it manually.${NC}"
     fi
 
-    if sudo systemctl enable docker 2>/dev/null; then
+    if $SUDO systemctl enable docker 2>/dev/null; then
         echo -e "${GREEN}Docker service enabled for auto-start.${NC}"
     else
         echo -e "${YELLOW}Could not enable Docker service. You may need to enable it manually.${NC}"
@@ -287,11 +298,11 @@ install_docker_compose() {
     case "$DISTRO" in
         ubuntu|debian|linuxmint)
             # Try to install docker-compose-plugin
-            if sudo apt-get install -y docker-compose-plugin 2>/dev/null; then
+            if $SUDO apt-get install -y docker-compose-plugin 2>/dev/null; then
                 echo -e "${GREEN}Docker Compose plugin installed successfully.${NC}"
             else
                 echo -e "${YELLOW}Docker Compose plugin not available, trying alternative installation...${NC}"
-                if ! sudo apt-get install -y ca-certificates curl gnupg; then
+                if ! $SUDO apt-get install -y ca-certificates curl gnupg; then
                     echo -e "${RED}Failed to install prerequisites for Docker Compose.${NC}"
                     return 1
                 fi
@@ -300,10 +311,10 @@ install_docker_compose() {
 
                 # Remove conflicting packages that might be installed from distro repos
                 echo -e "${YELLOW}Removing conflicting packages to avoid installation errors...${NC}"
-                sudo apt-get remove -y docker-buildx docker-compose docker-doc podman-docker || true
+                $SUDO apt-get remove -y docker-buildx docker-compose docker-doc podman-docker || true
 
-                sudo apt-get update
-                if sudo apt-get install -y docker-compose-plugin; then
+                $SUDO apt-get update
+                if $SUDO apt-get install -y docker-compose-plugin; then
                     echo -e "${GREEN}Docker Compose plugin installed successfully from Docker repository.${NC}"
                 else
                     echo -e "${RED}Failed to install Docker Compose. Please install it manually.${NC}"
@@ -312,7 +323,7 @@ install_docker_compose() {
             fi
             ;;
         centos|rhel|fedora)
-            sudo dnf install -y docker-compose-plugin
+            $SUDO dnf install -y docker-compose-plugin
             ;;
         *)
             echo -e "${RED}Unsupported distribution for automatic Docker Compose installation. Please install it manually.${NC}"
@@ -418,7 +429,7 @@ reload_xray_container() {
         return 1
     fi
 
-    if ( cd xray && sudo "${DOCKER_COMPOSE_CMD[@]}" restart xray ); then
+    if ( cd xray && $SUDO "${DOCKER_COMPOSE_CMD[@]}" restart xray ); then
         echo -e "${GREEN}Xray container reloaded successfully.${NC}"
         return 0
     else
@@ -437,7 +448,7 @@ reload_shadowsocks_container() {
         return 1
     fi
 
-    if (cd shadowsocks && sudo "${DOCKER_COMPOSE_CMD[@]}" restart ssserver); then
+    if (cd shadowsocks && $SUDO "${DOCKER_COMPOSE_CMD[@]}" restart ssserver); then
         echo -e "${GREEN}Shadowsocks container reloaded successfully.${NC}"
         return 0
     else
@@ -455,7 +466,7 @@ restore_compose_and_restart() {
         return 1
     fi
 
-    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+    if ( cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
         echo -e "${YELLOW}Previous container configuration restored.${NC}"
         return 0
     fi
@@ -502,7 +513,7 @@ release_version_lock_if_needed() {
         mv "$tmp_file" "$dir/docker-compose.yml"
 
         echo "Recreating container with latest image..."
-        if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+        if ( cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
             rm -f "$backup_file"
             echo -e "${GREEN}Reset to latest version successfully.${NC}"
             return 2
@@ -522,7 +533,7 @@ update_container() {
     local base_image=$3
     local default_tag=${4:-}
 
-    if ! sudo docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
+    if ! $SUDO docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
         echo -e "${RED}Container '${container_name}' not found. Cannot update.${NC}"
         return 1
     fi
@@ -539,7 +550,7 @@ update_container() {
     echo "Updating ${container_name}..."
 
     # Run Watchtower with the API fixed to ver. 1.44
-    if sudo docker run --rm \
+    if $SUDO docker run --rm \
       -e DOCKER_API_VERSION=1.44 \
       -v /var/run/docker.sock:/var/run/docker.sock \
       containrrr/watchtower \
@@ -643,7 +654,7 @@ change_container_version() {
     mv "$tmp_file" "$dir/docker-compose.yml"
 
     echo "Pulling new image version..."
-    if ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" pull && sudo "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
+    if ( cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d ); then
         rm -f "$backup_file"
         echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
         return 0
@@ -666,26 +677,26 @@ restore_container() {
     echo -e "\n${YELLOW}Restoring ${service_name} deployment...${NC}"
 
     # Check if container already exists
-    if sudo docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
+    if $SUDO docker ps -a -q -f name="^/${container_name}$" | grep -q .; then
         echo -e "${YELLOW}${service_name} container already exists. Checking status...${NC}"
-        if sudo docker ps -q -f name="^/${container_name}$" | grep -q .; then
+        if $SUDO docker ps -q -f name="^/${container_name}$" | grep -q .; then
             echo -e "${GREEN}${service_name} container is already running!${NC}"
             return 0
         else
             echo -e "${YELLOW}Container exists but is stopped. Starting...${NC}"
-            ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" start ) || return 1
+            ( cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" start ) || return 1
             echo -e "${GREEN}${service_name} container started successfully!${NC}"
             return 0
         fi
     fi
 
     echo "Pulling ${docker_image} image..."
-    sudo docker pull "$docker_image"
+    $SUDO docker pull "$docker_image"
 
     ( cd "$dir" || return 1
 
     echo -e "${YELLOW}Starting ${service_name} container...${NC}"
-    if sudo "${DOCKER_COMPOSE_CMD[@]}" up -d; then
+    if $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d; then
         echo -e "${GREEN}${service_name} container has been restored and started!${NC}"
         echo "Your existing configuration and links are preserved."
         if [[ -f "$links_file" ]]; then
@@ -812,13 +823,13 @@ delete_container() {
         return 1
     fi
 
-    if ! ( cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" down ); then
+    if ! ( cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" down ); then
         echo -e "${RED}Failed to stop ${service_name}. Configuration was retained.${NC}"
         return 1
     fi
 
     local remaining_containers
-    if ! remaining_containers=$(cd "$dir" && sudo "${DOCKER_COMPOSE_CMD[@]}" ps -q); then
+    if ! remaining_containers=$(cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" ps -q); then
         echo -e "${RED}Could not verify ${service_name} shutdown. Configuration was retained.${NC}"
         return 1
     fi
@@ -857,7 +868,7 @@ install_xray() {
     ( cd xray || return 1
 
     echo "Pulling $XRAY_DOCKER_IMAGE image..."
-    sudo docker pull "$XRAY_DOCKER_IMAGE"
+    $SUDO docker pull "$XRAY_DOCKER_IMAGE"
 
     read -p "How many users do you need? [Default: $DEFAULT_UUIDS]: " num_uuids
     num_uuids=${num_uuids:-$DEFAULT_UUIDS}
@@ -876,7 +887,7 @@ install_xray() {
 
     # Generate keys and IDs
     echo "Generating keys and IDs..."
-    KEYS=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519)
+    KEYS=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519)
     PRIVATE_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /private[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
     PUBLIC_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
 
@@ -887,7 +898,7 @@ install_xray() {
     fi
 
     if [[ -z "$PUBLIC_KEY" ]]; then
-        DERIVED=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$PRIVATE_KEY")
+        DERIVED=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$PRIVATE_KEY")
         PUBLIC_KEY=$(echo "$DERIVED" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
     fi
 
@@ -928,7 +939,7 @@ install_xray() {
     USER_EMAILS=()
 
     for i in $(seq 1 $num_uuids); do
-        uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
+        uuid=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
 
         while true; do
             user_email="u$(openssl rand -hex 8)"
@@ -1017,7 +1028,7 @@ install_xray() {
         fi
 
         echo "Running xray tls ping for $PING_HOST..."
-        PING_OUTPUT=$(sudo docker run --rm "$XRAY_DOCKER_IMAGE" xray tls ping "$PING_HOST" 2>&1)
+        PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" xray tls ping "$PING_HOST" 2>&1)
         echo "----- tls ping output -----"
         echo "$PING_OUTPUT"
         echo "---------------------------"
@@ -1351,7 +1362,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm
     if [[ -z "$start_confirm" || "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        sudo "${DOCKER_COMPOSE_CMD[@]}" up -d
+        $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
     else
@@ -1369,7 +1380,7 @@ install_shadowsocks() {
     ( cd shadowsocks || return 1
 
     echo "Pulling $SS_DOCKER_IMAGE image..."
-    sudo docker pull "$SS_DOCKER_IMAGE"
+    $SUDO docker pull "$SS_DOCKER_IMAGE"
 
     read -p "How many users do you need? [Default: $DEFAULT_SS_USERS]: " num_users
     num_users=${num_users:-$DEFAULT_SS_USERS}
@@ -1451,7 +1462,7 @@ EOL
 
     read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm
     if [[ -z "$start_confirm" || "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-        if sudo "${DOCKER_COMPOSE_CMD[@]}" up -d; then
+        if $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d; then
             echo -e "${GREEN}Shadowsocks container has been started!${NC}"
             echo "Remember to open port ${ss_port} (TCP & UDP) in your server's firewall."
 
@@ -1704,13 +1715,13 @@ collect_xray_user_stats() {
     local stats_count=0
     local stats_error=""
 
-    if ! sudo docker ps -q -f name="^/xray_server$" | grep -q .; then
+    if ! $SUDO docker ps -q -f name="^/xray_server$" | grep -q .; then
         echo "${stats_count}|${stats_error}"
         return 0
     fi
 
     local raw_stats
-    raw_stats=$(sudo docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
+    raw_stats=$($SUDO docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
 
     if [[ -z "$raw_stats" ]]; then
         stats_error="empty statsquery output"
@@ -2202,21 +2213,24 @@ systemd_available() {
 }
 
 disable_xray_quota_cron_silent() {
-    if ! command -v crontab >/dev/null 2>&1; then
-        return 0
+    local cron_file="/etc/cron.d/xray-quota-check"
+    if [[ -f "$cron_file" ]]; then
+        $SUDO rm -f "$cron_file" >/dev/null 2>&1 || true
     fi
 
-    local script_path script_dir cron_cmd current_cron
-    script_path=$(resolve_script_path) || script_path="$0"
-    script_dir=$(dirname "$script_path")
-    cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check"
-    current_cron=$(crontab -l 2>/dev/null || true)
-    current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -Fv -- "$cron_cmd" || true)
+    if command -v crontab >/dev/null 2>&1; then
+        local script_path script_dir cron_cmd current_cron
+        script_path=$(resolve_script_path) || script_path="$0"
+        script_dir=$(dirname "$script_path")
+        cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check"
+        current_cron=$(crontab -l 2>/dev/null || true)
+        current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -Fv -- "$cron_cmd" || true)
 
-    if [[ -n "$current_cron" ]]; then
-        printf "%s\n" "$current_cron" | crontab -
-    else
-        crontab -r 2>/dev/null || true
+        if [[ -n "$current_cron" ]]; then
+            printf "%s\n" "$current_cron" | crontab -
+        else
+            crontab -r 2>/dev/null || true
+        fi
     fi
 }
 
@@ -2225,10 +2239,10 @@ disable_xray_quota_systemd_silent() {
         return 0
     fi
 
-    sudo systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
-    sudo rm -f /etc/systemd/system/xray-quota-check.timer /etc/systemd/system/xray-quota-check.service >/dev/null 2>&1 || true
-    sudo rm -f /usr/local/lib/proxy-sh/quota-check.sh >/dev/null 2>&1 || true
-    sudo systemctl daemon-reload >/dev/null 2>&1 || true
+    $SUDO systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
+    $SUDO rm -f /etc/systemd/system/xray-quota-check.timer /etc/systemd/system/xray-quota-check.service >/dev/null 2>&1 || true
+    $SUDO rm -f /usr/local/lib/proxy-sh/quota-check.sh >/dev/null 2>&1 || true
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
 ensure_crontab_available() {
@@ -2262,7 +2276,7 @@ ensure_crontab_available() {
         echo -e "${RED}Failed to install ${cron_pkg}.${NC}"
         return 1
     fi
-    sudo systemctl enable --now "$cron_svc" 2>/dev/null || true
+    $SUDO systemctl enable --now "$cron_svc" 2>/dev/null || true
 
     if command -v crontab >/dev/null 2>&1; then
         echo -e "${GREEN}Cron installed successfully.${NC}"
@@ -2274,11 +2288,6 @@ ensure_crontab_available() {
 }
 
 configure_xray_quota_auto_check_cron() {
-    if ! ensure_crontab_available; then
-        echo -e "${RED}Cannot configure automatic checks without crontab.${NC}"
-        return 1
-    fi
-
     local script_path
     script_path=$(resolve_script_path)
 
@@ -2287,9 +2296,9 @@ configure_xray_quota_auto_check_cron() {
         return 1
     fi
 
-    local script_dir cron_cmd cron_expr
+    local script_dir cron_cmd cron_expr cron_file
     script_dir=$(dirname "$script_path")
-    cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check"
+    cron_file="/etc/cron.d/xray-quota-check"
 
     echo ""
     echo "Set automatic quota check interval (cron):"
@@ -2310,6 +2319,9 @@ configure_xray_quota_auto_check_cron() {
             cron_expr="*/5 * * * *"
             ;;
         4)
+            disable_xray_quota_cron_silent
+            echo -e "${GREEN}Cron automatic quota check disabled.${NC}"
+            return 0
             ;;
         *)
             echo -e "${RED}Invalid choice.${NC}"
@@ -2317,19 +2329,26 @@ configure_xray_quota_auto_check_cron() {
             ;;
     esac
 
+    # Prefer system /etc/cron.d/ to run cleanly as root without sudo password prompts
+    if [[ -d "/etc/cron.d" ]]; then
+        disable_xray_quota_cron_silent
+        local cron_content="# proxy-sh:xray-quota-check\n${cron_expr} root cd $(printf '%q' "$script_dir") && /bin/bash $(printf '%q' "$script_path") --quota-check >/dev/null 2>&1\n"
+        printf "%b" "$cron_content" | $SUDO tee "$cron_file" > /dev/null
+        $SUDO chmod 0644 "$cron_file"
+        echo -e "${GREEN}System cron automatic quota check enabled:${NC} ${cron_expr}"
+        echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
+        return 0
+    fi
+
+    if ! ensure_crontab_available; then
+        echo -e "${RED}Cannot configure automatic checks without crontab or /etc/cron.d.${NC}"
+        return 1
+    fi
+
+    cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check"
     local current_cron
     current_cron=$(crontab -l 2>/dev/null || true)
     current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -Fv -- "$cron_cmd" || true)
-
-    if [[ "$auto_choice" = "4" ]]; then
-        if [[ -n "$current_cron" ]]; then
-            printf "%s\n" "$current_cron" | crontab -
-        else
-            crontab -r 2>/dev/null || true
-        fi
-        echo -e "${GREEN}Cron automatic quota check disabled.${NC}"
-        return 0
-    fi
 
     local new_entry="${cron_expr} ${cron_cmd} >/dev/null 2>&1 ${XRAY_QUOTA_CRON_MARKER}"
     if [[ -n "$current_cron" ]]; then
@@ -2390,10 +2409,10 @@ configure_xray_quota_auto_check_systemd() {
 
     # The timer runs as root, so execute a root-owned copy rather than the
     # potentially user-writable interactive script.
-    sudo install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh
-    sudo install -o root -g root -m 0755 "$script_path" "$quota_runner"
+    $SUDO install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh
+    $SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner"
 
-    sudo tee /etc/systemd/system/xray-quota-check.service >/dev/null << EOL
+    $SUDO tee /etc/systemd/system/xray-quota-check.service >/dev/null << EOL
 [Unit]
 Description=Xray per-user quota check
 After=network-online.target docker.service
@@ -2404,7 +2423,7 @@ Type=oneshot
 ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-check"
 EOL
 
-    sudo tee /etc/systemd/system/xray-quota-check.timer >/dev/null << EOL
+    $SUDO tee /etc/systemd/system/xray-quota-check.timer >/dev/null << EOL
 [Unit]
 Description=Run Xray quota check periodically
 
@@ -2419,8 +2438,8 @@ Unit=xray-quota-check.service
 WantedBy=timers.target
 EOL
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now xray-quota-check.timer
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable --now xray-quota-check.timer
 
     # Avoid duplicate checks from cron if systemd timer is enabled.
     disable_xray_quota_cron_silent
@@ -2478,7 +2497,14 @@ show_xray_quota_auto_check_status() {
     fi
 
     # Check cron job
-    if command -v crontab >/dev/null 2>&1; then
+    if [[ -f "/etc/cron.d/xray-quota-check" ]]; then
+        local cron_line
+        cron_line=$(grep -v '^#' "/etc/cron.d/xray-quota-check" 2>/dev/null | head -n 1 || true)
+        if [[ -n "$cron_line" ]]; then
+            cron_enabled=1
+            cron_schedule=$(echo "$cron_line" | awk '{print $1" "$2" "$3" "$4" "$5}')
+        fi
+    elif command -v crontab >/dev/null 2>&1; then
         local cron_line
         cron_line=$(crontab -l 2>/dev/null | grep -F -- "$XRAY_QUOTA_CRON_MARKER" | head -n 1 || true)
         if [[ -n "$cron_line" ]]; then
@@ -2533,7 +2559,7 @@ add_xray_user() {
     done
 
     local uuid
-    uuid=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
+    uuid=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" uuid)
 
     read -p "Set monthly data limit for ${user_id}? [Y/n]: " set_limit
     local user_limit_gb=0
@@ -2592,7 +2618,7 @@ add_xray_user() {
 
             if [[ -n "$private_key" ]]; then
                 local derived
-                derived=$(sudo docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$private_key")
+                derived=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$private_key")
                 public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
             fi
 
@@ -2947,97 +2973,7 @@ update_script() {
     perform_script_update
 }
 
-# --- Entrypoint helpers ---
-
-handle_root_user_flow() {
-    echo -e "${RED}Please do not run this script as root. Use sudo when prompted.${NC}"
-    read -p "Do you want to create/use a non-root user now and relaunch the script? [y/N]: " root_flow_confirm
-    if [[ "$root_flow_confirm" != "y" && "$root_flow_confirm" != "Y" ]]; then
-        exit 1
-    fi
-
-    if ! command -v useradd >/dev/null 2>&1; then
-        echo -e "${RED}'useradd' command not found. Please create a non-root user manually, then run this script as that user.${NC}"
-        exit 1
-    fi
-
-    if ! command -v sudo >/dev/null 2>&1; then
-        echo -e "${YELLOW}'sudo' command not found. Installing it...${NC}"
-        if command -v apt-get &> /dev/null; then
-            apt-get update && apt-get install -y sudo
-        elif command -v dnf &> /dev/null; then
-            dnf install -y sudo
-        elif command -v yum &> /dev/null; then
-            yum install -y sudo
-        fi
-        if ! command -v sudo >/dev/null 2>&1; then
-            echo -e "${RED}Failed to install 'sudo'. Please install it manually, then re-run this script.${NC}"
-            exit 1
-        fi
-    fi
-
-    read -p "Enter non-root username to use/create: " new_username
-    if [[ -z "$new_username" ]]; then
-        echo -e "${RED}Username cannot be empty.${NC}"
-        exit 1
-    fi
-
-    if ! [[ "$new_username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-        echo -e "${RED}Invalid username. Use lowercase letters, numbers, '_' or '-' and start with a letter or '_'.${NC}"
-        exit 1
-    fi
-
-    if id "$new_username" >/dev/null 2>&1; then
-        echo -e "${YELLOW}User '$new_username' already exists. Reusing it.${NC}"
-    else
-        echo -e "${YELLOW}Creating user '$new_username'...${NC}"
-        useradd -m -s /bin/bash "$new_username"
-        echo -e "${YELLOW}Set a password for '$new_username':${NC}"
-        passwd "$new_username"
-    fi
-
-    if getent group sudo >/dev/null 2>&1; then
-        usermod -aG sudo "$new_username"
-        echo -e "${GREEN}Added '$new_username' to sudo group.${NC}"
-    elif getent group wheel >/dev/null 2>&1; then
-        usermod -aG wheel "$new_username"
-        echo -e "${GREEN}Added '$new_username' to wheel group.${NC}"
-    else
-        echo -e "${YELLOW}Could not detect sudo/wheel group automatically.${NC}"
-        echo -e "${YELLOW}Please grant sudo privileges manually if needed.${NC}"
-    fi
-
-    local script_path target_home launch_script escaped_launch_script escaped_probe_path
-    script_path="$0"
-
-    if command -v realpath >/dev/null 2>&1; then
-        script_path=$(realpath "$0" 2>/dev/null || echo "$0")
-    fi
-
-    target_home=$(getent passwd "$new_username" | cut -d: -f6)
-    if [[ -z "$target_home" ]]; then
-        target_home="/home/$new_username"
-    fi
-
-    launch_script="$script_path"
-
-    # If the target user cannot read the current script path (e.g. /root/proxy.sh),
-    # copy it to the target user's home and run from there.
-    printf -v escaped_probe_path '%q' "$script_path"
-    if [[ ! -r "$script_path" ]] || ! su - "$new_username" -c "test -r $escaped_probe_path" >/dev/null 2>&1; then
-        launch_script="$target_home/proxy.sh"
-        cp "$script_path" "$launch_script"
-        chown "$new_username":"$new_username" "$launch_script"
-        chmod 700 "$launch_script"
-        echo -e "${YELLOW}Current script path is not readable by '$new_username'. Copied launcher to ${launch_script}.${NC}"
-    fi
-
-    printf -v escaped_launch_script '%q' "$launch_script"
-
-    echo -e "${GREEN}Relaunching as '$new_username'...${NC}"
-
-    exec sudo -u "$new_username" -i bash "$launch_script"
-}
+# --- Entrypoint ---
 
 run_main_menu() {
     while true; do
@@ -3195,10 +3131,6 @@ main() {
             return
             ;;
     esac
-
-    if [[ "$EUID" -eq 0 ]]; then
-        handle_root_user_flow
-    fi
 
     check_dependencies
     auto_check_script_update
