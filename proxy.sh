@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.7"
+SCRIPT_VERSION="3.15.8"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -1722,6 +1722,26 @@ with_xray_quota_lock() {
     fi
 }
 
+get_quota_db_records() {
+    local db_file="xray/user_limits.db"
+    if [[ -f "$db_file" ]]; then
+        grep -v '^[[:space:]]*$' "$db_file" | grep -v '^[[:space:]]*#' || true
+    fi
+}
+
+parse_quota_db_line() {
+    local line=$1
+    IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status <<< "$line"
+
+    if [[ -z "$email" || -z "$uuid" || -z "$status" ]]; then
+        return 1
+    fi
+    if ! [[ "$limit_gb" =~ ^[0-9]+$ && "$anchor_epoch" =~ ^[0-9]+$ && "$cycle_start" =~ ^[0-9]+$ && "$cycle_end" =~ ^[0-9]+$ && "$cycle_usage" =~ ^[0-9]+$ && "$last_total" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
 save_quota_db_content() {
     local content="$1"
     local db_file="xray/user_limits.db"
@@ -1989,8 +2009,14 @@ _check_and_apply_xray_quotas_internal() {
 
     local db_lines=""
     local config_changed=0
-    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
-        [ -z "$email" ] && continue
+    local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+
+    while IFS= read -r raw_line; do
+        [ -z "$raw_line" ] && continue
+        if ! parse_quota_db_line "$raw_line"; then
+            echo -e "${YELLOW}Warning: Skipping malformed quota database line: ${raw_line}${NC}" >&2
+            continue
+        fi
 
         local cycle_rotated=0
         if [[ -z "$cycle_start" || -z "$cycle_end" || "$now_epoch" -ge "$cycle_end" || "$now_epoch" -lt "$cycle_start" ]]; then
@@ -2045,7 +2071,7 @@ _check_and_apply_xray_quotas_internal() {
             db_lines+=$'\n'
         fi
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+    done < <(get_quota_db_records)
 
     finalize_quota_db_update "$db_lines" "$config_changed"
 
@@ -2066,8 +2092,10 @@ show_xray_quota_status() {
     echo -e "${YELLOW}Timezone:${NC} ${timezone}"
     echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
 
-    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
-        [ -z "$email" ] && continue
+    local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+    while IFS= read -r raw_line; do
+        [ -z "$raw_line" ] && continue
+        parse_quota_db_line "$raw_line" || continue
 
         local usage_gb
         usage_gb=$(awk -v b="$cycle_usage" 'BEGIN { printf "%.2f", b/1024/1024/1024 }')
@@ -2081,7 +2109,7 @@ show_xray_quota_status() {
         else
             echo "- ${email} | status=${status} | usage=${usage_gb}GB / unlimited | cycle=${cycle_start_h} -> ${cycle_end_h}"
         fi
-    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+    done < <(get_quota_db_records)
 }
 
 select_quota_user() {
@@ -2093,12 +2121,15 @@ select_quota_user() {
 
     local idx=1
     local lines=()
-    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
-        [ -z "$email" ] && continue
+    local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+    while IFS= read -r raw_line; do
+        [ -z "$raw_line" ] && continue
+        parse_quota_db_line "$raw_line" || continue
+
         lines+=("$email|$uuid|$limit_gb|$anchor_epoch|$cycle_start|$cycle_end|$cycle_usage|$last_total|$status")
         echo "${idx}) ${email} (status: ${status}, limit: ${limit_gb} GB)" >&2
         idx=$((idx + 1))
-    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+    done < <(get_quota_db_records)
 
     if [[ ${#lines[@]} -eq 0 ]]; then
         echo -e "${RED}No users found in quota database.${NC}" >&2
@@ -2142,8 +2173,14 @@ reset_xray_user_usage() {
 
     local db_lines=""
     local config_changed=0
-    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
-        [ -z "$email" ] && continue
+    local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+
+    while IFS= read -r raw_line; do
+        [ -z "$raw_line" ] && continue
+        if ! parse_quota_db_line "$raw_line"; then
+            echo -e "${YELLOW}Warning: Skipping malformed quota database line: ${raw_line}${NC}" >&2
+            continue
+        fi
 
         if [[ "$target_email" = "ALL" ]] || [[ "$email" = "$target_email" ]]; then
             local current_total=0
@@ -2174,7 +2211,7 @@ reset_xray_user_usage() {
             db_lines+=$'\n'
         fi
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+    done < <(get_quota_db_records)
 
     finalize_quota_db_update "$db_lines" "$config_changed"
 }
@@ -2193,8 +2230,14 @@ change_xray_user_limit() {
 
     local db_lines=""
     local config_changed=0
-    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
-        [ -z "$email" ] && continue
+    local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+
+    while IFS= read -r raw_line; do
+        [ -z "$raw_line" ] && continue
+        if ! parse_quota_db_line "$raw_line"; then
+            echo -e "${YELLOW}Warning: Skipping malformed quota database line: ${raw_line}${NC}" >&2
+            continue
+        fi
 
         if [[ "$email" = "$target_email" ]]; then
             limit_gb=$new_limit_gb
@@ -2224,7 +2267,7 @@ change_xray_user_limit() {
             db_lines+=$'\n'
         fi
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+    done < <(get_quota_db_records)
 
     finalize_quota_db_update "$db_lines" "$config_changed"
 }
@@ -2285,8 +2328,12 @@ change_xray_user_billing_cycle() {
     local now_epoch
     now_epoch=$(date +%s)
 
-    while IFS='|' read -r email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status; do
-        [ -z "$email" ] && continue
+    local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+    while IFS= read -r raw_line; do
+        [ -z "$raw_line" ] && continue
+        if ! parse_quota_db_line "$raw_line"; then
+            continue
+        fi
 
         if [[ "$target_email" = "ALL" ]] || [[ "$email" = "$target_email" ]]; then
             anchor_epoch="$new_anchor_epoch"
@@ -2328,7 +2375,7 @@ change_xray_user_billing_cycle() {
             db_lines+=$'\n'
         fi
         db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-    done < <(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#')
+    done < <(get_quota_db_records)
 
     finalize_quota_db_update "$db_lines" "$config_changed"
 }
