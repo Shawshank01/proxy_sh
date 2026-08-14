@@ -913,7 +913,6 @@ install_xray() {
     fi
 
     # Generate server-level shared shortIds
-    SHORTIDS_JSON=""
     SERVER_SHORTIDS=()
     declare -A USED_SHORTIDS
     for sid_idx in $(seq 1 $DEFAULT_SHORTIDS); do
@@ -924,15 +923,9 @@ install_xray() {
                 break
             fi
         done
-
-        if [[ -n "$SHORTIDS_JSON" ]]; then
-            SHORTIDS_JSON+=","
-        fi
-        SHORTIDS_JSON+="\"$shortid\""
         SERVER_SHORTIDS+=("$shortid")
     done
 
-    CLIENTS_JSON=""
     QUOTA_DB_LINES=""
     declare -A USED_EMAILS
     USER_UUIDS=()
@@ -968,11 +961,6 @@ install_xray() {
         cycle_bounds=$(calculate_cycle_bounds "$user_anchor_now" "$user_anchor_now" "$QUOTA_TIMEZONE")
         local user_cycle_start="${cycle_bounds%%|*}"
         local user_cycle_end="${cycle_bounds##*|}"
-
-        CLIENTS_JSON+="{\"id\": \"$uuid\", \"flow\": \"\", \"email\": \"$user_email\"}"
-        if [[ "$i" -lt "$num_uuids" ]]; then
-            CLIENTS_JSON+=","
-        fi
 
         QUOTA_DB_LINES+="${user_email}|${uuid}|${user_limit_gb}|${user_anchor_now}|${user_cycle_start}|${user_cycle_end}|0|0|active"
         if [[ "$i" -lt "$num_uuids" ]]; then
@@ -1161,126 +1149,122 @@ EOL
     # Write .env so Docker Compose can resolve ${XRAY_DOCKER_IMAGE}
     echo "XRAY_DOCKER_IMAGE=${XRAY_DOCKER_IMAGE}" > .env
 
-    # Create server.jsonc (with routing, sniffing, two outbounds, and all serverNames)
-    cat > server.jsonc << EOL
-{
-    "stats": {},
-    "api": {
-        "tag": "api",
-        "services": [
-            "StatsService"
-        ]
-    },
-    "policy": {
-        "levels": {
-            "0": {
-                "statsUserUplink": true,
-                "statsUserDownlink": true
-            }
+    # Create server.jsonc safely using jq
+    local client_pairs=()
+    for idx in "${!USER_UUIDS[@]}"; do
+        client_pairs+=("${USER_UUIDS[$idx]}" "${USER_EMAILS[$idx]}")
+    done
+
+    local clients_json shortids_json server_names_json
+    clients_json=$(jq -nc '$ARGS.positional | [range(0; length; 2) as $i | {id: .[$i], flow: "", email: .[$i+1]}]' --args "${client_pairs[@]}")
+    shortids_json=$(jq -nc '$ARGS.positional' --args "${SERVER_SHORTIDS[@]}")
+    server_names_json=$(jq -nc '$ARGS.positional' --args "${VALID_SERVER_NAMES[@]}")
+
+    jq -n \
+      --arg listen "$LISTEN_ADDR" \
+      --arg xhttp_path "/$XHTTP_PATH" \
+      --arg target "$REALITY_TARGET" \
+      --arg private_key "$PRIVATE_KEY" \
+      --argjson clients "$clients_json" \
+      --argjson server_names "$server_names_json" \
+      --argjson shortids "$shortids_json" \
+      '{
+        "stats": {},
+        "api": {
+            "tag": "api",
+            "services": ["StatsService"]
         },
-        "system": {
-            "statsInboundUplink": true,
-            "statsInboundDownlink": true,
-            "statsOutboundUplink": true,
-            "statsOutboundDownlink": true
-        }
-    },
-    "routing": {
-        "domainStrategy": "AsIs",
-        "rules": [
-            {
-                "type": "field",
-                "inboundTag": [
-                    "api"
-                ],
-                "outboundTag": "api"
-            },
-            {
-                "type": "field",
-                "domain": [
-                    "geosite:google"
-                ],
-                "outboundTag": "direct"
-            },
-            {
-                "type": "field",
-                "domain": [
-                    "geosite:cn"
-                ],
-                "outboundTag": "block"
-            },
-            {
-                "type": "field",
-                "ip": [
-                    "geoip:cn"
-                ],
-                "outboundTag": "block"
-            }
-        ]
-    },
-    "inbounds": [
-        {
-            "listen": "$LISTEN_ADDR",
-            "port": 443,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    $CLIENTS_JSON
-                ],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "xhttp",
-                "xhttpSettings": {
-                    "path": "/$XHTTP_PATH"
-                },
-                "security": "reality",
-                "realitySettings": {
-                    "target": "$REALITY_TARGET",
-                    "serverNames": [
-                        $REALITY_SERVER_NAMES
-                    ],
-                    "privateKey": "$PRIVATE_KEY",
-                    "shortIds": [
-                        $SHORTIDS_JSON
-                    ]
+        "policy": {
+            "levels": {
+                "0": {
+                    "statsUserUplink": true,
+                    "statsUserDownlink": true
                 }
             },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": [
-                    "http",
-                    "tls",
-                    "quic"
-                ]
+            "system": {
+                "statsInboundUplink": true,
+                "statsInboundDownlink": true,
+                "statsOutboundUplink": true,
+                "statsOutboundDownlink": true
             }
         },
-        {
-            "listen": "127.0.0.1",
-            "port": 10085,
-            "protocol": "dokodemo-door",
-            "settings": {
-                "address": "127.0.0.1"
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "inboundTag": ["api"],
+                    "outboundTag": "api"
+                },
+                {
+                    "type": "field",
+                    "domain": ["geosite:google"],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "domain": ["geosite:cn"],
+                    "outboundTag": "block"
+                },
+                {
+                    "type": "field",
+                    "ip": ["geoip:cn"],
+                    "outboundTag": "block"
+                }
+            ]
+        },
+        "inbounds": [
+            {
+                "listen": $listen,
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                    "clients": $clients,
+                    "decryption": "none"
+                },
+                "streamSettings": {
+                    "network": "xhttp",
+                    "xhttpSettings": {
+                        "path": $xhttp_path
+                    },
+                    "security": "reality",
+                    "realitySettings": {
+                        "target": $target,
+                        "serverNames": $server_names,
+                        "privateKey": $private_key,
+                        "shortIds": $shortids
+                    }
+                },
+                "sniffing": {
+                    "enabled": true,
+                    "destOverride": ["http", "tls", "quic"]
+                }
             },
-            "tag": "api"
-        }
-    ],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "tag": "direct"
-        },
-        {
-            "protocol": "freedom",
-            "tag": "api"
-        },
-        {
-            "protocol": "blackhole",
-            "tag": "block"
-        }
-    ]
-}
-EOL
+            {
+                "listen": "127.0.0.1",
+                "port": 10085,
+                "protocol": "dokodemo-door",
+                "settings": {
+                    "address": "127.0.0.1"
+                },
+                "tag": "api"
+            }
+        ],
+        "outbounds": [
+            {
+                "protocol": "freedom",
+                "tag": "direct"
+            },
+            {
+                "protocol": "freedom",
+                "tag": "api"
+            },
+            {
+                "protocol": "blackhole",
+                "tag": "block"
+            }
+        ]
+      }' > server.jsonc
 
     echo -e "${GREEN}Configuration files created successfully!${NC}"
     echo "--- docker-compose.yml ---"
@@ -1296,21 +1280,10 @@ EOL
     read -p "Enter a remarks name for this server: " REMARKS
 
     # Determine the SNI domain (first serverName, fallback to target host if list empty)
-    SNI_DOMAIN=$(awk '
-        /"serverNames": *\[/ {flag=1; next}
-        flag {
-            if (match($0, /"[^"]+"/)) {
-                print substr($0, RSTART + 1, RLENGTH - 2)
-                exit
-            }
-            if ($0 ~ /\]/) {
-                exit
-            }
-        }
-    ' server.jsonc)
+    SNI_DOMAIN=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // empty' server.jsonc 2>/dev/null | head -n1)
 
     if [[ -z "$SNI_DOMAIN" ]]; then
-        TARGET_VALUE=$(sed -nE 's/.*"target": *"([^"]+)".*/\1/p' server.jsonc | head -n1)
+        TARGET_VALUE=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.target // empty' server.jsonc 2>/dev/null | head -n1)
         SNI_DOMAIN=${TARGET_VALUE%%:*}
     fi
 
@@ -1398,22 +1371,19 @@ install_shadowsocks() {
     SS_METHOD="2022-blake3-chacha20-poly1305"
     SERVER_PSK=$(openssl rand -base64 32)
 
-    CLIENTS_JSON=""
+    local ss_users_args=()
     USER_PSKS=()
     USER_LABELS=()
     for i in $(seq 1 $num_users); do
+        local user_psk default_label user_label
         user_psk=$(openssl rand -base64 32)
         default_label="user${i}"
         read -p "Enter a label for user ${i} [${default_label}]: " user_label
         user_label=${user_label:-$default_label}
-        user_label=${user_label//\"/}
 
-        CLIENTS_JSON+="{\"name\": \"$user_label\", \"password\": \"$user_psk\"}"
-        if [[ "$i" -lt "$num_users" ]]; then
-            CLIENTS_JSON+=","
-        fi
         USER_PSKS+=("$user_psk")
         USER_LABELS+=("$user_label")
+        ss_users_args+=("$user_label" "$user_psk")
     done
 
     cat > docker-compose.yml << EOL
@@ -1434,18 +1404,24 @@ services:
         max-file: "3"
 EOL
 
-    cat > server.json << EOL
-{
-  "server": "$SS_LISTEN_ADDR",
-  "server_port": $ss_port,
-  "password": "$SERVER_PSK",
-  "method": "$SS_METHOD",
-  "mode": "tcp_and_udp",
-  "users": [
-    $CLIENTS_JSON
-  ]
-}
-EOL
+    local ss_users_json
+    ss_users_json=$(jq -nc '$ARGS.positional | [range(0; length; 2) as $i | {name: .[$i], password: .[$i+1]}]' --args "${ss_users_args[@]}")
+
+    jq -n \
+      --arg server "$SS_LISTEN_ADDR" \
+      --argjson server_port "$ss_port" \
+      --arg password "$SERVER_PSK" \
+      --arg method "$SS_METHOD" \
+      --arg mode "tcp_and_udp" \
+      --argjson users "$ss_users_json" \
+      '{
+        "server": $server,
+        "server_port": $server_port,
+        "password": $password,
+        "method": $method,
+        "mode": $mode,
+        "users": $users
+      }' > server.json
 
     echo -e "${GREEN}Configuration files created successfully!${NC}"
     echo "--- docker-compose.yml ---"
