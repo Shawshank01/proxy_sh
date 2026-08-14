@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.1"
+SCRIPT_VERSION="3.15.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -34,15 +34,24 @@ DOCKER_COMPOSE_CMD=()
 XRAY_DOCKER_IMAGE="teddysun/xray:latest"
 SS_DOCKER_IMAGE="ghcr.io/shadowsocks/ssserver-rust:latest"
 
-# Global state & cleanup trap for temporary files
-TMP_FILES=()
-
-cleanup_tmp_files() {
-    if [[ ${#TMP_FILES[@]} -gt 0 ]]; then
-        rm -f "${TMP_FILES[@]}" 2>/dev/null || true
+# Global scratch directory & cleanup trap for temporary files
+SCRIPT_TMP_DIR=""
+init_script_tmp_dir() {
+    if [[ -z "$SCRIPT_TMP_DIR" || ! -d "$SCRIPT_TMP_DIR" ]]; then
+        SCRIPT_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/proxy-sh.XXXXXX") || {
+            echo -e "${RED}Failed to create temporary directory.${NC}" >&2
+            exit 1
+        }
     fi
 }
-trap cleanup_tmp_files EXIT INT TERM
+init_script_tmp_dir
+
+cleanup_script_tmp_dir() {
+    if [[ -n "${SCRIPT_TMP_DIR:-}" && -d "$SCRIPT_TMP_DIR" ]]; then
+        rm -rf "$SCRIPT_TMP_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup_script_tmp_dir EXIT INT TERM
 
 # --- Generic utilities ---
 
@@ -65,13 +74,18 @@ make_temp_file() {
     local template=${2:-}
     local tmp
 
+    init_script_tmp_dir
+
     if [[ -n "$template" ]]; then
-        tmp=$(mktemp "$template") || return 1
+        if [[ "$template" != /* ]]; then
+            tmp=$(mktemp "${SCRIPT_TMP_DIR}/${template}") || return 1
+        else
+            tmp=$(mktemp "$template") || return 1
+        fi
     else
-        tmp=$(mktemp) || return 1
+        tmp=$(mktemp "${SCRIPT_TMP_DIR}/tmp.XXXXXX") || return 1
     fi
 
-    TMP_FILES+=("$tmp")
     printf -v "$result_var" '%s' "$tmp"
 }
 
@@ -513,9 +527,8 @@ release_version_lock_if_needed() {
 
         echo -e "${YELLOW}Releasing version lock ($current_image) and resetting to latest...${NC}"
         local tmp_file backup_file
-        tmp_file=$(mktemp)
-        backup_file=$(mktemp)
-        TMP_FILES+=("$tmp_file" "$backup_file")
+        make_temp_file tmp_file
+        make_temp_file backup_file
         cp -p "$dir/docker-compose.yml" "$backup_file"
 
         if ! sed "s|image:.*|image: ${expected_default}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
@@ -652,9 +665,8 @@ change_container_version() {
     fi
 
     local tmp_file backup_file
-    tmp_file=$(mktemp)
-    backup_file=$(mktemp)
-    TMP_FILES+=("$tmp_file" "$backup_file")
+    make_temp_file tmp_file
+    make_temp_file backup_file
     cp -p "$dir/docker-compose.yml" "$backup_file"
 
     if ! sed "s|image:.*|image: ${new_image}|g" "$dir/docker-compose.yml" > "$tmp_file"; then
@@ -1740,9 +1752,8 @@ _finalize_quota_db_update_internal() {
     fi
 
     local db_backup config_backup
-    db_backup=$(mktemp)
-    config_backup=$(mktemp)
-    TMP_FILES+=("$db_backup" "$config_backup")
+    make_temp_file db_backup
+    make_temp_file config_backup
     cp -p "$db_file" "$db_backup"
     cp -p "$config_file" "$config_backup"
 
@@ -2945,8 +2956,6 @@ perform_script_update() {
         echo -e "${RED}Cannot create a temporary checksum file beside ${script_path}.${NC}"
         return 1
     }
-    TMP_FILES+=("$tmp_script" "$tmp_sha")
-
     echo -e "${YELLOW}Downloading update and verifying checksum...${NC}"
     if ! curl -fsSL --max-time 20 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" > "$tmp_script"; then
         rm -f "$tmp_script" "$tmp_sha"
