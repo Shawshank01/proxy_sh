@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.15.4"
+SCRIPT_VERSION="3.15.5"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -21,10 +21,10 @@ NC='\033[0m'
 # Privilege check & sudo helper
 SUDO=""
 if [[ "$EUID" -ne 0 ]]; then
-    if command -v $SUDO >/dev/null 2>&1; then
+    if command -v sudo >/dev/null 2>&1; then
         SUDO="sudo"
     else
-        echo -e "${RED}This script requires root privileges or sudo.${NC}"
+        echo -e "${RED}This script requires root privileges or sudo.${NC}" >&2
         exit 1
     fi
 fi
@@ -892,7 +892,7 @@ install_xray() {
     local i uuid user_email set_limit user_limit_gb user_anchor_now cycle_bounds user_cycle_start user_cycle_end
     local XHTTP_PATH REALITY_TARGET REALITY_SERVER_NAMES
     local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
-    local PARSED_SERVER_NAMES ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry VALID_SERVER_NAMES
+    local ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry
     local enable_ipv6 LISTEN_ADDR client_pairs idx shortids_json server_names_json clients_json
     local SERVER_ADDR REMARKS SNI_DOMAIN TARGET_VALUE LINKS link server_uri_host sni_url public_key_url xhttp_path_url fragment_url start_confirm
 
@@ -1106,7 +1106,7 @@ install_xray() {
             REALITY_TARGET="${REALITY_DOMAIN_CLEAN}:443"
         fi
 
-        PARSED_SERVER_NAMES=""
+        REALITY_SERVER_NAMES=()
         ALLOWED_DOMAINS=$(echo "$PING_OUTPUT" | sed -nE "s/.*Cert's allowed domains: *\\[([^]]*)\\].*/\\1/p")
         if [[ -n "$ALLOWED_DOMAINS" ]]; then
             DROPPED_WILDCARDS=0
@@ -1123,37 +1123,26 @@ install_xray() {
                     continue
                 fi
                 SEEN_DOMAINS+=" $domain"
-                if [[ -n "$PARSED_SERVER_NAMES" ]]; then
-                    PARSED_SERVER_NAMES+=","
-                fi
-                PARSED_SERVER_NAMES+="\"$domain\""
+                REALITY_SERVER_NAMES+=("$domain")
             done
             if [[ "$DROPPED_WILDCARDS" -eq 1 ]]; then
                 echo -e "${YELLOW}Wildcard domains were omitted from serverNames (not supported).${NC}"
             fi
         fi
 
-        if [[ -n "$PARSED_SERVER_NAMES" ]]; then
-            REALITY_SERVER_NAMES="$PARSED_SERVER_NAMES"
-        else
+        if [[ ${#REALITY_SERVER_NAMES[@]} -eq 0 ]]; then
             read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $PING_HOST]: " SERVER_NAMES_INPUT
             if [[ -n "$SERVER_NAMES_INPUT" ]]; then
-                REALITY_SERVER_NAMES=""
                 IFS=',' read -r -a sni_input_arr <<< "$SERVER_NAMES_INPUT"
                 for sni_entry in "${sni_input_arr[@]}"; do
                     sni_entry=$(echo "$sni_entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                     [[ -z "$sni_entry" || "$sni_entry" == *"*"* ]] && continue
                     is_microsoft_domain "$sni_entry" && continue
-                    if [[ -n "$REALITY_SERVER_NAMES" ]]; then
-                        REALITY_SERVER_NAMES+=","
-                    fi
-                    REALITY_SERVER_NAMES+="\"$sni_entry\""
+                    REALITY_SERVER_NAMES+=("$sni_entry")
                 done
-                if [[ -z "$REALITY_SERVER_NAMES" ]]; then
-                    REALITY_SERVER_NAMES="\"$PING_HOST\""
-                fi
-            else
-                REALITY_SERVER_NAMES="\"$PING_HOST\""
+            fi
+            if [[ ${#REALITY_SERVER_NAMES[@]} -eq 0 ]]; then
+                REALITY_SERVER_NAMES+=("$PING_HOST")
             fi
         fi
         break
@@ -1166,10 +1155,10 @@ install_xray() {
         LISTEN_ADDR="0.0.0.0"
     fi
 
-    cat > docker-compose.yml << 'EOL'
+    cat > docker-compose.yml << EOL
 services:
   xray:
-    image: ${XRAY_DOCKER_IMAGE}
+    image: $XRAY_DOCKER_IMAGE
     container_name: xray_server
     restart: unless-stopped
     network_mode: host
@@ -1182,9 +1171,6 @@ services:
         max-file: "3"
 EOL
 
-    # Write .env so Docker Compose can resolve ${XRAY_DOCKER_IMAGE}
-    echo "XRAY_DOCKER_IMAGE=${XRAY_DOCKER_IMAGE}" > .env
-
     # Create server.jsonc safely using jq
     local client_pairs=()
     for idx in "${!USER_UUIDS[@]}"; do
@@ -1194,7 +1180,7 @@ EOL
     local clients_json shortids_json server_names_json
     clients_json=$(jq -nc '$ARGS.positional | [range(0; length; 2) as $i | {id: .[$i], flow: "", email: .[$i+1]}]' --args "${client_pairs[@]}")
     shortids_json=$(jq -nc '$ARGS.positional' --args "${SERVER_SHORTIDS[@]}")
-    server_names_json=$(jq -nc '$ARGS.positional' --args "${VALID_SERVER_NAMES[@]}")
+    server_names_json=$(jq -nc '$ARGS.positional' --args "${REALITY_SERVER_NAMES[@]}")
 
     jq -n \
       --arg listen "$LISTEN_ADDR" \
