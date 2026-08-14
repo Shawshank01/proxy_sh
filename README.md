@@ -77,6 +77,10 @@ For the freedom of the internet!
 Copy the `vless://` or `ss://` link and paste it into the client and enjoy!  
 > Some clients may require further configuration steps after pasting the link.
 
+> [!IMPORTANT]
+> **Temporary Compatibility Note (Xray Core):**  
+> If your client app fails to connect with the latest Xray version, use **Option 4** in the script menu to change/downgrade the Xray container version tag to `26.6.27` until the client application updates.
+
 ## Xray Configuration Details
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
 - The configuration uses the Reality protocol for obfuscation.
