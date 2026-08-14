@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.13.2"
+SCRIPT_VERSION="3.14.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=3
 DEFAULT_SS_USERS=1
@@ -2832,25 +2832,60 @@ fetch_latest_script_version() {
 }
 
 perform_script_update() {
-    local cache_bust script_path script_dir tmp_script
+    local cache_bust script_path script_dir tmp_script tmp_sha
     cache_bust="?$(date +%s)"
     script_path=$(resolve_script_path) || return 1
     script_dir=$(dirname "$script_path")
+
     tmp_script=$(mktemp "${script_dir}/.proxy.sh.update.XXXXXX") || {
         echo -e "${RED}Cannot create an update file beside ${script_path}.${NC}"
         return 1
     }
-    TMP_FILES+=("$tmp_script")
-
-    echo -e "${YELLOW}Updating script...${NC}"
-    if ! curl -fsSL --max-time 20 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" > "$tmp_script"; then
+    tmp_sha=$(mktemp "${script_dir}/.proxy.sh.sha.XXXXXX") || {
         rm -f "$tmp_script"
+        echo -e "${RED}Cannot create a temporary checksum file beside ${script_path}.${NC}"
+        return 1
+    }
+    TMP_FILES+=("$tmp_script" "$tmp_sha")
+
+    echo -e "${YELLOW}Downloading update and verifying checksum...${NC}"
+    if ! curl -fsSL --max-time 20 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" > "$tmp_script"; then
+        rm -f "$tmp_script" "$tmp_sha"
         echo -e "${RED}Failed to download update; the current script was not changed.${NC}"
         return 1
     fi
 
+    if ! curl -fsSL --max-time 10 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh.sha256${cache_bust}" > "$tmp_sha"; then
+        rm -f "$tmp_script" "$tmp_sha"
+        echo -e "${RED}Failed to download checksum file (proxy.sh.sha256); update aborted for safety.${NC}"
+        return 1
+    fi
+
+    local expected_hash actual_hash
+    expected_hash=$(awk '{print $1}' "$tmp_sha" | tr -d ' \r\n')
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual_hash=$(sha256sum "$tmp_script" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        actual_hash=$(shasum -a 256 "$tmp_script" | awk '{print $1}')
+    elif command -v openssl >/dev/null 2>&1; then
+        actual_hash=$(openssl dgst -sha256 "$tmp_script" | awk '{print $NF}')
+    else
+        rm -f "$tmp_script" "$tmp_sha"
+        echo -e "${RED}Cannot verify update integrity: sha256sum/shasum/openssl not found.${NC}"
+        return 1
+    fi
+
+    if [[ -z "$expected_hash" || "$expected_hash" != "$actual_hash" ]]; then
+        rm -f "$tmp_script" "$tmp_sha"
+        echo -e "${RED}Checksum verification failed!${NC}"
+        echo -e "${RED}Expected: ${expected_hash:-None}${NC}"
+        echo -e "${RED}Actual:   ${actual_hash:-None}${NC}"
+        return 1
+    fi
+
     if ! bash -n "$tmp_script"; then
-        rm -f "$tmp_script"
+        rm -f "$tmp_script" "$tmp_sha"
         echo -e "${RED}Downloaded update failed syntax validation; the current script was not changed.${NC}"
         return 1
     fi
@@ -2858,12 +2893,13 @@ perform_script_update() {
     apply_preserved_file_metadata "$script_path" "$tmp_script"
     chmod u+x "$tmp_script"
     if ! mv -f "$tmp_script" "$script_path"; then
-        rm -f "$tmp_script"
+        rm -f "$tmp_script" "$tmp_sha"
         echo -e "${RED}Failed to replace ${script_path}; the current script was not changed.${NC}"
         return 1
     fi
+    rm -f "$tmp_sha"
 
-    echo -e "${GREEN}Script updated successfully! Restarting...${NC}"
+    echo -e "${GREEN}Script updated and checksum verified successfully! Restarting...${NC}"
     exec bash "$script_path"
 }
 

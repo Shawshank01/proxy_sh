@@ -1,0 +1,29 @@
+name: Update SHA256 Checksum
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'proxy.sh'
+
+permissions:
+  contents: write
+
+jobs:
+  update-checksum:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Checksum
+        run: |
+          sha256sum proxy.sh > proxy.sh.sha256
+
+      - name: Commit and push if changed
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update proxy.sh.sha256 checksum [skip ci]"
+          file_pattern: "proxy.sh.sha256"
