@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.16.4"
+SCRIPT_VERSION="3.17.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1008,12 +1008,8 @@ install_xray() {
         return 1
     fi
 
-    read -p "Timezone for quota billing cycles [Default: $DEFAULT_QUOTA_TIMEZONE]: " QUOTA_TIMEZONE
-    QUOTA_TIMEZONE=${QUOTA_TIMEZONE:-$DEFAULT_QUOTA_TIMEZONE}
-    if ! TZ="$QUOTA_TIMEZONE" date +%s >/dev/null 2>&1; then
-        echo -e "${YELLOW}Invalid timezone. Falling back to ${DEFAULT_QUOTA_TIMEZONE}.${NC}"
-        QUOTA_TIMEZONE="$DEFAULT_QUOTA_TIMEZONE"
-    fi
+    local QUOTA_TIMEZONE
+    prompt_select_timezone QUOTA_TIMEZONE "$DEFAULT_QUOTA_TIMEZONE"
 
     # Generate keys and IDs
     echo "Generating keys and IDs..."
@@ -1660,6 +1656,103 @@ calculate_cycle_bounds() {
     local end_epoch
     end_epoch=$(add_months_clamped_epoch "$anchor_epoch" $(( elapsed_months + 1 )) "$timezone")
     echo "${start_epoch}|${end_epoch}"
+}
+
+normalize_timezone_input() {
+    local input=$1
+    local default_tz=${2:-"UTC"}
+
+    if [[ -z "$input" ]]; then
+        echo "$default_tz"
+        return
+    fi
+
+    # Handle UTC+8, UTC-7, GMT+8, GMT-7
+    if [[ "$input" =~ ^[Uu][Tt][Cc]([+-][0-9]+)$ ]] || [[ "$input" =~ ^[Gg][Mm][Tt]([+-][0-9]+)$ ]]; then
+        local offset="${BASH_REMATCH[1]}"
+        local num="${offset:1}"
+        if [[ "${offset:0:1}" == "+" ]]; then
+            echo "Etc/GMT-${num}"
+        else
+            echo "Etc/GMT+${num}"
+        fi
+        return
+    fi
+
+    # Handle raw numbers like -7, +8, 8
+    if [[ "$input" =~ ^([+-]?)([0-9]+)$ ]]; then
+        local sign="${BASH_REMATCH[1]}"
+        local num="${BASH_REMATCH[2]}"
+        if [[ "$sign" == "-" ]]; then
+            echo "Etc/GMT+${num}"
+        else
+            echo "Etc/GMT-${num}"
+        fi
+        return
+    fi
+
+    if TZ="$input" date +%s >/dev/null 2>&1; then
+        echo "$input"
+    else
+        echo -e "${YELLOW}Invalid timezone '$input', falling back to ${default_tz}.${NC}" >&2
+        echo "$default_tz"
+    fi
+}
+
+prompt_select_timezone() {
+    local tz_result_var=$1
+    local default_tz=${2:-"UTC"}
+
+    echo ""
+    echo -e "${YELLOW}Select timezone for quota billing cycles:${NC}"
+    echo " 1) UTC (Coordinated Universal Time) [Default]"
+    echo " 2) UTC-8  US Pacific (Los Angeles, San Francisco, Vancouver)"
+    echo " 3) UTC-7  US Mountain / Arizona (Denver, Phoenix, Salt Lake City)"
+    echo " 4) UTC-6  US Central (Chicago, Dallas, Houston, Mexico City)"
+    echo " 5) UTC-5  US Eastern (New York, Miami, Toronto, Montreal)"
+    echo " 6) UTC+0  Western Europe (London, Dublin, Lisbon)"
+    echo " 7) UTC+1  Central Europe (Paris, Berlin, Rome, Madrid, Amsterdam)"
+    echo " 8) UTC+2  Eastern Europe / Egypt (Athens, Cairo, Helsinki, Kyiv)"
+    echo " 9) UTC+3  Moscow, Istanbul, Riyadh / UAE (UTC+4)"
+    echo "10) UTC+7  Southeast Asia (Bangkok, Jakarta, Hanoi)"
+    echo "11) UTC+8  East Asia (Beijing, Shanghai, Hong Kong, Singapore, Taipei)"
+    echo "12) UTC+9  Japan, Korea (Tokyo, Seoul)"
+    echo "13) UTC+10 Eastern Australia (Sydney, Melbourne, Brisbane)"
+    echo "14) Custom / Other timezone"
+
+    local choice
+    read -p "Enter choice [1-14, Default: 1]: " choice
+    choice=${choice:-1}
+
+    local selected_tz="UTC"
+    case "$choice" in
+        1) selected_tz="UTC" ;;
+        2) selected_tz="America/Los_Angeles" ;;
+        3) selected_tz="America/Denver" ;;
+        4) selected_tz="America/Chicago" ;;
+        5) selected_tz="America/New_York" ;;
+        6) selected_tz="Europe/London" ;;
+        7) selected_tz="Europe/Paris" ;;
+        8) selected_tz="Europe/Athens" ;;
+        9) selected_tz="Europe/Moscow" ;;
+        10) selected_tz="Asia/Bangkok" ;;
+        11) selected_tz="Asia/Shanghai" ;;
+        12) selected_tz="Asia/Tokyo" ;;
+        13) selected_tz="Australia/Sydney" ;;
+        14)
+            local custom_tz
+            read -p "Enter timezone name or offset (e.g. America/Phoenix, UTC-7, +8): " custom_tz
+            custom_tz=$(echo "$custom_tz" | xargs)
+            selected_tz=$(normalize_timezone_input "$custom_tz" "$default_tz")
+            ;;
+        *)
+            echo -e "${YELLOW}Invalid choice, defaulting to ${default_tz}.${NC}"
+            selected_tz="$default_tz"
+            ;;
+    esac
+
+    echo -e "Configured timezone: ${GREEN}${selected_tz}${NC}"
+    printf -v "$tz_result_var" '%s' "$selected_tz"
 }
 
 read_xray_quota_timezone() {
