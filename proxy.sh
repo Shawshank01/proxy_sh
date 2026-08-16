@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.4"
+SCRIPT_VERSION="3.18.5"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2596,28 +2596,28 @@ manage_xray_quotas() {
 
         case $quota_choice in
             1)
-                show_xray_quota_status
+                show_xray_quota_status || true
                 ;;
             2)
-                check_and_apply_xray_quotas
+                check_and_apply_xray_quotas || true
                 ;;
             3)
-                reset_xray_user_usage
+                reset_xray_user_usage || true
                 ;;
             4)
-                change_xray_user_limit
+                change_xray_user_limit || true
                 ;;
             5)
-                change_xray_user_billing_cycle
+                change_xray_user_billing_cycle || true
                 ;;
             6)
-                configure_xray_quota_auto_check
+                configure_xray_quota_auto_check || true
                 ;;
             7)
-                show_xray_quota_auto_check_status
+                show_xray_quota_auto_check_status || true
                 ;;
             8)
-                change_xray_quota_timezone
+                change_xray_quota_timezone || true
                 ;;
             0)
                 break
@@ -3253,16 +3253,16 @@ manage_proxy_users() {
 
         case $user_mgmt_choice in
             1)
-                add_xray_user
+                add_xray_user || true
                 ;;
             2)
-                remove_xray_user
+                remove_xray_user || true
                 ;;
             3)
-                add_shadowsocks_user
+                add_shadowsocks_user || true
                 ;;
             4)
-                remove_shadowsocks_user
+                remove_shadowsocks_user || true
                 ;;
             0)
                 break
@@ -3452,22 +3452,22 @@ run_main_menu() {
 
         case $choice in
             0)
-                update_script
+                update_script || true
                 ;;
             1)
-                check_environment
+                check_environment || true
                 ;;
             2)
                 if ! ensure_docker_compose; then
                     continue
                 fi
-                install_xray
+                install_xray || true
                 ;;
             3)
                 if ! ensure_docker_compose; then
                     continue
                 fi
-                install_shadowsocks
+                install_shadowsocks || true
                 ;;
             4)
                 if ! ensure_docker_compose; then
@@ -3488,14 +3488,14 @@ run_main_menu() {
                         read -p "Enter your choice [1-3]: " update_choice
                         case $update_choice in
                             1)
-                                update_xray
+                                update_xray || true
                                 ;;
                             2)
-                                update_shadowsocks
+                                update_shadowsocks || true
                                 ;;
                             3)
-                                update_xray
-                                update_shadowsocks
+                                update_xray || true
+                                update_shadowsocks || true
                                 ;;
                             *)
                                 echo -e "${RED}Invalid choice.${NC}"
@@ -3503,7 +3503,7 @@ run_main_menu() {
                         esac
                         ;;
                     2)
-                        change_container_version
+                        change_container_version || true
                         ;;
                     0)
                         ;;
@@ -3516,13 +3516,13 @@ run_main_menu() {
                 if ! ensure_docker_compose; then
                     continue
                 fi
-                restore_deployment
+                restore_deployment || true
                 ;;
             6)
-                show_links
+                show_links || true
                 ;;
             7)
-                show_ss_links
+                show_ss_links || true
                 ;;
             8)
                 if ! ensure_docker_compose; then
@@ -3535,14 +3535,14 @@ run_main_menu() {
                 read -p "Enter your choice [1-3]: " delete_choice
                 case $delete_choice in
                     1)
-                        delete_xray
+                        delete_xray || true
                         ;;
                     2)
-                        delete_shadowsocks
+                        delete_shadowsocks || true
                         ;;
                     3)
-                        delete_xray
-                        delete_shadowsocks
+                        delete_xray || true
+                        delete_shadowsocks || true
                         ;;
                     *)
                         echo -e "${RED}Invalid choice.${NC}"
@@ -3553,13 +3553,13 @@ run_main_menu() {
                 if ! ensure_docker_compose; then
                     continue
                 fi
-                manage_xray_quotas
+                manage_xray_quotas || true
                 ;;
             10)
                 if ! ensure_docker_compose; then
                     continue
                 fi
-                manage_proxy_users
+                manage_proxy_users || true
                 ;;
             11)
                 echo -e "${GREEN}Goodbye!${NC}"
