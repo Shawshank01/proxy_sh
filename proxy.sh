@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.5"
+SCRIPT_VERSION="3.18.6"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2346,7 +2346,7 @@ reset_xray_user_usage() {
 
     local stats_map_file
     make_temp_file stats_map_file
-    collect_xray_user_stats "$stats_map_file"
+    collect_xray_user_stats "$stats_map_file" >/dev/null
 
     local db_records
     db_records=$(get_quota_db_records)
@@ -2512,7 +2512,7 @@ change_xray_user_billing_cycle() {
 
     local stats_map_file
     make_temp_file stats_map_file
-    collect_xray_user_stats "$stats_map_file"
+    collect_xray_user_stats "$stats_map_file" >/dev/null
 
     local db_records
     db_records=$(get_quota_db_records)
@@ -2895,6 +2895,35 @@ change_xray_quota_timezone() {
         echo "TIMEZONE=$new_tz" >> "$conf_file"
     fi
     echo -e "${GREEN}Updated quota billing timezone to: ${new_tz}${NC}"
+
+    local db_file="xray/user_limits.db"
+    if [[ -f "$db_file" ]]; then
+        local db_records
+        db_records=$(get_quota_db_records)
+        if [[ -n "$db_records" ]]; then
+            local db_lines=""
+            local now_epoch
+            now_epoch=$(date +%s)
+            local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+            while IFS= read -r raw_line; do
+                [ -z "$raw_line" ] && continue
+                if ! parse_quota_db_line "$raw_line"; then
+                    continue
+                fi
+                local cycle_bounds
+                cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$new_tz")
+                cycle_start="${cycle_bounds%%|*}"
+                cycle_end="${cycle_bounds##*|}"
+
+                if [[ -n "$db_lines" ]]; then
+                    db_lines+=$'\n'
+                fi
+                db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
+            done <<< "$db_records"
+            finalize_quota_db_update "$db_lines" 0
+            echo -e "${GREEN}Recalculated active user billing cycle bounds for ${new_tz}.${NC}"
+        fi
+    fi
 }
 
 configure_xray_quota_auto_check() {
