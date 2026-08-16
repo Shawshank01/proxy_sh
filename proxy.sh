@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.3"
+SCRIPT_VERSION="3.18.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -903,6 +903,8 @@ delete_container() {
 }
 
 delete_xray() {
+    disable_xray_quota_systemd_silent
+    disable_xray_quota_cron_silent
     delete_container "Xray" "xray"
 }
 
