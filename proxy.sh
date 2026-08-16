@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.1"
+SCRIPT_VERSION="3.18.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2885,7 +2885,13 @@ change_xray_quota_timezone() {
         return 0
     fi
 
-    echo "TIMEZONE=$new_tz" > "$conf_file"
+    if [[ -f "$conf_file" ]] && grep -q '^TIMEZONE=' "$conf_file"; then
+        local tmp_conf
+        make_temp_file tmp_conf
+        sed "s|^TIMEZONE=.*|TIMEZONE=${new_tz}|" "$conf_file" > "$tmp_conf" && mv "$tmp_conf" "$conf_file"
+    else
+        echo "TIMEZONE=$new_tz" >> "$conf_file"
+    fi
     echo -e "${GREEN}Updated quota billing timezone to: ${new_tz}${NC}"
 }
 
