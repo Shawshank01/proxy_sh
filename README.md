@@ -59,8 +59,10 @@ For the freedom of the internet!
     -   Check/apply quota suspension and automatic re-enable on next user cycle
     -   Reset one user's current-cycle usage
     -   Change one user's monthly limit
+    -   Change one user's billing cycle dates
     -   Configure automatic quota checks via systemd timer (recommended for mainstream distributions) or cron fallback (1/2/5-minute intervals)
     -   Show automatic quota check configuration status (method and interval/schedule)
+    -   Change quota billing timezone
 -   **10) Manage users (Add/Remove for Xray / Shadowsocks)**:
     -   Add Xray users without recreating existing users
     -   Remove specific Xray users without affecting others

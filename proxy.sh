@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.17.0"
+SCRIPT_VERSION="3.18.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -982,13 +982,14 @@ is_chinese_domain() {
 install_xray() {
     local num_uuids QUOTA_TIMEZONE KEYS PRIVATE_KEY PUBLIC_KEY DERIVED
     local SERVER_SHORTIDS USED_SHORTIDS sid_idx shortid
-    local QUOTA_DB_LINES USED_EMAILS USER_UUIDS USER_EMAILS
+    local QUOTA_DB_LINES USED_EMAILS USER_UUIDS USER_EMAILS USER_LIMITS
     local i uuid user_email set_limit user_limit_gb user_anchor_now cycle_bounds user_cycle_start user_cycle_end
+    local default_anchor_epoch has_quota_limits cycle_type_choice cycle_day clean_day now_epoch u_email u_uuid u_limit u_anchor
     local XHTTP_PATH REALITY_TARGET REALITY_SERVER_NAMES
     local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
     local ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry
     local enable_ipv6 LISTEN_ADDR client_pairs idx shortids_json server_names_json clients_json
-    local SERVER_ADDR REMARKS SNI_DOMAIN TARGET_VALUE LINKS link server_uri_host sni_url public_key_url xhttp_path_url fragment_url start_confirm
+    local SERVER_ADDR REMARKS SNI_DOMAIN TARGET_VALUE LINKS link server_uri_host sni_url public_key_url xhttp_path_url fragment_url start_confirm enable_auto_sched
 
     echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
@@ -1008,8 +1009,7 @@ install_xray() {
         return 1
     fi
 
-    local QUOTA_TIMEZONE
-    prompt_select_timezone QUOTA_TIMEZONE "$DEFAULT_QUOTA_TIMEZONE"
+    QUOTA_TIMEZONE="$DEFAULT_QUOTA_TIMEZONE"
 
     # Generate keys and IDs
     echo "Generating keys and IDs..."
@@ -1056,6 +1056,7 @@ install_xray() {
     declare -A USED_EMAILS
     USER_UUIDS=()
     USER_EMAILS=()
+    USER_LIMITS=()
 
     for i in $(seq 1 $num_uuids); do
         uuid=$(generate_uuid)
@@ -1082,19 +1083,57 @@ install_xray() {
             done
         fi
 
-        user_anchor_now=$(date +%s)
-        local cycle_bounds
-        cycle_bounds=$(calculate_cycle_bounds "$user_anchor_now" "$user_anchor_now" "$QUOTA_TIMEZONE")
-        local user_cycle_start="${cycle_bounds%%|*}"
-        local user_cycle_end="${cycle_bounds##*|}"
-
-        QUOTA_DB_LINES+="${user_email}|${uuid}|${user_limit_gb}|${user_anchor_now}|${user_cycle_start}|${user_cycle_end}|0|0|active"
-        if [[ "$i" -lt "$num_uuids" ]]; then
-            QUOTA_DB_LINES+=$'\n'
-        fi
-
+        USER_LIMITS+=("$user_limit_gb")
         USER_UUIDS+=("$uuid")
         USER_EMAILS+=("$user_email")
+    done
+
+    default_anchor_epoch=$(date +%s)
+    has_quota_limits=0
+
+    for lim in "${USER_LIMITS[@]}"; do
+        if [[ "$lim" -gt 0 ]]; then
+            has_quota_limits=1
+            break
+        fi
+    done
+
+    if [[ "$has_quota_limits" -eq 1 ]]; then
+        prompt_select_timezone QUOTA_TIMEZONE "$DEFAULT_QUOTA_TIMEZONE"
+
+        echo ""
+        echo "Choose billing cycle reset schedule for users with data limits:"
+        echo "1) Start today (resets 1 month from right now) [Default]"
+        echo "2) Reset on a specific day of every month (e.g. 1st of the month)"
+        read -p "Enter choice [1-2, Default: 1]: " cycle_type_choice
+        cycle_type_choice=${cycle_type_choice:-1}
+
+        if [[ "$cycle_type_choice" == "2" ]]; then
+            read -p "Enter the day of the month [1-31, Default: 1]: " cycle_day
+            cycle_day=${cycle_day:-1}
+            clean_day=$((10#$cycle_day))
+            if [[ "$clean_day" -lt 1 ]] || [[ "$clean_day" -gt 31 ]]; then
+                clean_day=1
+            fi
+            default_anchor_epoch=$(TZ="$QUOTA_TIMEZONE" date -d "2000-01-$(printf "%02d" "$clean_day") 00:00:00" +%s)
+        fi
+    fi
+
+    now_epoch=$(date +%s)
+    for idx in "${!USER_UUIDS[@]}"; do
+        u_email="${USER_EMAILS[$idx]}"
+        u_uuid="${USER_UUIDS[$idx]}"
+        u_limit="${USER_LIMITS[$idx]}"
+        u_anchor="$default_anchor_epoch"
+
+        cycle_bounds=$(calculate_cycle_bounds "$u_anchor" "$now_epoch" "$QUOTA_TIMEZONE")
+        user_cycle_start="${cycle_bounds%%|*}"
+        user_cycle_end="${cycle_bounds##*|}"
+
+        QUOTA_DB_LINES+="${u_email}|${u_uuid}|${u_limit}|${u_anchor}|${user_cycle_start}|${user_cycle_end}|0|0|active"
+        if [[ "$idx" -lt $(( ${#USER_UUIDS[@]} - 1 )) ]]; then
+            QUOTA_DB_LINES+=$'\n'
+        fi
     done
 
     # Generate random XHTTP path for security
@@ -1448,6 +1487,14 @@ EOL
         $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d
         echo -e "${GREEN}Xray container has been started!${NC}"
         echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
+
+        if [[ "$has_quota_limits" -eq 1 ]]; then
+            echo ""
+            read -p "Enable automatic background quota check timer now? [Y/n]: " enable_auto_sched
+            if [[ -z "$enable_auto_sched" || "$enable_auto_sched" == "y" || "$enable_auto_sched" == "Y" ]]; then
+                configure_xray_quota_auto_check
+            fi
+        fi
     else
         echo -e "${RED}Container start cancelled.${NC}"
     fi
@@ -2539,8 +2586,9 @@ manage_xray_quotas() {
         echo "5) Change one user's billing cycle dates"
         echo "6) Configure automatic quota checks (systemd timer / cron)"
         echo "7) Show automatic quota check configuration status"
+        echo "8) Change quota billing timezone"
         echo "0) Back"
-        read -p "Enter your choice [0-7]: " quota_choice
+        read -p "Enter your choice [0-8]: " quota_choice
 
         case $quota_choice in
             1)
@@ -2563,6 +2611,9 @@ manage_xray_quotas() {
                 ;;
             7)
                 show_xray_quota_auto_check_status
+                ;;
+            8)
+                change_xray_quota_timezone
                 ;;
             0)
                 break
@@ -2817,7 +2868,40 @@ EOL
     echo -e "${YELLOW}Logs: sudo journalctl -u xray-quota-check.service -n 50 --no-pager${NC}"
 }
 
+change_xray_quota_timezone() {
+    local conf_file="xray/user_limits.conf"
+    local current_tz
+    current_tz=$(read_xray_quota_timezone)
+    echo ""
+    echo -e "Current quota billing timezone: ${GREEN}${current_tz}${NC}"
+
+    local new_tz
+    prompt_select_timezone new_tz "$current_tz"
+
+    if [[ -z "$new_tz" || "$new_tz" == "$current_tz" ]]; then
+        echo "Timezone unchanged."
+        return 0
+    fi
+
+    echo "TIMEZONE=$new_tz" > "$conf_file"
+    echo -e "${GREEN}Updated quota billing timezone to: ${new_tz}${NC}"
+}
+
 configure_xray_quota_auto_check() {
+    local current_tz
+    current_tz=$(read_xray_quota_timezone)
+    echo ""
+    echo -e "Current billing timezone: ${GREEN}${current_tz}${NC}"
+    read -p "Do you want to change the timezone first? [y/N]: " change_tz
+    if [[ "$change_tz" == "y" || "$change_tz" == "Y" ]]; then
+        change_xray_quota_timezone
+    fi
+
+    read -p "Do you want to adjust user billing cycle reset dates first? [y/N]: " change_cycle
+    if [[ "$change_cycle" == "y" || "$change_cycle" == "Y" ]]; then
+        change_xray_user_billing_cycle
+    fi
+
     local scheduler_choice
     echo ""
     echo "Choose scheduler for automatic quota checks:"
