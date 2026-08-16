@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.2"
+SCRIPT_VERSION="3.18.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2896,20 +2896,6 @@ change_xray_quota_timezone() {
 }
 
 configure_xray_quota_auto_check() {
-    local current_tz
-    current_tz=$(read_xray_quota_timezone)
-    echo ""
-    echo -e "Current billing timezone: ${GREEN}${current_tz}${NC}"
-    read -p "Do you want to change the timezone first? [y/N]: " change_tz
-    if [[ "$change_tz" == "y" || "$change_tz" == "Y" ]]; then
-        change_xray_quota_timezone
-    fi
-
-    read -p "Do you want to adjust user billing cycle reset dates first? [y/N]: " change_cycle
-    if [[ "$change_cycle" == "y" || "$change_cycle" == "Y" ]]; then
-        change_xray_user_billing_cycle
-    fi
-
     local scheduler_choice
     echo ""
     echo "Choose scheduler for automatic quota checks:"
