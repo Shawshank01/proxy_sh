@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.0"
+SCRIPT_VERSION="3.18.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1760,15 +1760,16 @@ prompt_select_timezone() {
     echo " 6) UTC+0  Western Europe (London, Dublin, Lisbon)"
     echo " 7) UTC+1  Central Europe (Paris, Berlin, Rome, Madrid, Amsterdam)"
     echo " 8) UTC+2  Eastern Europe / Egypt (Athens, Cairo, Helsinki, Kyiv)"
-    echo " 9) UTC+3  Moscow, Istanbul, Riyadh / UAE (UTC+4)"
-    echo "10) UTC+7  Southeast Asia (Bangkok, Jakarta, Hanoi)"
-    echo "11) UTC+8  East Asia (Beijing, Shanghai, Hong Kong, Singapore, Taipei)"
-    echo "12) UTC+9  Japan, Korea (Tokyo, Seoul)"
-    echo "13) UTC+10 Eastern Australia (Sydney, Melbourne, Brisbane)"
-    echo "14) Custom / Other timezone"
+    echo " 9) UTC+3  Middle East / Moscow (Moscow, Istanbul, Riyadh, Doha)"
+    echo "10) UTC+4  Gulf / UAE (Dubai, Abu Dhabi, Muscat, Baku)"
+    echo "11) UTC+7  Southeast Asia (Bangkok, Jakarta, Hanoi)"
+    echo "12) UTC+8  East Asia (Beijing, Shanghai, Hong Kong, Singapore, Taipei)"
+    echo "13) UTC+9  Japan, Korea (Tokyo, Seoul)"
+    echo "14) UTC+10 Eastern Australia (Sydney, Melbourne, Brisbane)"
+    echo "15) Custom / Other timezone"
 
     local choice
-    read -p "Enter choice [1-14, Default: 1]: " choice
+    read -p "Enter choice [1-15, Default: 1]: " choice
     choice=${choice:-1}
 
     local selected_tz="UTC"
@@ -1782,11 +1783,12 @@ prompt_select_timezone() {
         7) selected_tz="Europe/Paris" ;;
         8) selected_tz="Europe/Athens" ;;
         9) selected_tz="Europe/Moscow" ;;
-        10) selected_tz="Asia/Bangkok" ;;
-        11) selected_tz="Asia/Shanghai" ;;
-        12) selected_tz="Asia/Tokyo" ;;
-        13) selected_tz="Australia/Sydney" ;;
-        14)
+        10) selected_tz="Asia/Dubai" ;;
+        11) selected_tz="Asia/Bangkok" ;;
+        12) selected_tz="Asia/Shanghai" ;;
+        13) selected_tz="Asia/Tokyo" ;;
+        14) selected_tz="Australia/Sydney" ;;
+        15)
             local custom_tz
             read -p "Enter timezone name or offset (e.g. America/Phoenix, UTC-7, +8): " custom_tz
             custom_tz=$(echo "$custom_tz" | xargs)
