@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.7"
+SCRIPT_VERSION="3.18.8"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -17,6 +17,35 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
+
+require_gnu_linux() {
+    if [[ "$(uname -s 2>/dev/null || true)" != "Linux" ]]; then
+        echo -e "${RED}This script supports GNU/Linux only.${NC}" >&2
+        exit 1
+    fi
+    if ! date -d now +%s >/dev/null 2>&1 || ! stat -c %u / >/dev/null 2>&1; then
+        echo -e "${RED}GNU date and GNU stat are required. Please use a GNU/Linux system.${NC}" >&2
+        exit 1
+    fi
+}
+
+require_valid_server_address() {
+    local address=$1
+    if [[ -z "$address" || ${#address} -gt 253 || "$address" =~ [[:space:]/?#@] ]]; then
+        echo -e "${RED}Server address must be a non-empty hostname, IPv4 address, or IPv6 address without whitespace or URI delimiters.${NC}" >&2
+        return 1
+    fi
+}
+
+require_valid_label() {
+    local label=$1
+    if [[ -z "$label" || ${#label} -gt 128 || "$label" == *'|'* ]]; then
+        echo -e "${RED}User label must be 1-128 characters and cannot contain '|'.${NC}" >&2
+        return 1
+    fi
+}
+
+require_gnu_linux
 
 # Privilege check & sudo helper
 SUDO=""
@@ -1425,7 +1454,10 @@ EOL
     echo -e "${YELLOW}Public Key: $PUBLIC_KEY${NC}"
 
     # Prompt for server IP/domain and remarks
-    read -p "Enter your server IP address or domain: " SERVER_ADDR
+    while true; do
+        read -p "Enter your server IP address or domain: " SERVER_ADDR
+        require_valid_server_address "$SERVER_ADDR" && break
+    done
     read -p "Enter a remarks name for this server: " REMARKS
 
     # Determine the SNI domain (first serverName, fallback to target host if list empty)
@@ -1516,11 +1548,23 @@ install_shadowsocks() (
     echo "Pulling $SS_DOCKER_IMAGE image..."
     $SUDO docker pull "$SS_DOCKER_IMAGE"
 
-    read -p "How many users do you need? [Default: $DEFAULT_SS_USERS]: " num_users
-    num_users=${num_users:-$DEFAULT_SS_USERS}
+    while true; do
+        read -p "How many users do you need? [Default: $DEFAULT_SS_USERS]: " num_users
+        num_users=${num_users:-$DEFAULT_SS_USERS}
+        if [[ "$num_users" =~ ^[1-9][0-9]*$ ]] && (( num_users <= 1000 )); then
+            break
+        fi
+        echo -e "${RED}User count must be an integer between 1 and 1000.${NC}"
+    done
 
-    read -p "Which port should Shadowsocks listen on? [Default: $DEFAULT_SS_PORT]: " ss_port
-    ss_port=${ss_port:-$DEFAULT_SS_PORT}
+    while true; do
+        read -p "Which port should Shadowsocks listen on? [Default: $DEFAULT_SS_PORT]: " ss_port
+        ss_port=${ss_port:-$DEFAULT_SS_PORT}
+        if [[ "$ss_port" =~ ^[0-9]+$ ]] && (( ss_port >= 1 && ss_port <= 65535 )); then
+            break
+        fi
+        echo -e "${RED}Port must be an integer between 1 and 65535.${NC}"
+    done
 
     read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ss_ipv6
     if [[ "$enable_ss_ipv6" == "y" || "$enable_ss_ipv6" == "Y" ]]; then
@@ -1539,8 +1583,11 @@ install_shadowsocks() (
         local user_psk default_label user_label
         user_psk=$(openssl rand -base64 32)
         default_label="user${i}"
-        read -p "Enter a label for user ${i} [${default_label}]: " user_label
-        user_label=${user_label:-$default_label}
+        while true; do
+            read -p "Enter a label for user ${i} [${default_label}]: " user_label
+            user_label=${user_label:-$default_label}
+            require_valid_label "$user_label" && break
+        done
 
         USER_PSKS+=("$user_psk")
         USER_LABELS+=("$user_label")
@@ -1593,7 +1640,10 @@ EOL
     echo "-------------------"
 
     # Prompt for server IP/domain and remarks
-    read -p "Enter your server IP address or domain: " SERVER_ADDR
+    while true; do
+        read -p "Enter your server IP address or domain: " SERVER_ADDR
+        require_valid_server_address "$SERVER_ADDR" && break
+    done
     read -p "Enter a remarks name for this server: " REMARKS
     REMARKS=${REMARKS:-shadowsocks_rust}
 
