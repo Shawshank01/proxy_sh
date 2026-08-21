@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.8"
+SCRIPT_VERSION="4.0.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -62,6 +62,17 @@ fi
 DOCKER_COMPOSE_CMD=()
 XRAY_DOCKER_IMAGE="teddysun/xray:latest"
 SS_DOCKER_IMAGE="ghcr.io/shadowsocks/ssserver-rust:latest"
+RELEASE_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAnawkCaPdD130GQ0E6AAr
+87qtwOr7aGMWOCCmbhxAYMoWFlj3vU55uU53lbvyIp27gfItRthH7D5B1RvoB00M
+qMGNAv1uoUs8dxC4zeREEbj/J/uOic4W9zl6/xhX/Rf+VKwkPonUYZfevYdOtjiX
+ra6hzNX1Wr4VDfMlsEFNi+tYtNnPcGoYwWhRXw7RuZSX2DmWJvLSbk7VuvgJijmQ
+oFl1v9dWS+OuT4kAadqLB5gzKcNl+973jTaLBz1bdGElrEYYXdJhfY/4L0s5zVhT
+abLugfXBh59BGJbqtqc0mCnGGlnP0w0r6vJMwcQRfpGC2sZBo0/hH4DahFQZTdzG
+OJHtGsPxR+oOXHcE00ZlpVZtCZlyK1CafQliep3J3sDuPHZWnAbhk2HyueD+vkJH
+Sg0pJ4yyHYgDUWAIM/3mHbdmbbzK5MwLgKHHXDP3ZyKmput1NXmIjtWA5Y8jQzkb
+kb2OM7eQy6wsROxRjEWezoii1xfkLvaGFjCQaQi8VLwrAgMBAAE=
+-----END PUBLIC KEY-----'
 
 # Global scratch directory & cleanup trap for temporary files
 SCRIPT_TMP_DIR=""
@@ -3429,7 +3440,7 @@ fetch_latest_script_version() {
 }
 
 perform_script_update() {
-    local cache_bust script_path script_dir tmp_script tmp_sha
+    local cache_bust script_path script_dir tmp_script tmp_sha tmp_sig tmp_public_key
     cache_bust="?$(date +%s)"
     script_path=$(resolve_script_path) || return 1
     script_dir=$(dirname "$script_path")
@@ -3443,16 +3454,31 @@ perform_script_update() {
         echo -e "${RED}Cannot create a temporary checksum file beside ${script_path}.${NC}"
         return 1
     }
-    echo -e "${YELLOW}Downloading update and verifying checksum...${NC}"
+    make_temp_file tmp_sig
+    make_temp_file tmp_public_key
+    printf '%s\n' "$RELEASE_PUBLIC_KEY" > "$tmp_public_key"
+    echo -e "${YELLOW}Downloading update and verifying signature...${NC}"
     if ! curl -fsSL --max-time 20 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" > "$tmp_script"; then
-        rm -f "$tmp_script" "$tmp_sha"
+        rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
         echo -e "${RED}Failed to download update; the current script was not changed.${NC}"
         return 1
     fi
 
     if ! curl -fsSL --max-time 10 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh.sha256${cache_bust}" > "$tmp_sha"; then
-        rm -f "$tmp_script" "$tmp_sha"
+        rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
         echo -e "${RED}Failed to download checksum file (proxy.sh.sha256); update aborted for safety.${NC}"
+        return 1
+    fi
+
+    if ! curl -fsSL --max-time 10 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh.sig${cache_bust}" > "$tmp_sig"; then
+        rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
+        echo -e "${RED}Failed to download release signature (proxy.sh.sig); update aborted for safety.${NC}"
+        return 1
+    fi
+
+    if ! openssl dgst -sha256 -verify "$tmp_public_key" -signature "$tmp_sig" "$tmp_script" >/dev/null 2>&1; then
+        rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
+        echo -e "${RED}Release signature verification failed; the current script was not changed.${NC}"
         return 1
     fi
 
@@ -3466,13 +3492,13 @@ perform_script_update() {
     elif command -v openssl >/dev/null 2>&1; then
         actual_hash=$(openssl dgst -sha256 "$tmp_script" | awk '{print $NF}')
     else
-        rm -f "$tmp_script" "$tmp_sha"
+        rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
         echo -e "${RED}Cannot verify update integrity: sha256sum/shasum/openssl not found.${NC}"
         return 1
     fi
 
     if [[ -z "$expected_hash" || "$expected_hash" != "$actual_hash" ]]; then
-        rm -f "$tmp_script" "$tmp_sha"
+        rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
         echo -e "${RED}Checksum verification failed!${NC}"
         echo -e "${RED}Expected: ${expected_hash:-None}${NC}"
         echo -e "${RED}Actual:   ${actual_hash:-None}${NC}"
@@ -3480,7 +3506,7 @@ perform_script_update() {
     fi
 
     if ! bash -n "$tmp_script"; then
-        rm -f "$tmp_script" "$tmp_sha"
+        rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
         echo -e "${RED}Downloaded update failed syntax validation; the current script was not changed.${NC}"
         return 1
     fi
@@ -3488,13 +3514,13 @@ perform_script_update() {
     apply_preserved_file_metadata "$script_path" "$tmp_script"
     chmod u+x "$tmp_script"
     if ! mv -f "$tmp_script" "$script_path"; then
-        rm -f "$tmp_script" "$tmp_sha"
+        rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
         echo -e "${RED}Failed to replace ${script_path}; the current script was not changed.${NC}"
         return 1
     fi
-    rm -f "$tmp_sha"
+    rm -f "$tmp_sha" "$tmp_sig"
 
-    echo -e "${GREEN}Script updated and checksum verified successfully! Restarting...${NC}"
+    echo -e "${GREEN}Script updated and signature/checksum verified successfully! Restarting...${NC}"
     exec bash "$script_path"
 }
 

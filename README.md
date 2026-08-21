@@ -34,6 +34,10 @@ For the freedom of the internet!
 
 3.  **Choose an option from the menu.**
 
+### Release signing
+
+Self-updates require the repository secret `RELEASE_PRIVATE_KEY`. Add the PEM-encoded private key once; the public key is pinned in `proxy.sh`, and the GitHub Actions workflow automatically signs each updated script as `proxy.sh.sig`.
+
 ## Menu Options
 
 -   **0) Update this script**: Checks for a new version on GitHub and updates itself.
