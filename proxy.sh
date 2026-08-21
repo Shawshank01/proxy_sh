@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="3.18.6"
+SCRIPT_VERSION="3.18.7"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -156,9 +156,9 @@ apply_preserved_file_metadata() {
 }
 
 resolve_script_path() {
-    local path="$0"
+    local path="${BASH_SOURCE[0]}"
     if command -v realpath >/dev/null 2>&1; then
-        path=$(realpath "$0" 2>/dev/null || echo "$0")
+        path=$(realpath "$path" 2>/dev/null || echo "$path")
     elif [[ "$path" != /* ]]; then
         local script_dir
         script_dir=$(cd -- "$(dirname -- "$path")" && pwd -P) || return 1
@@ -981,7 +981,7 @@ is_chinese_domain() {
     return 1
 }
 
-install_xray() {
+install_xray() (
     local num_uuids QUOTA_TIMEZONE KEYS PRIVATE_KEY PUBLIC_KEY DERIVED
     local SERVER_SHORTIDS USED_SHORTIDS sid_idx shortid
     local QUOTA_DB_LINES USED_EMAILS USER_UUIDS USER_EMAILS USER_LIMITS
@@ -995,8 +995,6 @@ install_xray() {
 
     echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
-    local orig_dir="$PWD"
-    trap 'cd "$orig_dir" 2>/dev/null || true' RETURN
     ensure_service_dir "xray"
     cd xray || return 1
 
@@ -1501,20 +1499,17 @@ EOL
         echo -e "${RED}Container start cancelled.${NC}"
     fi
 
-    cd "$orig_dir" 2>/dev/null || true
-}
+)
 
 # --- Shadowsocks installation ---
 
-install_shadowsocks() {
+install_shadowsocks() (
     local num_users ss_port enable_ss_ipv6 SS_LISTEN_ADDR SS_METHOD SERVER_PSK
     local ss_users_args USER_PSKS USER_LABELS i user_psk default_label user_label ss_users_json
     local SERVER_ADDR REMARKS start_confirm LINKS server_uri_host fragment_url PASSWORD BASE64 link
 
     echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
 
-    local orig_dir="$PWD"
-    trap 'cd "$orig_dir" 2>/dev/null || true' RETURN
     ensure_service_dir "shadowsocks"
     cd shadowsocks || return 1
 
@@ -1633,7 +1628,7 @@ EOL
     else
         echo -e "${RED}Container start cancelled.${NC}"
     fi
-}
+)
 
 # --- Quota subsystem ---
 
@@ -2652,7 +2647,7 @@ disable_xray_quota_cron_silent() {
         if [[ -n "$current_cron" ]]; then
             printf "%s\n" "$current_cron" | crontab -
         else
-            crontab -r 2>/dev/null || true
+            printf '\n' | crontab -
         fi
     fi
 }
@@ -3062,17 +3057,36 @@ add_xray_user() {
     local cycle_end="${cycle_bounds##*|}"
 
     apply_add_user() {
+        local db_backup config_backup
+        make_temp_file db_backup
+        make_temp_file config_backup
+        if ! cp -p "$db_file" "$db_backup" || ! cp -p "$config_file" "$config_backup"; then
+            echo -e "${RED}Failed to back up Xray user state. No changes were made.${NC}" >&2
+            return 1
+        fi
+
         local existing_db
         existing_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' || true)
         if [[ -n "$existing_db" ]]; then
             existing_db+=$'\n'
         fi
         existing_db+="${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${cycle_start}|${cycle_end}|0|0|active"
-        save_quota_db_content "$existing_db"
-        sync_xray_clients_from_quota_db
-        reload_xray_container
+        if save_quota_db_content "$existing_db" \
+            && sync_xray_clients_from_quota_db \
+            && reload_xray_container; then
+            rm -f "$db_backup" "$config_backup"
+            return 0
+        fi
+
+        echo -e "${RED}Failed to add Xray user. Restoring previous database and config.${NC}" >&2
+        cp -p "$db_backup" "$db_file"
+        cp -p "$config_backup" "$config_file"
+        reload_xray_container || true
+        return 1
     }
-    with_xray_quota_lock apply_add_user
+    if ! with_xray_quota_lock apply_add_user; then
+        return 1
+    fi
 
     local server_addr remarks sni_domain xhttp_path private_key public_key
     read -p "Enter server IP/domain for new user's links (leave empty to skip link output): " server_addr
@@ -3135,6 +3149,7 @@ add_xray_user() {
 
 remove_xray_user() {
     local db_file="xray/user_limits.db"
+    local config_file="xray/server.jsonc"
 
     if [[ ! -f "$db_file" ]]; then
         echo -e "${RED}Xray quota database not found.${NC}"
@@ -3147,13 +3162,32 @@ remove_xray_user() {
     target_uuid=$(grep "^${target_email}|" "$db_file" | head -n1 | cut -d'|' -f2)
 
     apply_remove_user() {
+        local db_backup config_backup
+        make_temp_file db_backup
+        make_temp_file config_backup
+        if ! cp -p "$db_file" "$db_backup" || ! cp -p "$config_file" "$config_backup"; then
+            echo -e "${RED}Failed to back up Xray user state. No changes were made.${NC}" >&2
+            return 1
+        fi
+
         local filtered_db
         filtered_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" || true)
-        save_quota_db_content "$filtered_db"
-        sync_xray_clients_from_quota_db
-        reload_xray_container
+        if save_quota_db_content "$filtered_db" \
+            && sync_xray_clients_from_quota_db \
+            && reload_xray_container; then
+            rm -f "$db_backup" "$config_backup"
+            return 0
+        fi
+
+        echo -e "${RED}Failed to remove Xray user. Restoring previous database and config.${NC}" >&2
+        cp -p "$db_backup" "$db_file"
+        cp -p "$config_backup" "$config_file"
+        reload_xray_container || true
+        return 1
     }
-    with_xray_quota_lock apply_remove_user
+    if ! with_xray_quota_lock apply_remove_user; then
+        return 1
+    fi
 
     if [[ -f "xray/vless_links.txt" ]] && [[ -n "$target_uuid" ]]; then
         local tmp_links
@@ -3604,6 +3638,10 @@ run_main_menu() {
 }
 
 main() {
+    local script_dir
+    script_dir=$(dirname "$(resolve_script_path)")
+    cd "$script_dir" || return 1
+
     case "${1:-}" in
         --quota-check)
             if ! ensure_docker_compose; then
