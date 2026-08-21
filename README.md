@@ -9,7 +9,7 @@ For the freedom of the internet!
 - **Automated Environment Check**: Installs Docker and Docker Compose if they are not present.
 - **Wide Distro Support**: Works with Debian, Ubuntu, Fedora, CentOS, RHEL, and Linux Mint.
 - **Interactive Installation**: Guides you through setting up an Xray VLESS-XHTTP-Reality proxy.
-- **Xray Per-User Monthly Quotas**: Optional per-user MB limits with automatic suspension when a limit is reached.
+- **Xray Per-User Monthly Quotas**: Optional per-user GB limits with automatic suspension when a limit is reached.
 - **Per-User Anniversary Billing Cycle**: Each user cycle starts from their account creation timestamp and rolls monthly (with end-of-month clamping).
 - **Quota Management Menu**: Check/apply quotas, reset user usage, change user limits, and view automatic check scheduler status.
 - **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
@@ -34,17 +34,17 @@ For the freedom of the internet!
 
 3.  **Choose an option from the menu.**
 
-### Release signing
+### Release signing (for Fork)
 
-Self-updates require the repository secret `RELEASE_PRIVATE_KEY`. Add the PEM-encoded private key once; the public key is pinned in `proxy.sh`, and the GitHub Actions workflow automatically signs each updated script as `proxy.sh.sig`.
+Self-updates verify a detached OpenSSL signature before replacing the script. For a fork, add the PEM-encoded private key once as the repository Actions secret `RELEASE_PRIVATE_KEY`; never commit the private key. The matching public key is pinned in `proxy.sh`, and the GitHub Actions workflow automatically regenerates `proxy.sh.sha256` and signs each pushed `proxy.sh` as `proxy.sh.sig`.
 
 ## Menu Options
 
 -   **0) Update this script**: Checks for a new version on GitHub and updates itself.
 -   **1) Environment Check**: Verifies the Linux distribution and installs Docker and Docker Compose if needed. Run this first if you are on a new server.
 -   **2) Install Xray (VLESS-XHTTP-Reality)**: The main installation process. It will:
-    -   Ask for the number of users, then allows setting per-user `shortIds` count.
-    -   Auto-generate a random ID for each user and prompt for optional monthly MB limit.
+    -   Ask for the number of users and generate a shared server `shortId`.
+    -   Generate a random UUID and user ID for each user, then prompt for an optional monthly GB limit.
     -   Generate `docker-compose.yml`, `server.jsonc`, `user_limits.conf`, and `user_limits.db` in `xray/`.
     -   Ask for your server's IP/domain and a remarks name to generate VLESS links.
     -   Save the `vless://` links to `xray/vless_links.txt`.
@@ -53,7 +53,7 @@ Self-updates require the repository secret `RELEASE_PRIVATE_KEY`. Add the PEM-en
     -   Ask for the number of users and the listening port.
     -   Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
     -   Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
--   **4) Update / Change version of existing container (Xray / Shadowsocks)**: Allows you to either update containers to the latest version via Watchtower or pin/downgrade them to a specific version tag. Releasing version locks is fully automated when updating to latest.
+-   **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest.
 -   **5) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
 -   **6) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
 -   **7) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
@@ -113,7 +113,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
     - Wildcards from the certificate are ignored (not supported by Xray). If only wildcards are present, the script will ask you for concrete hostnames.
 
 ## Notes
-- Remember to open port **80 & 443 (TCP & UDP)** in your server's firewall.
+- Remember to open **443 (TCP & UDP)** for Xray and the configured Shadowsocks listening port (TCP & UDP) in your server's firewall.
 
 ## Credits
 
@@ -121,6 +121,5 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 -   [Xray-examples](https://github.com/XTLS/Xray-examples) — Reference configurations and examples.
 -   [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
 -   [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Rust implementation for Shadowsocks 2022.
--   [containrrr/watchtower](https://github.com/containrrr/watchtower) — Used for safely updating the container.
 
 Special thanks to them for their excellent work!
