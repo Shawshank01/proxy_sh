@@ -36,7 +36,7 @@ For the freedom of the internet!
 
 ### Release signing (for Fork)
 
-Self-updates verify a detached OpenSSL signature before replacing the script. For a fork, add the PEM-encoded private key once as the repository Actions secret `RELEASE_PRIVATE_KEY`; never commit the private key. The matching public key is pinned in `proxy.sh`, and the GitHub Actions workflow automatically regenerates `proxy.sh.sha256` and signs each pushed `proxy.sh` as `proxy.sh.sig`.
+Self-updates verify a detached OpenSSL signature before replacing the script. For a fork, add the PEM-encoded private key once as the repository Actions secret `RELEASE_PRIVATE_KEY`. The matching public key is pinned in `proxy.sh`, and the GitHub Actions workflow automatically regenerates `proxy.sh.sha256` and signs each pushed `proxy.sh` as `proxy.sh.sig`.
 
 ## Menu Options
 
