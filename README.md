@@ -86,7 +86,7 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
 
 Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
-> [!NOTE]
+> [!TIP]
 > Some clients may require further configuration steps after pasting the link.
 
 ## Xray Configuration Details
@@ -126,9 +126,8 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
       - ✗ **Connection errors**: Detects timeouts or connection failures
     - Wildcards from the certificate are ignored (not supported by Xray). If only wildcards are present, the script will ask you for concrete hostnames.
 
-## Notes
-
-- Remember to open **443 (TCP & UDP)** for Xray and the configured Shadowsocks listening port (TCP & UDP) in your server's firewall.
+> [TIP]
+> Remember to open **443 (TCP & UDP)** for Xray and the configured Shadowsocks listening port (TCP & UDP) in your server's firewall.
 
 ## Credits
 
