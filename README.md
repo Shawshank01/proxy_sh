@@ -80,6 +80,10 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
 
 ## Recommended Clients
 
+> [!IMPORTANT]
+> Temporary Compatibility Note (Xray Core):
+> If your client app fails to connect with the latest Xray version, use **Option 4** in the script menu to change/downgrade the Xray container version tag to `26.6.27` until the client application updates.
+
 - **iOS / macOS** (US$ 2.99): [Shadowrocket](https://apps.apple.com/us/app/shadowrocket/id932747118)
 - **Android**: [v2rayNG](https://github.com/2dust/v2rayNG)
 - **Windows**: [Furious](https://github.com/LorenEteval/Furious)
@@ -87,11 +91,6 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
 Copy the `vless://` or `ss://` link and paste it into the client and enjoy!  
 > [!NOTE]
 > Some clients may require further configuration steps after pasting the link.
->
->
-> [!IMPORTANT]
-> Temporary Compatibility Note (Xray Core):
-> If your client app fails to connect with the latest Xray version, use **Option 4** in the script menu to change/downgrade the Xray container version tag to `26.6.27` until the client application updates.
 
 ## Xray Configuration Details
 
@@ -105,8 +104,10 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
 
-  - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick a direct origin website that makes sense for your server location; e.g., `dl.google.com` or `swdist.apple.com`.  
+  - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick a direct origin website that makes sense for your server location; e.g., `dl.google.com` or `swdist.apple.com`.
+  
   >[!CAUTION] **Do NOT use CDN or SaaS domains**: Avoid using any domains hosted by major CDN providers (such as **Akamai**, **Fastly**, **Amazon CloudFront**, **Cloudflare**, **EdgeCast** / Edge networks) or SaaS platforms with built-in enterprise-grade CDNs (such as **Shopify**, **Wix**, **Squarespace**, **Vercel**, **Netlify**, and **GitHub Pages**). Using CDN or SaaS-backed targets makes your server vulnerable to REALITY fallback bandwidth leeching and traffic hijacking. You can read this [blog](https://zaku.eu.org/blog/2026-04-25-everyone-should-start-using-a-vpn-or-proxy/) for more setup guidance.
+  
   - You can manually check the chosen domain by using:
 
       ```bash
