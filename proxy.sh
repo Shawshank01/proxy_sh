@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="4.1.0"
+SCRIPT_VERSION="4.1.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1717,7 +1717,7 @@ change_xray_reality_target() {
     if ! jq --arg target "$REALITY_TARGET" --argjson server_names "$server_names_json" '
         (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
         |= (.target = $target | .serverNames = $server_names)
-    ' "$config_file" > "$tmp_config" || ! jq -e empty "$tmp_config" >/dev/null 2>&1; then
+    ' "$config_file" > "$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
         rm -f "$tmp_config" "$config_backup"
         echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
         return 1
