@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="4.0.1"
+SCRIPT_VERSION="4.1.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1021,6 +1021,133 @@ is_chinese_domain() {
     return 1
 }
 
+prompt_reality_target() {
+    local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
+    local ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry
+
+    while true; do
+        read -p "Enter a domain to probe with 'xray tls ping': " REALITY_DOMAIN
+        if [[ -z "$REALITY_DOMAIN" ]]; then
+            echo -e "${RED}A domain is required. Please enter a domain.${NC}"
+            continue
+        fi
+
+        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN#http://}
+        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN_CLEAN#https://}
+        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN_CLEAN%%/*}
+        if [[ -z "$REALITY_DOMAIN_CLEAN" ]]; then
+            REALITY_DOMAIN_CLEAN="$REALITY_DOMAIN"
+        fi
+
+        PING_HOST=${REALITY_DOMAIN_CLEAN%%:*}
+        if is_microsoft_domain "$PING_HOST"; then
+            echo -e "${RED}Error: Microsoft domains (e.g., microsoft.com, azure.com, office.com, bing.com, etc.) are not accepted for Reality SNI. Please enter a different domain.${NC}"
+            continue
+        fi
+
+        DOMAIN_WARNING=""
+        if is_chinese_domain "$PING_HOST"; then
+            DOMAIN_WARNING="${RED}⚠ WARNING: '$PING_HOST' appears to be a Chinese website/domain. Reality target must be a foreign website outside China!${NC}"
+        fi
+
+        if [[ -n "$DOMAIN_WARNING" ]]; then
+            echo -e "$DOMAIN_WARNING"
+            read -p "Are you sure you want to continue with this domain? [y/N]: " china_confirm
+            if [[ "$china_confirm" != "y" && "$china_confirm" != "Y" ]]; then
+                continue
+            fi
+        fi
+
+        echo "Running xray tls ping for $PING_HOST..."
+        PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" xray tls ping "$PING_HOST" 2>&1)
+        echo "----- tls ping output -----"
+        echo "$PING_OUTPUT"
+        echo "---------------------------"
+
+        VALIDATION_ERRORS=0
+        if echo "$PING_OUTPUT" | grep -qi "TLS 1.3\|TLSv1.3\|Version:.*303"; then
+            echo -e "${GREEN}✓ TLSv1.3 supported${NC}"
+        else
+            echo -e "${RED}✗ TLSv1.3 NOT detected - Reality requires TLS 1.3${NC}"
+            VALIDATION_ERRORS=1
+        fi
+
+        CURL_H2_HEADERS=$(curl -I --http2 --max-time 10 -sS "https://${PING_HOST}" 2>&1 || true)
+        if echo "$CURL_H2_HEADERS" | grep -qiE '^HTTP/2'; then
+            echo -e "${GREEN}✓ HTTP/2 (H2) supported (curl)${NC}"
+        else
+            echo -e "${YELLOW}⚠ HTTP/2 (H2) not detected by curl - Reality works best with H2${NC}"
+            if [[ -n "$CURL_H2_HEADERS" ]]; then
+                echo "----- curl --http2 output -----"
+                echo "$CURL_H2_HEADERS"
+                echo "-------------------------------"
+            fi
+        fi
+
+        if echo "$PING_OUTPUT" | grep -qi "error\|failed\|timeout\|refused"; then
+            echo -e "${RED}✗ Connection error detected - domain may be unreachable${NC}"
+            VALIDATION_ERRORS=1
+        fi
+
+        if [[ "$VALIDATION_ERRORS" -eq 1 ]]; then
+            echo -e "${YELLOW}This domain may not be suitable as a Reality target.${NC}"
+            read -p "Continue anyway? [y/N]: " force_continue
+            if [[ "$force_continue" != "y" && "$force_continue" != "Y" ]]; then
+                continue
+            fi
+        fi
+
+        read -p "Use this domain and output? [Y/n]: " use_domain
+        if [[ "$use_domain" == "n" || "$use_domain" == "N" ]]; then
+            continue
+        fi
+
+        if [[ "$REALITY_DOMAIN_CLEAN" == *":"* ]]; then
+            REALITY_TARGET="$REALITY_DOMAIN_CLEAN"
+        else
+            REALITY_TARGET="${REALITY_DOMAIN_CLEAN}:443"
+        fi
+
+        REALITY_SERVER_NAMES=()
+        ALLOWED_DOMAINS=$(echo "$PING_OUTPUT" | sed -nE "s/.*Cert's allowed domains: *\[([^]]*)\].*/\1/p")
+        if [[ -n "$ALLOWED_DOMAINS" ]]; then
+            DROPPED_WILDCARDS=0
+            SEEN_DOMAINS=""
+            for domain in $ALLOWED_DOMAINS; do
+                if [[ "$domain" == *"*"* ]]; then
+                    DROPPED_WILDCARDS=1
+                    continue
+                fi
+                if is_microsoft_domain "$domain" || [[ " $SEEN_DOMAINS " == *" $domain "* ]]; then
+                    continue
+                fi
+                SEEN_DOMAINS+=" $domain"
+                REALITY_SERVER_NAMES+=("$domain")
+            done
+            if [[ "$DROPPED_WILDCARDS" -eq 1 ]]; then
+                echo -e "${YELLOW}Wildcard domains were omitted from serverNames (not supported).${NC}"
+            fi
+        fi
+
+        if [[ ${#REALITY_SERVER_NAMES[@]} -eq 0 ]]; then
+            read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $PING_HOST]: " SERVER_NAMES_INPUT
+            if [[ -n "$SERVER_NAMES_INPUT" ]]; then
+                IFS=',' read -r -a sni_input_arr <<< "$SERVER_NAMES_INPUT"
+                for sni_entry in "${sni_input_arr[@]}"; do
+                    sni_entry=$(echo "$sni_entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    [[ -z "$sni_entry" || "$sni_entry" == *"*"* ]] && continue
+                    is_microsoft_domain "$sni_entry" && continue
+                    REALITY_SERVER_NAMES+=("$sni_entry")
+                done
+            fi
+            if [[ ${#REALITY_SERVER_NAMES[@]} -eq 0 ]]; then
+                REALITY_SERVER_NAMES+=("$PING_HOST")
+            fi
+        fi
+        return 0
+    done
+}
+
 install_xray() (
     local num_uuids QUOTA_TIMEZONE KEYS PRIVATE_KEY PUBLIC_KEY DERIVED
     local SERVER_SHORTIDS USED_SHORTIDS sid_idx shortid
@@ -1543,6 +1670,98 @@ EOL
     fi
 
 )
+
+change_xray_reality_target() {
+    local config_file="xray/server.jsonc"
+    local links_file="xray/vless_links.txt"
+
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${RED}Xray configuration not found. Install Xray first.${NC}"
+        return 1
+    fi
+    if ! ensure_jq || ! ensure_docker_compose; then
+        return 1
+    fi
+
+    local inbound_count
+    inbound_count=$(jq -er '[.inbounds[]? | select(.protocol == "vless" and (.streamSettings.realitySettings? != null))] | length' "$config_file" 2>/dev/null) || {
+        echo -e "${RED}Xray config must be valid JSON before changing the Reality target.${NC}"
+        return 1
+    }
+    if [[ "$inbound_count" -ne 1 ]]; then
+        echo -e "${RED}Expected exactly one VLESS Reality inbound; found ${inbound_count}. No changes were made.${NC}"
+        return 1
+    fi
+
+    local old_target old_sni
+    old_target=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target][0] // empty' "$config_file")
+    old_sni=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames[0]][0] // empty' "$config_file")
+    echo -e "Current Reality target: ${GREEN}${old_target:-unknown}${NC}"
+    echo -e "Current Reality SNI: ${GREEN}${old_sni:-unknown}${NC}"
+
+    local REALITY_TARGET REALITY_SERVER_NAMES=()
+    prompt_reality_target
+
+    local server_names_json
+    server_names_json=$(jq -nc '$ARGS.positional' --args "${REALITY_SERVER_NAMES[@]}")
+
+    local tmp_config config_backup links_backup
+    make_temp_file tmp_config
+    make_temp_file config_backup
+    if ! cp -p "$config_file" "$config_backup"; then
+        rm -f "$tmp_config"
+        echo -e "${RED}Failed to back up Xray configuration. No changes were made.${NC}"
+        return 1
+    fi
+
+    if ! jq --arg target "$REALITY_TARGET" --argjson server_names "$server_names_json" '
+        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
+        |= (.target = $target | .serverNames = $server_names)
+    ' "$config_file" > "$tmp_config" || ! jq -e empty "$tmp_config" >/dev/null 2>&1; then
+        rm -f "$tmp_config" "$config_backup"
+        echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
+        return 1
+    fi
+
+    apply_preserved_file_metadata "$config_file" "$tmp_config"
+    mv "$tmp_config" "$config_file"
+
+    if [[ -f "$links_file" ]]; then
+        make_temp_file links_backup
+        if ! cp -p "$links_file" "$links_backup"; then
+            cp -p "$config_backup" "$config_file"
+            rm -f "$config_backup" "$links_backup"
+            echo -e "${RED}Failed to back up saved VLESS links. No changes were made.${NC}"
+            return 1
+        fi
+    fi
+
+    echo "Restarting Xray with the new Reality target..."
+    if ! reload_xray_container; then
+        cp -p "$config_backup" "$config_file"
+        if [[ -n "${links_backup:-}" && -f "$links_backup" ]]; then
+            cp -p "$links_backup" "$links_file"
+        fi
+        reload_xray_container || true
+        rm -f "$config_backup" "${links_backup:-}"
+        echo -e "${RED}Reality target change failed. The previous configuration was restored.${NC}"
+        return 1
+    fi
+
+    if [[ -f "$links_file" ]]; then
+        local new_sni sni_url tmp_links
+        new_sni="${REALITY_SERVER_NAMES[0]}"
+        sni_url=$(url_encode_component "$new_sni")
+        make_temp_file tmp_links
+        sed -E "s#([?&]sni=)[^&]*#\1${sni_url}#" "$links_file" > "$tmp_links"
+        apply_preserved_file_metadata "$links_file" "$tmp_links"
+        mv "$tmp_links" "$links_file"
+    fi
+
+    rm -f "$config_backup" "${links_backup:-}"
+    echo -e "${GREEN}Xray Reality target changed successfully to ${REALITY_TARGET}.${NC}"
+    echo -e "${YELLOW}Saved VLESS links were updated with SNI ${REALITY_SERVER_NAMES[0]}.${NC}"
+}
 
 # --- Shadowsocks installation ---
 
@@ -3580,14 +3799,15 @@ run_main_menu() {
         echo "2) Install Xray (VLESS-XHTTP-Reality)"
         echo "3) Install Shadowsocks (ssserver-rust)"
         echo "4) Update / Change version of existing container (Xray / Shadowsocks)"
-        echo "5) Restore deployment from existing config"
-        echo "6) Show VLESS links for current config"
-        echo "7) Show SS links for current config"
-        echo "8) Delete container and config (Xray / Shadowsocks)"
-        echo "9) Manage Xray per-user data quotas"
-        echo "10) Manage users (Add/Remove for Xray / Shadowsocks)"
-        echo "11) Exit"
-        read -p "Enter your choice [0-11]: " choice
+        echo "5) Change Xray Reality target domain"
+        echo "6) Restore deployment from existing config"
+        echo "7) Show VLESS links for current config"
+        echo "8) Show SS links for current config"
+        echo "9) Delete container and config (Xray / Shadowsocks)"
+        echo "10) Manage Xray per-user data quotas"
+        echo "11) Manage users (Add/Remove for Xray / Shadowsocks)"
+        echo "12) Exit"
+        read -p "Enter your choice [0-12]: " choice
 
         case $choice in
             0)
@@ -3607,6 +3827,9 @@ run_main_menu() {
                     continue
                 fi
                 install_shadowsocks || true
+                ;;
+            5)
+                change_xray_reality_target || true
                 ;;
             4)
                 if ! ensure_docker_compose; then
@@ -3651,19 +3874,19 @@ run_main_menu() {
                         ;;
                 esac
                 ;;
-            5)
+            6)
                 if ! ensure_docker_compose; then
                     continue
                 fi
                 restore_deployment || true
                 ;;
-            6)
+            7)
                 show_links || true
                 ;;
-            7)
+            8)
                 show_ss_links || true
                 ;;
-            8)
+            9)
                 if ! ensure_docker_compose; then
                     continue
                 fi
@@ -3688,19 +3911,19 @@ run_main_menu() {
                         ;;
                 esac
                 ;;
-            9)
+            10)
                 if ! ensure_docker_compose; then
                     continue
                 fi
                 manage_xray_quotas || true
                 ;;
-            10)
+            11)
                 if ! ensure_docker_compose; then
                     continue
                 fi
                 manage_proxy_users || true
                 ;;
-            11)
+            12)
                 echo -e "${GREEN}Goodbye!${NC}"
                 exit 0
                 ;;

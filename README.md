@@ -59,11 +59,12 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
   - Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
   - Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
 - **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest.
-- **5) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
-- **6) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
-- **7) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
-- **8) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
-- **9) Manage Xray per-user data quotas**:
+- **5) Change Xray Reality target domain**: Re-runs the strict Reality target validation, updates the Xray configuration while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. Failed restarts automatically roll back the previous configuration.
+- **6) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
+- **7) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
+- **8) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
+- **9) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
+- **10) Manage Xray per-user data quotas**:
   - Show quota status
   - Check/apply quota suspension and automatic re-enable on next user cycle
   - Reset one user's current-cycle usage
@@ -72,11 +73,11 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
   - Configure automatic quota checks via systemd timer (recommended for mainstream distributions) or cron fallback (1/2/5-minute intervals)
   - Show automatic quota check configuration status (method and interval/schedule)
   - Change quota billing timezone
-- **10) Manage users (Add/Remove for Xray / Shadowsocks)**:
+- **11) Manage users (Add/Remove for Xray / Shadowsocks)**:
   - Add Xray users without recreating existing users
   - Remove specific Xray users without affecting others
   - Add Shadowsocks users without recreating existing users - Remove specific Shadowsocks users without affecting others
-- **11) Exit**
+- **12) Exit**
 
 ## Recommended Clients
 

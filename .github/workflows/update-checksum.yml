@@ -3,9 +3,9 @@ name: Update SHA256 Checksum
 on:
   push:
     branches:
-      - main
+    - main
     paths:
-      - 'proxy.sh'
+    - 'proxy.sh'
 
 permissions:
   contents: write
@@ -15,61 +15,61 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+    - name: Checkout repository
+      uses: actions/checkout@v7
 
-      - name: Generate checksum and detached signature
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_PRIVATE_KEY: ${{ secrets.RELEASE_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "$RELEASE_PRIVATE_KEY" ]; then
-            echo "RELEASE_PRIVATE_KEY secret is not configured."
-            exit 1
-          fi
+    - name: Generate checksum and detached signature
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_PRIVATE_KEY: ${{ secrets.RELEASE_PRIVATE_KEY }}
+      run: |
+        set -euo pipefail
+        if [ -z "$RELEASE_PRIVATE_KEY" ]; then
+          echo "RELEASE_PRIVATE_KEY secret is not configured."
+          exit 1
+        fi
 
-          printf '%s\n' "$RELEASE_PRIVATE_KEY" > release-private.pem
-          chmod 600 release-private.pem
-          openssl pkey -in release-private.pem -check -noout
-          openssl dgst -sha256 -sign release-private.pem -out proxy.sh.sig proxy.sh
-          NEW_HASH=$(sha256sum proxy.sh | awk '{print $1}')
-          OLD_HASH=$(cat proxy.sh.sha256 2>/dev/null | awk '{print $1}' || true)
-          NEW_SIGNATURE=$(base64 -w 0 proxy.sh.sig)
-          OLD_SIGNATURE_SHA=$(gh api repos/${{ github.repository }}/contents/proxy.sh.sig --jq .sha 2>/dev/null || echo "")
+        printf '%s\n' "$RELEASE_PRIVATE_KEY" > release-private.pem
+        chmod 600 release-private.pem
+        openssl pkey -in release-private.pem -check -noout
+        openssl dgst -sha256 -sign release-private.pem -out proxy.sh.sig proxy.sh
+        NEW_HASH=$(sha256sum proxy.sh | awk '{print $1}')
+        OLD_HASH=$(cat proxy.sh.sha256 2>/dev/null | awk '{print $1}' || true)
+        NEW_SIGNATURE=$(base64 -w 0 proxy.sh.sig)
+        OLD_SIGNATURE_SHA=$(gh api repos/${{ github.repository }}/contents/proxy.sh.sig --jq .sha 2>/dev/null || echo "")
 
-          if [ "$NEW_HASH" != "$OLD_HASH" ]; then
-            echo "Checksum mismatch detected. Updating proxy.sh.sha256 via API..."
-            CONTENT=$(printf "%s  proxy.sh\n" "$NEW_HASH" | base64 -w 0)
-            SHA=$(gh api repos/${{ github.repository }}/contents/proxy.sh.sha256 --jq .sha 2>/dev/null || echo "")
+        if [ "$NEW_HASH" != "$OLD_HASH" ]; then
+          echo "Checksum mismatch detected. Updating proxy.sh.sha256 via API..."
+          CONTENT=$(printf "%s  proxy.sh\n" "$NEW_HASH" | base64 -w 0)
+          SHA=$(gh api repos/${{ github.repository }}/contents/proxy.sh.sha256 --jq .sha 2>/dev/null || echo "")
 
-            if [ -n "$SHA" ]; then
-              gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sha256 \
-                -f message="chore: update proxy.sh.sha256 checksum [skip ci]" \
-                -f content="$CONTENT" \
-                -f sha="$SHA" \
-                -f branch="main"
-            else
-              gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sha256 \
-                -f message="chore: update proxy.sh.sha256 checksum [skip ci]" \
-                -f content="$CONTENT" \
-                -f branch="main"
-            fi
-            echo "Successfully updated and signed checksum commit."
-          else
-            echo "Checksum is already up to date. No commit needed."
-          fi
-
-          if [ -n "$OLD_SIGNATURE_SHA" ]; then
-            gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sig \
-              -f message="chore: update proxy.sh release signature [skip ci]" \
-              -f content="$NEW_SIGNATURE" \
-              -f sha="$OLD_SIGNATURE_SHA" \
+          if [ -n "$SHA" ]; then
+            gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sha256 \
+              -f message="chore: update proxy.sh.sha256 checksum [skip ci]" \
+              -f content="$CONTENT" \
+              -f sha="$SHA" \
               -f branch="main"
           else
-            gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sig \
-              -f message="chore: add proxy.sh release signature [skip ci]" \
-              -f content="$NEW_SIGNATURE" \
+            gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sha256 \
+              -f message="chore: update proxy.sh.sha256 checksum [skip ci]" \
+              -f content="$CONTENT" \
               -f branch="main"
           fi
-          rm -f release-private.pem proxy.sh.sig
+          echo "Successfully updated and signed checksum commit."
+        else
+          echo "Checksum is already up to date. No commit needed."
+        fi
+
+        if [ -n "$OLD_SIGNATURE_SHA" ]; then
+          gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sig \
+            -f message="chore: update proxy.sh release signature [skip ci]" \
+            -f content="$NEW_SIGNATURE" \
+            -f sha="$OLD_SIGNATURE_SHA" \
+            -f branch="main"
+        else
+          gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sig \
+            -f message="chore: add proxy.sh release signature [skip ci]" \
+            -f content="$NEW_SIGNATURE" \
+            -f branch="main"
+        fi
+        rm -f release-private.pem proxy.sh.sig
