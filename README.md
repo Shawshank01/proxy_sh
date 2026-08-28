@@ -6,6 +6,7 @@ Supports IPv6.
 For the freedom of the internet!
 
 ## Features
+
 - **Automated Environment Check**: Installs Docker and Docker Compose if they are not present.
 - **Wide Distro Support**: Works with Debian, Ubuntu, Fedora, CentOS, RHEL, and Linux Mint.
 - **Interactive Installation**: Guides you through setting up an Xray VLESS-XHTTP-Reality proxy.
@@ -21,18 +22,21 @@ For the freedom of the internet!
 
 ## Usage
 
-1.  **Download and execute the script:**
+1. **Download and execute the script:**
+
     ```bash
     wget https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh && chmod +x proxy.sh
     ```
 
-2.  **Run the script:**
+2. **Run the script:**
+
     ```bash
     ./proxy.sh
     ```
+
     The script will request `sudo` permissions only when necessary.
 
-3.  **Choose an option from the menu.**
+3. **Choose an option from the menu.**
 
 ### Release signing (for Fork)
 
@@ -41,39 +45,38 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
 
 ## Menu Options
 
--   **0) Update this script**: Checks for a new version on GitHub and updates itself.
--   **1) Environment Check**: Verifies the Linux distribution and installs Docker and Docker Compose if needed. Run this first if you are on a new server.
--   **2) Install Xray (VLESS-XHTTP-Reality)**: The main installation process. It will:
-    -   Ask for the number of users and generate a shared server `shortId`.
-    -   Generate a random UUID and user ID for each user, then prompt for an optional monthly GB limit.
-    -   Generate `docker-compose.yml`, `server.jsonc`, `user_limits.conf`, and `user_limits.db` in `xray/`.
-    -   Ask for your server's IP/domain and a remarks name to generate VLESS links.
-    -   Save the `vless://` links to `xray/vless_links.txt`.
-    -   Start the Xray container.
--   **3) Install Shadowsocks (ssserver-rust)**: Sets up a multi-user Shadowsocks 2022 server. It will:
-    -   Ask for the number of users and the listening port.
-    -   Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
-    -   Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
--   **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest.
--   **5) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
--   **6) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
--   **7) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
--   **8) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
--   **9) Manage Xray per-user data quotas**:
-    -   Show quota status
-    -   Check/apply quota suspension and automatic re-enable on next user cycle
-    -   Reset one user's current-cycle usage
-    -   Change one user's monthly limit
-    -   Change one user's billing cycle dates
-    -   Configure automatic quota checks via systemd timer (recommended for mainstream distributions) or cron fallback (1/2/5-minute intervals)
-    -   Show automatic quota check configuration status (method and interval/schedule)
-    -   Change quota billing timezone
--   **10) Manage users (Add/Remove for Xray / Shadowsocks)**:
-    -   Add Xray users without recreating existing users
-    -   Remove specific Xray users without affecting others
-    -   Add Shadowsocks users without recreating existing users
-    -   Remove specific Shadowsocks users without affecting others
--   **11) Exit**
+- **0) Update this script**: Checks for a new version on GitHub and updates itself.
+- **1) Environment Check**: Verifies the Linux distribution and installs Docker and Docker Compose if needed. Run this first if you are on a new server.
+- **2) Install Xray (VLESS-XHTTP-Reality)**: The main installation process. It will:
+  - Ask for the number of users and generate a shared server `shortId`.
+  - Generate a random UUID and user ID for each user, then prompt for an optional monthly GB limit.
+  - Generate `docker-compose.yml`, `server.jsonc`, `user_limits.conf`, and `user_limits.db` in `xray/`.
+  - Ask for your server's IP/domain and a remarks name to generate VLESS links.
+  - Save the `vless://` links to `xray/vless_links.txt`.
+  - Start the Xray container.
+- **3) Install Shadowsocks (ssserver-rust)**: Sets up a multi-user Shadowsocks 2022 server. It will:
+  - Ask for the number of users and the listening port.
+  - Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
+  - Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
+- **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest.
+- **5) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
+- **6) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
+- **7) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
+- **8) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
+- **9) Manage Xray per-user data quotas**:
+  - Show quota status
+  - Check/apply quota suspension and automatic re-enable on next user cycle
+  - Reset one user's current-cycle usage
+  - Change one user's monthly limit
+  - Change one user's billing cycle dates
+  - Configure automatic quota checks via systemd timer (recommended for mainstream distributions) or cron fallback (1/2/5-minute intervals)
+  - Show automatic quota check configuration status (method and interval/schedule)
+  - Change quota billing timezone
+- **10) Manage users (Add/Remove for Xray / Shadowsocks)**:
+  - Add Xray users without recreating existing users
+  - Remove specific Xray users without affecting others
+  - Add Shadowsocks users without recreating existing users - Remove specific Shadowsocks users without affecting others
+- **11) Exit**
 
 ## Recommended Clients
 
@@ -83,12 +86,12 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
 
 Copy the `vless://` or `ss://` link and paste it into the client and enjoy!  
 > Some clients may require further configuration steps after pasting the link.
-
 > [!IMPORTANT]
 > **Temporary Compatibility Note (Xray Core):**  
 > If your client app fails to connect with the latest Xray version, use **Option 4** in the script menu to change/downgrade the Xray container version tag to `26.6.27` until the client application updates.
 
 ## Xray Configuration Details
+
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
 - The configuration uses the Reality protocol for obfuscation.
 - Xray per-user quota enforcement uses Xray user traffic stats (`StatsService`) and stores state in:
@@ -98,13 +101,16 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 - Quota checks run when you execute menu option `9 -> 2` (recommended to automate with a systemd timer on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `9 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
 - All configuration files are created in a new `xray` directory relative to the script's location.
 - **Reality target & server names**:
-    - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick a direct origin website that makes sense for your server location; e.g., `dl.google.com` or `swdist.apple.com`.  
-    - ⚠️ **Do NOT use CDN or SaaS domains**: Avoid using any domains hosted by major CDN providers (such as **Akamai**, **Fastly**, **Amazon CloudFront**, **Cloudflare**, **EdgeCast** / Edge networks) or SaaS platforms with built-in enterprise-grade CDNs (such as **Shopify**, **Wix**, **Squarespace**, **Vercel**, **Netlify**, and **GitHub Pages**). Using CDN or SaaS-backed targets makes your server vulnerable to REALITY fallback bandwidth leeching and traffic hijacking. You can read this [blog](https://zaku.eu.org/blog/2026-04-25-everyone-should-start-using-a-vpn-or-proxy/) for more setup guidance.
+
+  - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick a direct origin website that makes sense for your server location; e.g., `dl.google.com` or `swdist.apple.com`.  
+  - >[!CAUTION] **Do NOT use CDN or SaaS domains**: Avoid using any domains hosted by major CDN providers (such as **Akamai**, **Fastly**, **Amazon CloudFront**, **Cloudflare**, **EdgeCast** / Edge networks) or SaaS platforms with built-in enterprise-grade CDNs (such as **Shopify**, **Wix**, **Squarespace**, **Vercel**, **Netlify**, and **GitHub Pages**). Using CDN or SaaS-backed targets makes your server vulnerable to REALITY fallback bandwidth leeching and traffic hijacking. You can read this [blog](https://zaku.eu.org/blog/2026-04-25-everyone-should-start-using-a-vpn-or-proxy/) for more setup guidance.
     - You can manually check the chosen domain by using:
+
       ```bash
       curl -I --http2 "https://<target-domain>"
       sudo docker run --rm teddysun/xray:latest xray tls ping <target-domain>
       ```
+
     - **Domain validation**: The script automatically checks:
       - ✓ **TLSv1.3**: Verifies the target supports TLS 1.3 (required for Reality)
       - ✓ **HTTP/2**: Checks for H2 support (recommended for best performance)
@@ -114,13 +120,14 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
     - Wildcards from the certificate are ignored (not supported by Xray). If only wildcards are present, the script will ask you for concrete hostnames.
 
 ## Notes
+
 - Remember to open **443 (TCP & UDP)** for Xray and the configured Shadowsocks listening port (TCP & UDP) in your server's firewall.
 
 ## Credits
 
--   [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
--   [Xray-examples](https://github.com/XTLS/Xray-examples) — Reference configurations and examples.
--   [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
--   [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Rust implementation for Shadowsocks 2022.
+- [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
+- [Xray-examples](https://github.com/XTLS/Xray-examples) — Reference configurations and examples.
+- [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
+- [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Rust implementation for Shadowsocks 2022.
 
 Special thanks to them for their excellent work!
