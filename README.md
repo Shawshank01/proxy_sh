@@ -1,5 +1,7 @@
 # proxy_sh
 
+[![License: GPL v2](https://img.shields.io/badge/License-GPL_v2-blue.svg)](LICENSE)
+
 **No need** to use your own domain name ;-)  
 This is an automated shell script that installs and manages Docker containers on GNU/Linux systems. GNU `date` and `stat` are required. It can be used to construct encrypted and obfuscated traffic proxy servers using Xray (VLESS-XHTTP-REALITY) and Shadowsocks (2022).
 Supports IPv6.  
@@ -142,3 +144,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 - [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Rust implementation for Shadowsocks 2022.
 
 Special thanks to them for their excellent work!
+
+## License
+
+This project is licensed under the GNU General Public License v2.0 only - see the [LICENSE](LICENSE) file for details.
