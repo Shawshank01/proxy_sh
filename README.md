@@ -99,8 +99,8 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
 - The configuration uses the Reality protocol for obfuscation.
-- Failed REALITY handshakes are sent to `127.0.0.1:10086`, where a loopback-only `tunnel` (`dokodemo-door`) inbound rewrites the connection to the selected target on its configured port. The Tunnel is TCP-only, has `followRedirect` disabled, and is explicitly routed through the `direct` outbound.
-- The Tunnel is a fixed port mapping, not a general-purpose destination filter. Continue to choose a direct-origin, non-CDN Reality target; a Tunnel does not make a CDN-backed target safe by itself, and it does not restrict destinations chosen by authenticated VLESS users.
+- Failed REALITY handshakes are sent to `127.0.0.1:10086`, where a loopback-only `tunnel` (`dokodemo-door`) inbound rewrites the connection to the selected target on its configured port.
+- Tunnel routing allows only the configured Reality `serverNames` to use the `direct` outbound, every other fallback SNI is sent to `block`. Continue to choose a direct-origin, non-CDN Reality target. This protects the fallback path, but does not restrict destinations chosen by authenticated VLESS users.
 - Xray per-user quota enforcement uses Xray user traffic stats (`StatsService`) and stores state in:
   - `xray/user_limits.conf` (timezone)
   - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
@@ -113,7 +113,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
 - **Reality target & server names**:
 
-  - Reality replaces a traditional TLS front, so the `target` (`realitySettings.target`) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick a direct origin website that makes sense for your server location; e.g., `dl.google.com` or `swdist.apple.com`.
+  - The generated `realitySettings.target` is the loopback Tunnel endpoint. The external fallback destination (`rewriteAddress`/`rewritePort` in the `reality-fallback` Tunnel) must be a real website outside the GFW that serves TLS 1.3 + HTTP/2 directly (no forced redirects). Pick a direct origin website that makes sense for your server location; e.g., `dl.google.com` or `swdist.apple.com`.
 
   - You can manually check the chosen domain by using:
 

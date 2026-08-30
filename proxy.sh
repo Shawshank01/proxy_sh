@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="4.2.0"
+SCRIPT_VERSION="4.2.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1538,7 +1538,13 @@ EOL
                 {
                     "type": "field",
                     "inboundTag": ["reality-fallback"],
+                    "domain": $server_names,
                     "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "inboundTag": ["reality-fallback"],
+                    "outboundTag": "block"
                 },
                 {
                     "type": "field",
@@ -1603,6 +1609,11 @@ EOL
                     "rewritePort": $fallback_port,
                     "followRedirect": false,
                     "userLevel": 0
+                },
+                "sniffing": {
+                    "enabled": true,
+                    "destOverride": ["tls"],
+                    "routeOnly": true
                 },
                 "tag": "reality-fallback"
             }
@@ -1759,8 +1770,8 @@ change_xray_reality_target() {
     echo -e "Current Reality target: ${GREEN}${old_target:-unknown}${NC}"
     echo -e "Current Reality SNI: ${GREEN}${old_sni:-unknown}${NC}"
     if [[ "$tunnel_count" -eq 1 ]]; then
-        old_fallback_address=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.rewriteAddress // empty' "$config_file")
-        old_fallback_port=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.rewritePort // empty' "$config_file")
+        old_fallback_address=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.rewriteAddress // [.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.address // empty' "$config_file")
+        old_fallback_port=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.rewritePort // [.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.port // empty' "$config_file")
         if [[ -n "$old_fallback_address" ]]; then
             echo -e "Current Tunnel fallback destination: ${GREEN}${old_fallback_address}${old_fallback_port:+:${old_fallback_port}}${NC}"
         fi
@@ -1803,14 +1814,24 @@ change_xray_reality_target() {
             --argjson server_names "$server_names_json" '
             (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
             |= (.target = $target | .serverNames = $server_names)
-            | (.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door")) | .settings)
-            |= (.allowedNetwork = "tcp" | .rewriteAddress = $fallback_address | .rewritePort = $fallback_port | .followRedirect = false | .userLevel = 0)
+            | (.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door")))
+            |= (.protocol = "tunnel"
+                | .settings = ((.settings // {})
+                    | .allowedNetwork = "tcp"
+                    | .rewriteAddress = $fallback_address
+                    | .rewritePort = $fallback_port
+                    | .followRedirect = false
+                    | .userLevel = 0)
+                | .sniffing = {"enabled": true, "destOverride": ["tls"], "routeOnly": true})
             | (.routing //= {})
             | (.routing.rules //= [])
-            | if any(.routing.rules[]?; ((.inboundTag? // []) | index("reality-fallback")) != null)
-              then .
-              else .routing.rules += [{"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "direct"}]
-              end
+            | (.routing.rules) |= (
+                map(select(((.inboundTag? // []) | index("reality-fallback")) == null))
+                + [
+                    {"type": "field", "inboundTag": ["reality-fallback"], "domain": $server_names, "outboundTag": "direct"},
+                    {"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "block"}
+                  ]
+              )
         ' "$config_file" > "$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
             rm -f "$tmp_config" "$config_backup"
             echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
@@ -1836,11 +1857,22 @@ change_xray_reality_target() {
                     "followRedirect": false,
                     "userLevel": 0
                 },
+                "sniffing": {
+                    "enabled": true,
+                    "destOverride": ["tls"],
+                    "routeOnly": true
+                },
                 "tag": "reality-fallback"
               }]
             | (.routing //= {})
             | (.routing.rules //= [])
-            | .routing.rules += [{"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "direct"}]
+            | (.routing.rules) |= (
+                map(select(((.inboundTag? // []) | index("reality-fallback")) == null))
+                + [
+                    {"type": "field", "inboundTag": ["reality-fallback"], "domain": $server_names, "outboundTag": "direct"},
+                    {"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "block"}
+                  ]
+              )
         ' "$config_file" > "$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
             rm -f "$tmp_config" "$config_backup"
             echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
