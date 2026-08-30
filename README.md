@@ -15,6 +15,7 @@ For the freedom of the internet!
 - **Quota Management Menu**: Check/apply quotas, reset user usage, change user limits, and view automatic check scheduler status.
 - **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
 - **IPv6 Support**: Optional dual-stack listening for both Xray and Shadowsocks.
+- **REALITY Fallback Hardening**: Routes failed REALITY handshakes through a loopback-only Xray Tunnel (`dokodemo-door`) with a fixed destination.
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
 - **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
 - **Container Management**: Easy-to-use menu for updating, changing/downgrading versions, viewing links, or deleting containers and configurations.
@@ -59,7 +60,7 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
   - Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
   - Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
 - **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest.
-- **5) Change Xray Reality target domain**: Re-runs the strict Reality target validation, updates the Xray configuration while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. Failed restarts automatically roll back the previous configuration.
+- **5) Change Xray Reality target domain**: Re-runs the strict Reality target validation, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. On legacy configs, this also adds the loopback Tunnel. Failed restarts automatically roll back the previous configuration.
 - **6) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
 - **7) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
 - **8) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
@@ -98,6 +99,8 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
 - The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
 - The configuration uses the Reality protocol for obfuscation.
+- Failed REALITY handshakes are sent to `127.0.0.1:10086`, where a loopback-only `tunnel` (`dokodemo-door`) inbound rewrites the connection to the selected target on its configured port. The Tunnel is TCP-only, has `followRedirect` disabled, and is explicitly routed through the `direct` outbound.
+- The Tunnel is a fixed port mapping, not a general-purpose destination filter. Continue to choose a direct-origin, non-CDN Reality target; a Tunnel does not make a CDN-backed target safe by itself, and it does not restrict destinations chosen by authenticated VLESS users.
 - Xray per-user quota enforcement uses Xray user traffic stats (`StatsService`) and stores state in:
   - `xray/user_limits.conf` (timezone)
   - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)

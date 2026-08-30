@@ -5,7 +5,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="4.1.1"
+SCRIPT_VERSION="4.2.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -62,6 +62,7 @@ fi
 DOCKER_COMPOSE_CMD=()
 XRAY_DOCKER_IMAGE="teddysun/xray:latest"
 SS_DOCKER_IMAGE="ghcr.io/shadowsocks/ssserver-rust:latest"
+XRAY_REALITY_FALLBACK_PORT=10086
 RELEASE_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
 MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAnawkCaPdD130GQ0E6AAr
 87qtwOr7aGMWOCCmbhxAYMoWFlj3vU55uU53lbvyIp27gfItRthH7D5B1RvoB00M
@@ -1155,6 +1156,7 @@ install_xray() (
     local i uuid user_email set_limit user_limit_gb user_anchor_now cycle_bounds user_cycle_start user_cycle_end
     local default_anchor_epoch has_quota_limits cycle_type_choice cycle_day clean_day now_epoch u_email u_uuid u_limit u_anchor
     local XHTTP_PATH REALITY_TARGET REALITY_SERVER_NAMES
+    local REALITY_FALLBACK_ADDRESS REALITY_FALLBACK_PORT
     local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
     local ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry
     local enable_ipv6 LISTEN_ADDR client_pairs idx shortids_json server_names_json clients_json
@@ -1442,6 +1444,24 @@ install_xray() (
         break
     done
 
+    # Keep the REALITY fallback target behind a loopback-only Tunnel. This prevents
+    # failed REALITY handshakes from directly exposing a configurable egress target.
+    REALITY_FALLBACK_ADDRESS="${REALITY_DOMAIN_CLEAN%%:*}"
+    REALITY_FALLBACK_PORT=443
+    if [[ "$REALITY_DOMAIN_CLEAN" == *":"* ]]; then
+        REALITY_FALLBACK_PORT="${REALITY_DOMAIN_CLEAN##*:}"
+    fi
+    if ! [[ "$REALITY_FALLBACK_PORT" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Reality target port must be between 1 and 65535.${NC}"
+        return 1
+    fi
+    REALITY_FALLBACK_PORT=$((10#$REALITY_FALLBACK_PORT))
+    if (( REALITY_FALLBACK_PORT < 1 || REALITY_FALLBACK_PORT > 65535 )); then
+        echo -e "${RED}Reality target port must be between 1 and 65535.${NC}"
+        return 1
+    fi
+    REALITY_TARGET="127.0.0.1:${XRAY_REALITY_FALLBACK_PORT}"
+
     read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6
     if [[ "$enable_ipv6" == "y" || "$enable_ipv6" == "Y" ]]; then
         LISTEN_ADDR="::"
@@ -1480,6 +1500,9 @@ EOL
       --arg listen "$LISTEN_ADDR" \
       --arg xhttp_path "/$XHTTP_PATH" \
       --arg target "$REALITY_TARGET" \
+      --arg fallback_address "$REALITY_FALLBACK_ADDRESS" \
+      --argjson fallback_port "$REALITY_FALLBACK_PORT" \
+      --argjson tunnel_port "$XRAY_REALITY_FALLBACK_PORT" \
       --arg private_key "$PRIVATE_KEY" \
       --argjson clients "$clients_json" \
       --argjson server_names "$server_names_json" \
@@ -1511,6 +1534,11 @@ EOL
                     "type": "field",
                     "inboundTag": ["api"],
                     "outboundTag": "api"
+                },
+                {
+                    "type": "field",
+                    "inboundTag": ["reality-fallback"],
+                    "outboundTag": "direct"
                 },
                 {
                     "type": "field",
@@ -1564,6 +1592,19 @@ EOL
                     "address": "127.0.0.1"
                 },
                 "tag": "api"
+            },
+            {
+                "listen": "127.0.0.1",
+                "port": $tunnel_port,
+                "protocol": "tunnel",
+                "settings": {
+                    "allowedNetwork": "tcp",
+                    "rewriteAddress": $fallback_address,
+                    "rewritePort": $fallback_port,
+                    "followRedirect": false,
+                    "userLevel": 0
+                },
+                "tag": "reality-fallback"
             }
         ],
         "outbounds": [
@@ -1683,7 +1724,26 @@ change_xray_reality_target() {
         return 1
     fi
 
-    local inbound_count
+    local inbound_count tunnel_count tunnel_port
+    tunnel_count=$(jq -er '[.inbounds[]? | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))] | length' "$config_file" 2>/dev/null) || {
+        echo -e "${RED}Xray config must be valid JSON before changing the Reality target.${NC}"
+        return 1
+    }
+    if [[ "$tunnel_count" -gt 1 ]]; then
+        echo -e "${RED}Expected at most one reality-fallback Tunnel inbound; found ${tunnel_count}. No changes were made.${NC}"
+        return 1
+    fi
+
+    if [[ "$tunnel_count" -eq 1 ]]; then
+        tunnel_port=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].port // empty' "$config_file")
+        if ! [[ "$tunnel_port" =~ ^[0-9]+$ ]] || (( tunnel_port < 1 || tunnel_port > 65535 )); then
+            echo -e "${RED}The reality-fallback Tunnel has an invalid listening port. No changes were made.${NC}"
+            return 1
+        fi
+    else
+        tunnel_port=$XRAY_REALITY_FALLBACK_PORT
+    fi
+
     inbound_count=$(jq -er '[.inbounds[]? | select(.protocol == "vless" and (.streamSettings.realitySettings? != null))] | length' "$config_file" 2>/dev/null) || {
         echo -e "${RED}Xray config must be valid JSON before changing the Reality target.${NC}"
         return 1
@@ -1693,14 +1753,35 @@ change_xray_reality_target() {
         return 1
     fi
 
-    local old_target old_sni
+    local old_target old_sni old_fallback_address old_fallback_port
     old_target=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target][0] // empty' "$config_file")
     old_sni=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames[0]][0] // empty' "$config_file")
     echo -e "Current Reality target: ${GREEN}${old_target:-unknown}${NC}"
     echo -e "Current Reality SNI: ${GREEN}${old_sni:-unknown}${NC}"
+    if [[ "$tunnel_count" -eq 1 ]]; then
+        old_fallback_address=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.rewriteAddress // empty' "$config_file")
+        old_fallback_port=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.rewritePort // empty' "$config_file")
+        if [[ -n "$old_fallback_address" ]]; then
+            echo -e "Current Tunnel fallback destination: ${GREEN}${old_fallback_address}${old_fallback_port:+:${old_fallback_port}}${NC}"
+        fi
+    fi
 
     local REALITY_TARGET REALITY_SERVER_NAMES=()
     prompt_reality_target
+
+    local fallback_address fallback_port tunnel_target
+    fallback_address="${REALITY_TARGET%%:*}"
+    fallback_port="${REALITY_TARGET##*:}"
+    if [[ -z "$fallback_address" ]] || ! [[ "$fallback_port" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}The selected Reality target has an invalid address or port. No changes were made.${NC}"
+        return 1
+    fi
+    fallback_port=$((10#$fallback_port))
+    if (( fallback_port < 1 || fallback_port > 65535 )); then
+        echo -e "${RED}The selected Reality target has an invalid address or port. No changes were made.${NC}"
+        return 1
+    fi
+    tunnel_target="127.0.0.1:${tunnel_port}"
 
     local server_names_json
     server_names_json=$(jq -nc '$ARGS.positional' --args "${REALITY_SERVER_NAMES[@]}")
@@ -1714,13 +1795,57 @@ change_xray_reality_target() {
         return 1
     fi
 
-    if ! jq --arg target "$REALITY_TARGET" --argjson server_names "$server_names_json" '
-        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
-        |= (.target = $target | .serverNames = $server_names)
-    ' "$config_file" > "$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
-        rm -f "$tmp_config" "$config_backup"
-        echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
-        return 1
+    if [[ "$tunnel_count" -eq 1 ]]; then
+        if ! jq \
+            --arg target "$tunnel_target" \
+            --arg fallback_address "$fallback_address" \
+            --argjson fallback_port "$fallback_port" \
+            --argjson server_names "$server_names_json" '
+            (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
+            |= (.target = $target | .serverNames = $server_names)
+            | (.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door")) | .settings)
+            |= (.allowedNetwork = "tcp" | .rewriteAddress = $fallback_address | .rewritePort = $fallback_port | .followRedirect = false | .userLevel = 0)
+            | (.routing //= {})
+            | (.routing.rules //= [])
+            | if any(.routing.rules[]?; ((.inboundTag? // []) | index("reality-fallback")) != null)
+              then .
+              else .routing.rules += [{"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "direct"}]
+              end
+        ' "$config_file" > "$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
+            rm -f "$tmp_config" "$config_backup"
+            echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
+            return 1
+        fi
+    else
+        if ! jq \
+            --arg target "$tunnel_target" \
+            --arg fallback_address "$fallback_address" \
+            --argjson fallback_port "$fallback_port" \
+            --argjson tunnel_port "$tunnel_port" \
+            --argjson server_names "$server_names_json" '
+            (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
+            |= (.target = $target | .serverNames = $server_names)
+            | .inbounds += [{
+                "listen": "127.0.0.1",
+                "port": $tunnel_port,
+                "protocol": "tunnel",
+                "settings": {
+                    "allowedNetwork": "tcp",
+                    "rewriteAddress": $fallback_address,
+                    "rewritePort": $fallback_port,
+                    "followRedirect": false,
+                    "userLevel": 0
+                },
+                "tag": "reality-fallback"
+              }]
+            | (.routing //= {})
+            | (.routing.rules //= [])
+            | .routing.rules += [{"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "direct"}]
+        ' "$config_file" > "$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
+            rm -f "$tmp_config" "$config_backup"
+            echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
+            return 1
+        fi
     fi
 
     apply_preserved_file_metadata "$config_file" "$tmp_config"
