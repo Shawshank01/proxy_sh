@@ -140,6 +140,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
 - [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
 - [Xray-examples](https://github.com/XTLS/Xray-examples) — Reference configurations and examples.
+- [DeepWiki](https://deepwiki.com/XTLS/Xray-examples/2.3-vless-%2B-tcp-%2B-reality) - Solution for Traffic Theft Protection.
 - [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
 - [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Rust implementation for Shadowsocks 2022.
 
@@ -147,4 +148,4 @@ Special thanks to them for their excellent work!
 
 ## License
 
-This project is licensed under the GNU General Public License v2.0 only - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU General Public License v2.0 only, see the [LICENSE](LICENSE) file for details.
