@@ -3,9 +3,8 @@
 [![License: GPL v2](https://img.shields.io/badge/License-GPL_v2-blue.svg)](LICENSE)
 
 **No need** to use your own domain name ;-)  
-This is an automated shell script that installs and manages Docker containers on GNU/Linux systems. GNU `date` and `stat` are required. It can be used to construct encrypted and obfuscated traffic proxy servers using Xray (VLESS-XHTTP-REALITY) and Shadowsocks (2022).
-Supports IPv6.  
-For the freedom of the internet!
+This is an automated shell script that installs and manages Docker containers on GNU/Linux systems. It can be used to construct encrypted and obfuscated traffic proxy servers using Xray (VLESS-XHTTP-REALITY) and Shadowsocks (2022).
+> "These walls are funny. First you hate 'em, then you get used to 'em. Enough time passes, you get so you depend on 'em. That's institutionalized."
 
 ## Features
 
@@ -17,7 +16,7 @@ For the freedom of the internet!
 - **Quota Management Menu**: Check/apply quotas, reset user usage, change user limits, and view automatic check scheduler status.
 - **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
 - **IPv6 Support**: Optional dual-stack listening for both Xray and Shadowsocks.
-- **REALITY Fallback Hardening**: Routes failed REALITY handshakes through a loopback-only Xray Tunnel (`dokodemo-door`) with a fixed destination.
+- **REALITY Fallback Hardening**: Routes failed REALITY handshakes through a loopback-only Xray Tunnel (`tunnel/dokodemo-door`) with a fixed destination.
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
 - **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
 - **Container Management**: Easy-to-use menu for updating, changing/downgrading versions, viewing links, or deleting containers and configurations.
@@ -140,11 +139,5 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
 - [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
 - [Xray-examples](https://github.com/XTLS/Xray-examples) — Reference configurations and examples.
-- [DeepWiki](https://deepwiki.com/XTLS/Xray-examples/2.3-vless-%2B-tcp-%2B-reality) - Solution for Traffic Theft Protection.
+- [DeepWiki](https://deepwiki.com/XTLS/Xray-examples/2.3-vless-%2B-tcp-%2B-reality) — Solution for Traffic Theft Protection.
 - [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Rust implementation for Shadowsocks 2022.
-
-Special thanks to them for their excellent work!
-
-## License
-
-This project is licensed under the GNU General Public License v2.0 only, see the [LICENSE](LICENSE) file for details.
