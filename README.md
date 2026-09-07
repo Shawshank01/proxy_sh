@@ -94,11 +94,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
 ## Xray Configuration Details
 
-> [!IMPORTANT]
-> Temporary Compatibility Note (Xray Core):
-> If your client app fails to connect with the latest Xray version, use **Option 4** in the script menu to change/downgrade the Xray container version tag to `26.6.27` until the client application updates.
-
-- The generated `server.jsonc` **blocks all China (CN) IPs and domains** by default using Xray's routing rules.
+- The server uses lightweight direct routing without bundling heavy `geosite`/`geoip` database tables in memory, keeping Xray's idle footprint as low as possible for low-RAM VPS compatibility. To block specific domains/IPs, configure routing/bypass rules directly in your client application.
 - The configuration uses the Reality protocol for obfuscation.
 - Failed REALITY handshakes are sent to `127.0.0.1:10086`, where a loopback-only `tunnel` (`dokodemo-door`) inbound rewrites the connection to the selected target on its configured port.
 - Tunnel routing allows only the configured Reality `serverNames` to use the `direct` outbound, every other fallback SNI is sent to `block`. Continue to choose a direct-origin, non-CDN Reality target. This protects the fallback path, but does not restrict destinations chosen by authenticated VLESS users.

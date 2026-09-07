@@ -19,21 +19,13 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.0.2"
+SCRIPT_VERSION="5.0.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
 DEFAULT_SS_PORT=80
 DEFAULT_QUOTA_TIMEZONE="UTC"
 DEFAULT_USER_LIMIT_GB=300
-XRAY_QUOTA_CRON_MARKER="# proxy-sh:xray-quota-check"
-INITIAL_SCRIPT_SRC="${BASH_SOURCE[0]:-$0}"
-INITIAL_SCRIPT_DIR="$(cd -- "$(dirname -- "$INITIAL_SCRIPT_SRC")" 2>/dev/null && pwd -P)"
-INITIAL_SCRIPT_PATH="${INITIAL_SCRIPT_DIR}/$(basename -- "$INITIAL_SCRIPT_SRC")"
-if command -v realpath >/dev/null 2>&1; then
-    INITIAL_SCRIPT_PATH="$(realpath "$INITIAL_SCRIPT_PATH" 2>/dev/null || echo "$INITIAL_SCRIPT_PATH")"
-fi
-export INITIAL_SCRIPT_DIR INITIAL_SCRIPT_PATH
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -118,6 +110,13 @@ trap 'exit 143' TERM
 trap cleanup_script_tmp_dir EXIT
 
 # --- Generic utilities ---
+
+INITIAL_SCRIPT_SRC="${BASH_SOURCE[0]:-$0}"
+INITIAL_SCRIPT_DIR="$(cd -- "$(dirname -- "$INITIAL_SCRIPT_SRC")" 2>/dev/null && pwd -P)"
+INITIAL_SCRIPT_PATH="${INITIAL_SCRIPT_DIR}/$(basename -- "$INITIAL_SCRIPT_SRC")"
+if command -v realpath >/dev/null 2>&1; then
+    INITIAL_SCRIPT_PATH="$(realpath "$INITIAL_SCRIPT_PATH" 2>/dev/null || echo "$INITIAL_SCRIPT_PATH")"
+fi
 
 generate_uuid() {
     if [[ -r /proc/sys/kernel/random/uuid ]]; then
@@ -1549,21 +1548,6 @@ EOL
                     "type": "field",
                     "inboundTag": ["reality-fallback"],
                     "outboundTag": "block"
-                },
-                {
-                    "type": "field",
-                    "domain": ["geosite:google"],
-                    "outboundTag": "direct"
-                },
-                {
-                    "type": "field",
-                    "domain": ["geosite:cn"],
-                    "outboundTag": "block"
-                },
-                {
-                    "type": "field",
-                    "ip": ["geoip:cn"],
-                    "outboundTag": "block"
                 }
             ]
         },
@@ -1683,7 +1667,7 @@ EOL
         fragment_url=$(url_encode_component "${REMARKS}-${user_email}")
 
         for shortid in "${SERVER_SHORTIDS[@]}"; do
-            link="vless://$uuid@$server_uri_host:443?security=reality&sni=$sni_url&pbk=$public_key_url&sid=$shortid&type=xhttp&path=$xhttp_path_url#${fragment_url}"
+            link="vless://$uuid@$server_uri_host:443?security=reality&sni=$sni_url&fp=chrome&pbk=$public_key_url&sid=$shortid&type=xhttp&path=$xhttp_path_url#${fragment_url}"
             echo "$link"
             echo
             if [[ -n "$LINKS" ]]; then
@@ -3078,6 +3062,8 @@ manage_xray_quotas() {
 
 # --- Scheduler subsystem ---
 
+XRAY_QUOTA_CRON_MARKER="# proxy-sh:xray-quota-check"
+
 systemd_available() {
     command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
 }
@@ -3596,7 +3582,7 @@ add_xray_user() {
                 echo -e "\n${GREEN}New user link(s):${NC}"
                 for shortid in "${server_shortids[@]}"; do
                     local link
-                    link="vless://${uuid}@${server_uri_host}:443?security=reality&sni=${sni_url}&pbk=${public_key_url}&sid=${shortid}&type=xhttp&path=${xhttp_path_url}#${fragment_url}"
+                    link="vless://${uuid}@${server_uri_host}:443?security=reality&sni=${sni_url}&fp=chrome&pbk=${public_key_url}&sid=${shortid}&type=xhttp&path=${xhttp_path_url}#${fragment_url}"
                     echo "$link"
                     echo "" >> xray/vless_links.txt
                     echo "$link" >> xray/vless_links.txt
