@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.0.1"
+SCRIPT_VERSION="5.0.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -27,6 +27,13 @@ DEFAULT_SS_PORT=80
 DEFAULT_QUOTA_TIMEZONE="UTC"
 DEFAULT_USER_LIMIT_GB=300
 XRAY_QUOTA_CRON_MARKER="# proxy-sh:xray-quota-check"
+INITIAL_SCRIPT_SRC="${BASH_SOURCE[0]:-$0}"
+INITIAL_SCRIPT_DIR="$(cd -- "$(dirname -- "$INITIAL_SCRIPT_SRC")" 2>/dev/null && pwd -P)"
+INITIAL_SCRIPT_PATH="${INITIAL_SCRIPT_DIR}/$(basename -- "$INITIAL_SCRIPT_SRC")"
+if command -v realpath >/dev/null 2>&1; then
+    INITIAL_SCRIPT_PATH="$(realpath "$INITIAL_SCRIPT_PATH" 2>/dev/null || echo "$INITIAL_SCRIPT_PATH")"
+fi
+export INITIAL_SCRIPT_DIR INITIAL_SCRIPT_PATH
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -211,15 +218,45 @@ apply_preserved_file_metadata() {
 }
 
 resolve_script_path() {
-    local path="${BASH_SOURCE[0]}"
+    if [[ -n "${INITIAL_SCRIPT_PATH:-}" && -f "$INITIAL_SCRIPT_PATH" ]]; then
+        echo "$INITIAL_SCRIPT_PATH"
+        return 0
+    fi
+    local path="${BASH_SOURCE[0]:-$0}"
     if command -v realpath >/dev/null 2>&1; then
-        path=$(realpath "$path" 2>/dev/null || echo "$path")
-    elif [[ "$path" != /* ]]; then
+        local rpath
+        rpath=$(realpath "$path" 2>/dev/null || true)
+        if [[ -n "$rpath" && -f "$rpath" ]]; then
+            echo "$rpath"
+            return 0
+        fi
+    fi
+    if [[ -f "$path" ]]; then
+        echo "$path"
+        return 0
+    fi
+    if [[ "$path" != /* ]]; then
         local script_dir
-        script_dir=$(cd -- "$(dirname -- "$path")" && pwd -P) || return 1
-        path="${script_dir}/$(basename -- "$path")"
+        script_dir=$(cd -- "$(dirname -- "$path")" 2>/dev/null && pwd -P) || true
+        if [[ -n "$script_dir" && -f "${script_dir}/$(basename -- "$path")" ]]; then
+            echo "${script_dir}/$(basename -- "$path")"
+            return 0
+        fi
+        if [[ -f "../$(basename -- "$path")" ]]; then
+            local parent_dir
+            parent_dir=$(cd .. 2>/dev/null && pwd -P) || true
+            if [[ -n "$parent_dir" && -f "${parent_dir}/$(basename -- "$path")" ]]; then
+                echo "${parent_dir}/$(basename -- "$path")"
+                return 0
+            fi
+        fi
+    fi
+    if [[ -f "$path" ]]; then
+        echo "$path"
+        return 0
     fi
     echo "$path"
+    return 1
 }
 
 # --- System and dependency helpers ---
@@ -1679,10 +1716,21 @@ EOL
 
         if [[ "$has_quota_limits" -eq 1 ]]; then
             echo ""
-            read -p "Enable automatic background quota check timer now? [Y/n]: " enable_auto_sched
-            if [[ -z "$enable_auto_sched" || "$enable_auto_sched" == "y" || "$enable_auto_sched" == "Y" ]]; then
-                configure_xray_quota_auto_check
-            fi
+            while true; do
+                read -p "Enable automatic background quota check timer now? [Y/n]: " enable_auto_sched
+                case "$enable_auto_sched" in
+                    [yY]|"" )
+                        configure_xray_quota_auto_check
+                        break
+                        ;;
+                    [nN] )
+                        break
+                        ;;
+                    * )
+                        echo -e "${RED}Invalid choice. Please enter 'y' or 'n' (or press Enter for default 'y').${NC}"
+                        ;;
+                esac
+            done
         fi
     else
         echo -e "${RED}Container start cancelled.${NC}"
@@ -3111,9 +3159,7 @@ ensure_crontab_available() {
 
 configure_xray_quota_auto_check_cron() {
     local script_path
-    script_path=$(resolve_script_path)
-
-    if [[ ! -f "$script_path" ]]; then
+    if ! script_path=$(resolve_script_path) || [[ ! -f "$script_path" ]]; then
         echo -e "${RED}Cannot determine script path for cron setup.${NC}"
         return 1
     fi
@@ -3122,34 +3168,39 @@ configure_xray_quota_auto_check_cron() {
     script_dir=$(dirname "$script_path")
     cron_file="/etc/cron.d/xray-quota-check"
 
-    echo ""
-    echo "Set automatic quota check interval (cron):"
-    echo "1) Every 1 minute"
-    echo "2) Every 2 minutes"
-    echo "3) Every 5 minutes"
-    echo "4) Disable cron auto quota check"
-    read -p "Enter your choice [1-4]: " auto_choice
+    local auto_choice
+    while true; do
+        echo ""
+        echo "Set automatic quota check interval (cron):"
+        echo "1) Every 1 minute"
+        echo "2) Every 2 minutes"
+        echo "3) Every 5 minutes"
+        echo "4) Disable cron auto quota check"
+        read -p "Enter your choice [1-4]: " auto_choice
 
-    case $auto_choice in
-        1)
-            cron_expr="* * * * *"
-            ;;
-        2)
-            cron_expr="*/2 * * * *"
-            ;;
-        3)
-            cron_expr="*/5 * * * *"
-            ;;
-        4)
-            disable_xray_quota_cron_silent
-            echo -e "${GREEN}Cron automatic quota check disabled.${NC}"
-            return 0
-            ;;
-        *)
-            echo -e "${RED}Invalid choice.${NC}"
-            return 1
-            ;;
-    esac
+        case $auto_choice in
+            1)
+                cron_expr="* * * * *"
+                break
+                ;;
+            2)
+                cron_expr="*/2 * * * *"
+                break
+                ;;
+            3)
+                cron_expr="*/5 * * * *"
+                break
+                ;;
+            4)
+                disable_xray_quota_cron_silent
+                echo -e "${GREEN}Cron automatic quota check disabled.${NC}"
+                return 0
+                ;;
+            *)
+                echo -e "${RED}Invalid choice. Please enter a valid number [1-4].${NC}"
+                ;;
+        esac
+    done
 
     # Prefer system /etc/cron.d/ to run cleanly as root without sudo password prompts
     if [[ -d "/etc/cron.d" ]]; then
@@ -3191,43 +3242,46 @@ configure_xray_quota_auto_check_systemd() {
 
     local script_path script_dir unit_interval escaped_dir
     local quota_runner="/usr/local/lib/proxy-sh/quota-check.sh"
-    script_path=$(resolve_script_path)
-    script_dir=$(dirname "$script_path")
-    printf -v escaped_dir '%q' "$script_dir"
-
-    if [[ ! -f "$script_path" ]]; then
+    if ! script_path=$(resolve_script_path) || [[ ! -f "$script_path" ]]; then
         echo -e "${RED}Cannot determine script path for systemd timer setup.${NC}"
         return 1
     fi
+    script_dir=$(dirname "$script_path")
+    printf -v escaped_dir '%q' "$script_dir"
 
-    echo ""
-    echo "Set automatic quota check interval (systemd timer):"
-    echo "1) Every 1 minute"
-    echo "2) Every 2 minutes"
-    echo "3) Every 5 minutes"
-    echo "4) Disable systemd timer auto quota check"
-    read -p "Enter your choice [1-4]: " auto_choice
+    local auto_choice
+    while true; do
+        echo ""
+        echo "Set automatic quota check interval (systemd timer):"
+        echo "1) Every 1 minute"
+        echo "2) Every 2 minutes"
+        echo "3) Every 5 minutes"
+        echo "4) Disable systemd timer auto quota check"
+        read -p "Enter your choice [1-4]: " auto_choice
 
-    case $auto_choice in
-        1)
-            unit_interval="1min"
-            ;;
-        2)
-            unit_interval="2min"
-            ;;
-        3)
-            unit_interval="5min"
-            ;;
-        4)
-            disable_xray_quota_systemd_silent
-            echo -e "${GREEN}Systemd timer automatic quota check disabled.${NC}"
-            return 0
-            ;;
-        *)
-            echo -e "${RED}Invalid choice.${NC}"
-            return 1
-            ;;
-    esac
+        case $auto_choice in
+            1)
+                unit_interval="1min"
+                break
+                ;;
+            2)
+                unit_interval="2min"
+                break
+                ;;
+            3)
+                unit_interval="5min"
+                break
+                ;;
+            4)
+                disable_xray_quota_systemd_silent
+                echo -e "${GREEN}Systemd timer automatic quota check disabled.${NC}"
+                return 0
+                ;;
+            *)
+                echo -e "${RED}Invalid choice. Please enter a valid number [1-4].${NC}"
+                ;;
+        esac
+    done
 
     # The timer runs as root, so execute a root-owned copy rather than the
     # potentially user-writable interactive script.
@@ -3327,30 +3381,37 @@ change_xray_quota_timezone() {
 
 configure_xray_quota_auto_check() {
     local scheduler_choice
-    echo ""
-    echo "Choose scheduler for automatic quota checks:"
     if systemd_available; then
-        echo "1) Systemd timer (recommended)"
-        echo "2) Cron"
-        echo "3) Disable all automatic quota checks"
-        read -p "Enter your choice [1-3]: " scheduler_choice
+        while true; do
+            echo ""
+            echo "Choose scheduler for automatic quota checks:"
+            echo "1) Systemd timer (recommended)"
+            echo "2) Cron"
+            echo "3) Disable all automatic quota checks"
+            read -p "Enter your choice [1-3]: " scheduler_choice
 
-        case $scheduler_choice in
-            1)
-                configure_xray_quota_auto_check_systemd
-                ;;
-            2)
-                configure_xray_quota_auto_check_cron
-                ;;
-            3)
-                disable_xray_quota_systemd_silent
-                disable_xray_quota_cron_silent
-                echo -e "${GREEN}Disabled all automatic quota checks.${NC}"
-                ;;
-            *)
-                echo -e "${RED}Invalid choice.${NC}"
-                ;;
-        esac
+            case $scheduler_choice in
+                1)
+                    if configure_xray_quota_auto_check_systemd; then
+                        break
+                    fi
+                    ;;
+                2)
+                    if configure_xray_quota_auto_check_cron; then
+                        break
+                    fi
+                    ;;
+                3)
+                    disable_xray_quota_systemd_silent
+                    disable_xray_quota_cron_silent
+                    echo -e "${GREEN}Disabled all automatic quota checks.${NC}"
+                    break
+                    ;;
+                *)
+                    echo -e "${RED}Invalid choice. Please enter a valid number [1-3].${NC}"
+                    ;;
+            esac
+        done
     else
         echo -e "${YELLOW}Systemd not detected. Falling back to cron configuration.${NC}"
         configure_xray_quota_auto_check_cron
