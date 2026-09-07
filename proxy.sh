@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.0.0"
+SCRIPT_VERSION="5.0.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1039,6 +1039,7 @@ is_chinese_domain() {
 prompt_reality_target() {
     local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
     local ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry
+    local extracted_domains ping_host_in_cert ping_lower d d_lower wd base_wd aux_domains inc_aux sni_choice chosen_primary remaining_aux i
 
     while true; do
         read -p "Enter a domain to probe with 'xray tls ping': " REALITY_DOMAIN
@@ -1123,7 +1124,7 @@ prompt_reality_target() {
             REALITY_TARGET="${REALITY_DOMAIN_CLEAN}:443"
         fi
 
-        REALITY_SERVER_NAMES=()
+        local extracted_domains=()
         ALLOWED_DOMAINS=$(echo "$PING_OUTPUT" | sed -nE "s/.*Cert's allowed domains: *\[([^]]*)\].*/\1/p")
         if [[ -n "$ALLOWED_DOMAINS" ]]; then
             DROPPED_WILDCARDS=0
@@ -1137,14 +1138,96 @@ prompt_reality_target() {
                     continue
                 fi
                 SEEN_DOMAINS+=" $domain"
-                REALITY_SERVER_NAMES+=("$domain")
+                extracted_domains+=("$domain")
             done
             if [[ "$DROPPED_WILDCARDS" -eq 1 ]]; then
                 echo -e "${YELLOW}Wildcard domains were omitted from serverNames (not supported).${NC}"
             fi
         fi
 
-        if [[ ${#REALITY_SERVER_NAMES[@]} -eq 0 ]]; then
+        REALITY_SERVER_NAMES=()
+
+        # Check if PING_HOST is covered by the certificate
+        local ping_host_in_cert=0
+        local ping_lower
+        ping_lower=$(echo "$PING_HOST" | tr '[:upper:]' '[:lower:]')
+
+        for d in "${extracted_domains[@]}"; do
+            local d_lower
+            d_lower=$(echo "$d" | tr '[:upper:]' '[:lower:]')
+            if [[ "$d_lower" == "$ping_lower" ]]; then
+                ping_host_in_cert=1
+                break
+            fi
+        done
+
+        if [[ "$ping_host_in_cert" -eq 0 && -n "$ALLOWED_DOMAINS" ]]; then
+            for wd in $ALLOWED_DOMAINS; do
+                if [[ "$wd" == "*."* ]]; then
+                    local base_wd
+                    base_wd=$(echo "${wd#\*.}" | tr '[:upper:]' '[:lower:]')
+                    if [[ "$ping_lower" == *."$base_wd" && "$ping_lower" != *.*."$base_wd" ]]; then
+                        ping_host_in_cert=1
+                        break
+                    fi
+                fi
+            done
+        fi
+
+        if [[ "$ping_host_in_cert" -eq 1 ]]; then
+            # PING_HOST is covered by the certificate: ALWAYS place it first as primary SNI
+            local aux_domains=()
+            for d in "${extracted_domains[@]}"; do
+                local d_lower
+                d_lower=$(echo "$d" | tr '[:upper:]' '[:lower:]')
+                if [[ "$d_lower" != "$ping_lower" ]]; then
+                    aux_domains+=("$d")
+                fi
+            done
+
+            if [[ ${#aux_domains[@]} -gt 0 ]]; then
+                echo -e "\n${YELLOW}Notice: The certificate contains multiple domains:${NC}"
+                echo -e "  Primary target: ${GREEN}$PING_HOST${NC}"
+                echo -e "  Auxiliary:      ${aux_domains[*]}"
+                read -p "Include auxiliary domains in serverNames? (Recommended 'N' to keep only $PING_HOST) [y/N]: " inc_aux
+                if [[ "$inc_aux" == "y" || "$inc_aux" == "Y" ]]; then
+                    REALITY_SERVER_NAMES=("$PING_HOST" "${aux_domains[@]}")
+                else
+                    REALITY_SERVER_NAMES=("$PING_HOST")
+                fi
+            else
+                REALITY_SERVER_NAMES=("$PING_HOST")
+            fi
+        elif [[ ${#extracted_domains[@]} -gt 0 ]]; then
+            echo -e "\n${YELLOW}Notice: '$PING_HOST' was not found in the certificate's domain list:${NC}"
+            for i in "${!extracted_domains[@]}"; do
+                echo "  $((i+1))) ${extracted_domains[$i]}"
+            done
+            read -p "Select primary SNI [1-${#extracted_domains[@]}] (Default: 1): " sni_choice
+            sni_choice=$(echo "$sni_choice" | tr -cd '0-9')
+            local chosen_primary=""
+            if [[ -n "$sni_choice" ]] && (( sni_choice >= 1 && sni_choice <= ${#extracted_domains[@]} )); then
+                chosen_primary="${extracted_domains[$((sni_choice-1))]}"
+            else
+                chosen_primary="${extracted_domains[0]}"
+            fi
+
+            local remaining_aux=()
+            for d in "${extracted_domains[@]}"; do
+                [[ "$d" != "$chosen_primary" ]] && remaining_aux+=("$d")
+            done
+
+            if [[ ${#remaining_aux[@]} -gt 0 ]]; then
+                read -p "Include other auxiliary domains in serverNames? [y/N]: " inc_aux
+                if [[ "$inc_aux" == "y" || "$inc_aux" == "Y" ]]; then
+                    REALITY_SERVER_NAMES=("$chosen_primary" "${remaining_aux[@]}")
+                else
+                    REALITY_SERVER_NAMES=("$chosen_primary")
+                fi
+            else
+                REALITY_SERVER_NAMES=("$chosen_primary")
+            fi
+        else
             read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $PING_HOST]: " SERVER_NAMES_INPUT
             if [[ -n "$SERVER_NAMES_INPUT" ]]; then
                 IFS=',' read -r -a sni_input_arr <<< "$SERVER_NAMES_INPUT"
@@ -1323,147 +1406,15 @@ install_xray() (
     XHTTP_PATH=$(openssl rand -hex 4)
 
     REALITY_TARGET=""
-    REALITY_SERVER_NAMES=""
-
-    while true; do
-        read -p "Enter a domain to probe with 'xray tls ping': " REALITY_DOMAIN
-        if [[ -z "$REALITY_DOMAIN" ]]; then
-            echo -e "${RED}A domain is required. Please enter a domain.${NC}"
-            continue
-        fi
-
-        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN#http://}
-        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN_CLEAN#https://}
-        REALITY_DOMAIN_CLEAN=${REALITY_DOMAIN_CLEAN%%/*}
-        if [[ -z "$REALITY_DOMAIN_CLEAN" ]]; then
-            REALITY_DOMAIN_CLEAN="$REALITY_DOMAIN"
-        fi
-
-        PING_HOST=${REALITY_DOMAIN_CLEAN%%:*}
-
-        # Reject Microsoft domains for Reality target / SNI
-        if is_microsoft_domain "$PING_HOST"; then
-            echo -e "${RED}Error: Microsoft domains (e.g., microsoft.com, azure.com, office.com, bing.com, etc.) are not accepted for Reality SNI. Please enter a different domain.${NC}"
-            continue
-        fi
-
-        # Check for Chinese domains before probing
-        DOMAIN_WARNING=""
-        if is_chinese_domain "$PING_HOST"; then
-            DOMAIN_WARNING="${RED}⚠ WARNING: '$PING_HOST' appears to be a Chinese website/domain. Reality target must be a foreign website outside China!${NC}"
-        fi
-
-        if [[ -n "$DOMAIN_WARNING" ]]; then
-            echo -e "$DOMAIN_WARNING"
-            read -p "Are you sure you want to continue with this domain? [y/N]: " china_confirm
-            if [[ "$china_confirm" != "y" && "$china_confirm" != "Y" ]]; then
-                continue
-            fi
-        fi
-
-        echo "Running xray tls ping for $PING_HOST..."
-        PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" tls ping "$PING_HOST" 2>&1)
-        echo "----- tls ping output -----"
-        echo "$PING_OUTPUT"
-        echo "---------------------------"
-
-        # Validate TLS and HTTP/2 requirements
-        VALIDATION_ERRORS=0
-
-        # Check for TLSv1.3 support
-        if echo "$PING_OUTPUT" | grep -qi "TLS 1.3\|TLSv1.3\|Version:.*303"; then
-            echo -e "${GREEN}✓ TLSv1.3 supported${NC}"
-        else
-            echo -e "${RED}✗ TLSv1.3 NOT detected - Reality requires TLS 1.3${NC}"
-            VALIDATION_ERRORS=1
-        fi
-
-        # Check for HTTP/2 (H2) support using curl
-        CURL_H2_HEADERS=$(curl -I --http2 --max-time 10 -sS "https://${PING_HOST}" 2>&1 || true)
-        if echo "$CURL_H2_HEADERS" | grep -qiE '^HTTP/2'; then
-            echo -e "${GREEN}✓ HTTP/2 (H2) supported (curl)${NC}"
-        else
-            echo -e "${YELLOW}⚠ HTTP/2 (H2) not detected by curl - Reality works best with H2${NC}"
-            if [[ -n "$CURL_H2_HEADERS" ]]; then
-                echo "----- curl --http2 output -----"
-                echo "$CURL_H2_HEADERS"
-                echo "-------------------------------"
-            fi
-        fi
-
-        # Check for connection errors
-        if echo "$PING_OUTPUT" | grep -qi "error\|failed\|timeout\|refused"; then
-            echo -e "${RED}✗ Connection error detected - domain may be unreachable${NC}"
-            VALIDATION_ERRORS=1
-        fi
-
-        if [[ "$VALIDATION_ERRORS" -eq 1 ]]; then
-            echo -e "${YELLOW}This domain may not be suitable as a Reality target.${NC}"
-            read -p "Continue anyway? [y/N]: " force_continue
-            if [[ "$force_continue" != "y" && "$force_continue" != "Y" ]]; then
-                continue
-            fi
-        fi
-
-        read -p "Use this domain and output? [Y/n]: " use_domain
-        if [[ "$use_domain" == "n" || "$use_domain" == "N" ]]; then
-            continue
-        fi
-
-        if [[ "$REALITY_DOMAIN_CLEAN" == *":"* ]]; then
-            REALITY_TARGET="$REALITY_DOMAIN_CLEAN"
-        else
-            REALITY_TARGET="${REALITY_DOMAIN_CLEAN}:443"
-        fi
-
-        REALITY_SERVER_NAMES=()
-        ALLOWED_DOMAINS=$(echo "$PING_OUTPUT" | sed -nE "s/.*Cert's allowed domains: *\\[([^]]*)\\].*/\\1/p")
-        if [[ -n "$ALLOWED_DOMAINS" ]]; then
-            DROPPED_WILDCARDS=0
-            SEEN_DOMAINS=""
-            for domain in $ALLOWED_DOMAINS; do
-                if [[ "$domain" == *"*"* ]]; then
-                    DROPPED_WILDCARDS=1
-                    continue
-                fi
-                if is_microsoft_domain "$domain"; then
-                    continue
-                fi
-                if [[ " $SEEN_DOMAINS " == *" $domain "* ]]; then
-                    continue
-                fi
-                SEEN_DOMAINS+=" $domain"
-                REALITY_SERVER_NAMES+=("$domain")
-            done
-            if [[ "$DROPPED_WILDCARDS" -eq 1 ]]; then
-                echo -e "${YELLOW}Wildcard domains were omitted from serverNames (not supported).${NC}"
-            fi
-        fi
-
-        if [[ ${#REALITY_SERVER_NAMES[@]} -eq 0 ]]; then
-            read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $PING_HOST]: " SERVER_NAMES_INPUT
-            if [[ -n "$SERVER_NAMES_INPUT" ]]; then
-                IFS=',' read -r -a sni_input_arr <<< "$SERVER_NAMES_INPUT"
-                for sni_entry in "${sni_input_arr[@]}"; do
-                    sni_entry=$(echo "$sni_entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                    [[ -z "$sni_entry" || "$sni_entry" == *"*"* ]] && continue
-                    is_microsoft_domain "$sni_entry" && continue
-                    REALITY_SERVER_NAMES+=("$sni_entry")
-                done
-            fi
-            if [[ ${#REALITY_SERVER_NAMES[@]} -eq 0 ]]; then
-                REALITY_SERVER_NAMES+=("$PING_HOST")
-            fi
-        fi
-        break
-    done
+    REALITY_SERVER_NAMES=()
+    prompt_reality_target
 
     # Keep the REALITY fallback target behind a loopback-only Tunnel. This prevents
     # failed REALITY handshakes from directly exposing a configurable egress target.
-    REALITY_FALLBACK_ADDRESS="${REALITY_DOMAIN_CLEAN%%:*}"
+    REALITY_FALLBACK_ADDRESS="${REALITY_TARGET%%:*}"
     REALITY_FALLBACK_PORT=443
-    if [[ "$REALITY_DOMAIN_CLEAN" == *":"* ]]; then
-        REALITY_FALLBACK_PORT="${REALITY_DOMAIN_CLEAN##*:}"
+    if [[ "$REALITY_TARGET" == *":"* ]]; then
+        REALITY_FALLBACK_PORT="${REALITY_TARGET##*:}"
     fi
     if ! [[ "$REALITY_FALLBACK_PORT" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}Reality target port must be between 1 and 65535.${NC}"
