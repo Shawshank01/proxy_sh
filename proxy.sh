@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.0.4"
+SCRIPT_VERSION="5.1.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1463,12 +1463,42 @@ install_xray() (
     fi
     REALITY_TARGET="127.0.0.1:${XRAY_REALITY_FALLBACK_PORT}"
 
-    read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6
-    if [[ "$enable_ipv6" == "y" || "$enable_ipv6" == "Y" ]]; then
-        LISTEN_ADDR="::"
-    else
-        LISTEN_ADDR="0.0.0.0"
-    fi
+    local enable_ipv6
+    while true; do
+        read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6
+        case "$enable_ipv6" in
+            [yY] )
+                LISTEN_ADDR="::"
+                break
+                ;;
+            [nN]|"" )
+                LISTEN_ADDR="0.0.0.0"
+                break
+                ;;
+            * )
+                echo -e "${RED}Invalid choice. Please enter 'y' or 'n' (or press Enter for default 'n').${NC}"
+                ;;
+        esac
+    done
+
+    local enable_china_rules=true
+    local china_rules_choice
+    while true; do
+        read -p "Enable routing rules to block mainland China domains and IPs (geosite:cn, geoip:cn)? [Y/n]: " china_rules_choice
+        case "$china_rules_choice" in
+            [yY]|"" )
+                enable_china_rules=true
+                break
+                ;;
+            [nN] )
+                enable_china_rules=false
+                break
+                ;;
+            * )
+                echo -e "${RED}Invalid choice. Please enter 'y' or 'n' (or press Enter for default 'y').${NC}"
+                ;;
+        esac
+    done
 
     cat > docker-compose.yml << EOL
 services:
@@ -1510,6 +1540,7 @@ EOL
       --argjson clients "$clients_json" \
       --argjson server_names "$server_names_json" \
       --argjson shortids "$shortids_json" \
+      --argjson enable_china_rules "$enable_china_rules" \
       '{
         "stats": {},
         "api": {
@@ -1532,24 +1563,49 @@ EOL
         },
         "routing": {
             "domainStrategy": "AsIs",
-            "rules": [
-                {
-                    "type": "field",
-                    "inboundTag": ["api"],
-                    "outboundTag": "api"
-                },
-                {
-                    "type": "field",
-                    "inboundTag": ["reality-fallback"],
-                    "domain": $server_names,
-                    "outboundTag": "direct"
-                },
-                {
-                    "type": "field",
-                    "inboundTag": ["reality-fallback"],
-                    "outboundTag": "block"
-                }
-            ]
+            "rules": (
+                [
+                    {
+                        "type": "field",
+                        "inboundTag": ["api"],
+                        "outboundTag": "api"
+                    },
+                    {
+                        "type": "field",
+                        "inboundTag": ["reality-fallback"],
+                        "domain": $server_names,
+                        "outboundTag": "direct"
+                    },
+                    {
+                        "type": "field",
+                        "inboundTag": ["reality-fallback"],
+                        "outboundTag": "block"
+                    }
+                ]
+                + (if $enable_china_rules then [
+                    {
+                        "type": "field",
+                        "domain": [
+                            "geosite:google"
+                        ],
+                        "outboundTag": "direct"
+                    },
+                    {
+                        "type": "field",
+                        "domain": [
+                            "geosite:cn"
+                        ],
+                        "outboundTag": "block"
+                    },
+                    {
+                        "type": "field",
+                        "ip": [
+                            "geoip:cn"
+                        ],
+                        "outboundTag": "block"
+                    }
+                ] else [] end)
+            )
         },
         "inbounds": [
             {
@@ -1825,11 +1881,12 @@ change_xray_reality_target() {
             | (.routing //= {})
             | (.routing.rules //= [])
             | (.routing.rules) |= (
-                map(select(((.inboundTag? // []) | index("reality-fallback")) == null))
+                map(select(((.inboundTag? // []) | index("api")) != null))
                 + [
                     {"type": "field", "inboundTag": ["reality-fallback"], "domain": $server_names, "outboundTag": "direct"},
                     {"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "block"}
                   ]
+                + map(select(((.inboundTag? // []) | index("reality-fallback")) == null and ((.inboundTag? // []) | index("api")) == null))
               )
         ' "$config_file" > "$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
             rm -f "$tmp_config" "$config_backup"
@@ -1866,11 +1923,12 @@ change_xray_reality_target() {
             | (.routing //= {})
             | (.routing.rules //= [])
             | (.routing.rules) |= (
-                map(select(((.inboundTag? // []) | index("reality-fallback")) == null))
+                map(select(((.inboundTag? // []) | index("api")) != null))
                 + [
                     {"type": "field", "inboundTag": ["reality-fallback"], "domain": $server_names, "outboundTag": "direct"},
                     {"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "block"}
                   ]
+                + map(select(((.inboundTag? // []) | index("reality-fallback")) == null and ((.inboundTag? // []) | index("api")) == null))
               )
         ' "$config_file" > "$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
             rm -f "$tmp_config" "$config_backup"

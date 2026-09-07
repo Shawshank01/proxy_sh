@@ -36,8 +36,6 @@ This is an automated shell script that installs and manages Docker containers on
     ./proxy.sh
     ```
 
-    The script will request `sudo` permissions only when necessary.
-
 3. **Choose an option from the menu.**
 
 ### Release signing (for Fork)
@@ -94,7 +92,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
 ## Xray Configuration Details
 
-- The server uses lightweight direct routing without bundling heavy `geosite`/`geoip` database tables in memory, keeping Xray's idle footprint as low as possible for low-RAM VPS compatibility. To block specific domains/IPs, configure routing/bypass rules directly in your client application.
+- During installation, you can optionally enable built-in routing rules to block mainland China domains and IPs (`geosite:cn`, `geoip:cn`), or use lightweight direct routing to minimize memory usage on low-RAM VPS instances.
 - The configuration uses the Reality protocol for obfuscation.
 - Failed REALITY handshakes are sent to `127.0.0.1:10086`, where a loopback-only `tunnel` (`dokodemo-door`) inbound rewrites the connection to the selected target on its configured port.
 - Tunnel routing allows only the configured Reality `serverNames` to use the `direct` outbound, every other fallback SNI is sent to `block`. Continue to choose a direct-origin, non-CDN Reality target. This protects the fallback path, but does not restrict destinations chosen by authenticated VLESS users.
