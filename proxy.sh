@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="4.3.0"
+SCRIPT_VERSION="5.0.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -74,7 +74,7 @@ fi
 
 # Global variable for Docker Compose command
 DOCKER_COMPOSE_CMD=()
-XRAY_DOCKER_IMAGE="teddysun/xray:latest"
+XRAY_DOCKER_IMAGE="ghcr.io/xtls/xray-core:latest"
 SS_DOCKER_IMAGE="ghcr.io/shadowsocks/ssserver-rust:latest"
 XRAY_REALITY_FALLBACK_PORT=10086
 RELEASE_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
@@ -674,7 +674,7 @@ update_container() {
 }
 
 update_xray() {
-    update_container "xray_server" "xray" "${XRAY_DOCKER_IMAGE%%:*}" ""
+    update_container "xray_server" "xray" "${XRAY_DOCKER_IMAGE%%:*}" "latest"
 }
 
 update_shadowsocks() {
@@ -1074,7 +1074,7 @@ prompt_reality_target() {
         fi
 
         echo "Running xray tls ping for $PING_HOST..."
-        PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" xray tls ping "$PING_HOST" 2>&1)
+        PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" tls ping "$PING_HOST" 2>&1)
         echo "----- tls ping output -----"
         echo "$PING_OUTPUT"
         echo "---------------------------"
@@ -1196,7 +1196,7 @@ install_xray() (
 
     # Generate keys and IDs
     echo "Generating keys and IDs..."
-    KEYS=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519)
+    KEYS=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" x25519)
     PRIVATE_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /private[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
     PUBLIC_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
 
@@ -1207,7 +1207,7 @@ install_xray() (
     fi
 
     if [[ -z "$PUBLIC_KEY" ]]; then
-        DERIVED=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$PRIVATE_KEY")
+        DERIVED=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" x25519 -i "$PRIVATE_KEY")
         PUBLIC_KEY=$(echo "$DERIVED" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
     fi
 
@@ -1362,7 +1362,7 @@ install_xray() (
         fi
 
         echo "Running xray tls ping for $PING_HOST..."
-        PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" xray tls ping "$PING_HOST" 2>&1)
+        PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" tls ping "$PING_HOST" 2>&1)
         echo "----- tls ping output -----"
         echo "$PING_OUTPUT"
         echo "---------------------------"
@@ -1490,6 +1490,8 @@ services:
     container_name: xray_server
     restart: unless-stopped
     network_mode: host
+    user: "0:0"
+    command: ["run", "-c", "/etc/xray/config.json"]
     volumes:
       - ./server.jsonc:/etc/xray/config.json:ro
     logging:
@@ -3566,7 +3568,7 @@ add_xray_user() {
                 if $SUDO docker ps -q -f name="^/xray_server$" | grep -q .; then
                     derived=$($SUDO docker exec xray_server xray x25519 -i "$private_key")
                 else
-                    derived=$($SUDO docker run --rm --entrypoint /usr/bin/xray "$XRAY_DOCKER_IMAGE" x25519 -i "$private_key")
+                    derived=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" x25519 -i "$private_key")
                 fi
                 public_key=$(echo "$derived" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
             fi
