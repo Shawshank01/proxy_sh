@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.0.3"
+SCRIPT_VERSION="5.0.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1590,11 +1590,11 @@ EOL
             {
                 "listen": "127.0.0.1",
                 "port": $tunnel_port,
-                "protocol": "tunnel",
+                "protocol": "dokodemo-door",
                 "settings": {
-                    "allowedNetwork": "tcp",
-                    "rewriteAddress": $fallback_address,
-                    "rewritePort": $fallback_port,
+                    "network": "tcp",
+                    "address": $fallback_address,
+                    "port": $fallback_port,
                     "followRedirect": false,
                     "userLevel": 0
                 },
@@ -1814,11 +1814,11 @@ change_xray_reality_target() {
             (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
             |= (.target = $target | .serverNames = $server_names)
             | (.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door")))
-            |= (.protocol = "tunnel"
+            |= (.protocol = "dokodemo-door"
                 | .settings = ((.settings // {})
-                    | .allowedNetwork = "tcp"
-                    | .rewriteAddress = $fallback_address
-                    | .rewritePort = $fallback_port
+                    | .network = "tcp"
+                    | .address = $fallback_address
+                    | .port = $fallback_port
                     | .followRedirect = false
                     | .userLevel = 0)
                 | .sniffing = {"enabled": true, "destOverride": ["tls"], "routeOnly": true})
@@ -1848,11 +1848,11 @@ change_xray_reality_target() {
             | .inbounds += [{
                 "listen": "127.0.0.1",
                 "port": $tunnel_port,
-                "protocol": "tunnel",
+                "protocol": "dokodemo-door",
                 "settings": {
-                    "allowedNetwork": "tcp",
-                    "rewriteAddress": $fallback_address,
-                    "rewritePort": $fallback_port,
+                    "network": "tcp",
+                    "address": $fallback_address,
+                    "port": $fallback_port,
                     "followRedirect": false,
                     "userLevel": 0
                 },

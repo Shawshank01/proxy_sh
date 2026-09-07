@@ -16,7 +16,7 @@ This is an automated shell script that installs and manages Docker containers on
 - **Quota Management Menu**: Check/apply quotas, reset user usage, change user limits, and view automatic check scheduler status.
 - **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
 - **IPv6 Support**: Optional dual-stack listening for both Xray and Shadowsocks.
-- **REALITY Fallback Hardening**: Routes failed REALITY handshakes through a loopback-only Xray Tunnel (`tunnel/dokodemo-door`) with a fixed destination.
+- **REALITY Fallback Hardening**: Routes failed REALITY handshakes through a loopback-only Xray Tunnel (`dokodemo-door`) with a fixed destination.
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
 - **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
 - **Container Management**: Easy-to-use menu for updating, changing/downgrading versions, viewing links, or deleting containers and configurations.
