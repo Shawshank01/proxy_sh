@@ -1,5 +1,8 @@
 # proxy_sh
 
+> [!WARNING]
+> This branch is no longer being updated. 4.3.0 is the final version.
+
 [![License: GPL v2](https://img.shields.io/badge/License-GPL_v2-blue.svg)](LICENSE)
 
 **No need** to use your own domain name ;-)  
@@ -28,7 +31,7 @@ For the freedom of the internet!
 1. **Download and execute the script:**
 
     ```bash
-    wget https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh && chmod +x proxy.sh
+    wget https://raw.githubusercontent.com/Shawshank01/proxy_sh/archive/teddysun-xray/proxy.sh && chmod +x proxy.sh
     ```
 
 2. **Run the script:**
@@ -140,7 +143,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 
 - [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
 - [Xray-examples](https://github.com/XTLS/Xray-examples) — Reference configurations and examples.
-- [DeepWiki](https://deepwiki.com/XTLS/Xray-examples/2.3-vless-%2B-tcp-%2B-reality) - Solution for Traffic Theft Protection.
+- [DeepWiki](https://deepwiki.com/XTLS/Xray-examples/2.3-vless-%2B-tcp-%2B-reality) — Solution for Traffic Theft Protection.
 - [teddysun/xray](https://hub.docker.com/r/teddysun/xray) — The Docker image used by this script.
 - [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) — Rust implementation for Shadowsocks 2022.
 
