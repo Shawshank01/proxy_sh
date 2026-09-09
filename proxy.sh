@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.1.0"
+SCRIPT_VERSION="5.1.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -3068,6 +3068,7 @@ change_xray_user_billing_cycle() {
 }
 
 manage_xray_quotas() {
+    sync_xray_quota_systemd_runner || true
     local quota_choice
     while true; do
         echo ""
@@ -3133,12 +3134,9 @@ disable_xray_quota_cron_silent() {
     fi
 
     if command -v crontab >/dev/null 2>&1; then
-        local script_path script_dir cron_cmd current_cron
-        script_path=$(resolve_script_path) || script_path="$0"
-        script_dir=$(dirname "$script_path")
-        cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check"
+        local current_cron
         current_cron=$(crontab -l 2>/dev/null || true)
-        current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -Fv -- "$cron_cmd" || true)
+        current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -v -- "--quota-check" || true)
 
         if [[ -n "$current_cron" ]]; then
             printf "%s\n" "$current_cron" | crontab -
@@ -3157,6 +3155,105 @@ disable_xray_quota_systemd_silent() {
     $SUDO rm -f /etc/systemd/system/xray-quota-check.timer /etc/systemd/system/xray-quota-check.service >/dev/null 2>&1 || true
     $SUDO rm -f /usr/local/lib/proxy-sh/quota-check.sh >/dev/null 2>&1 || true
     $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+sync_xray_quota_systemd_runner() {
+    if ! systemd_available; then
+        return 0
+    fi
+
+    local quota_runner="/usr/local/lib/proxy-sh/quota-check.sh"
+    local service_file="/etc/systemd/system/xray-quota-check.service"
+    local timer_file="/etc/systemd/system/xray-quota-check.timer"
+
+    # Only sync if the systemd runner or units already exist
+    if [[ ! -f "$quota_runner" && ! -f "$service_file" && ! -f "$timer_file" ]]; then
+        return 0
+    fi
+
+    local script_path
+    if ! script_path=$(resolve_script_path) || [[ ! -f "$script_path" ]]; then
+        return 0
+    fi
+
+    # Do not sync onto itself if running as quota_runner
+    if [[ "$script_path" == "$quota_runner" ]]; then
+        return 0
+    fi
+
+    local script_dir
+    script_dir=$(dirname "$script_path")
+    if [[ "$script_dir" == "/usr/local/lib/proxy-sh" ]]; then
+        if [[ -d "xray" ]]; then
+            script_dir="$PWD"
+        else
+            return 0
+        fi
+    fi
+
+    # If script_dir points into xray subdirectory, normalise to parent
+    if [[ "$(basename "$script_dir")" == "xray" && -f "${script_dir}/../proxy.sh" ]]; then
+        script_dir="$(cd "${script_dir}/.." && pwd -P)"
+    fi
+
+    # Ensure quota-check.sh is up-to-date
+    if [[ ! -f "$quota_runner" ]] || ! cmp -s "$script_path" "$quota_runner" 2>/dev/null; then
+        $SUDO install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh >/dev/null 2>&1 || true
+        $SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner" >/dev/null 2>&1 || true
+    fi
+
+    # Repair service and timer files if they exist and are missing key directives
+    if [[ -f "$service_file" && -f "$timer_file" ]]; then
+        local timer_missing_active=0
+        local service_missing_dir_arg=0
+
+        if ! grep -q "^OnActiveSec=" "$timer_file" 2>/dev/null; then
+            timer_missing_active=1
+        fi
+        if ! grep -q -- "--quota-check [^>\"]" "$service_file" 2>/dev/null; then
+            service_missing_dir_arg=1
+        fi
+
+        if [[ "$timer_missing_active" -eq 1 || "$service_missing_dir_arg" -eq 1 ]]; then
+            local unit_interval escaped_dir
+            unit_interval=$(grep "^OnUnitActiveSec=" "$timer_file" 2>/dev/null | cut -d'=' -f2 || true)
+            unit_interval=${unit_interval:-1min}
+            printf -v escaped_dir '%q' "$script_dir"
+
+            $SUDO tee "$service_file" >/dev/null << EOL
+[Unit]
+Description=Xray per-user quota check
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-check $escaped_dir"
+EOL
+
+            $SUDO tee "$timer_file" >/dev/null << EOL
+[Unit]
+Description=Run Xray quota check periodically
+
+[Timer]
+OnBootSec=1min
+OnActiveSec=1s
+OnUnitActiveSec=$unit_interval
+AccuracySec=10s
+Persistent=true
+Unit=xray-quota-check.service
+
+[Install]
+WantedBy=timers.target
+EOL
+
+            $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+            if systemctl is-active xray-quota-check.timer >/dev/null 2>&1 || systemctl is-enabled xray-quota-check.timer >/dev/null 2>&1; then
+                $SUDO systemctl enable --now xray-quota-check.timer >/dev/null 2>&1 || true
+                $SUDO systemctl start xray-quota-check.service >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
 }
 
 ensure_crontab_available() {
@@ -3249,7 +3346,7 @@ configure_xray_quota_auto_check_cron() {
     # Prefer system /etc/cron.d/ to run cleanly as root without sudo password prompts
     if [[ -d "/etc/cron.d" ]]; then
         disable_xray_quota_cron_silent
-        local cron_content="# proxy-sh:xray-quota-check\n${cron_expr} root cd $(printf '%q' "$script_dir") && /bin/bash $(printf '%q' "$script_path") --quota-check >/dev/null 2>&1\n"
+        local cron_content="# proxy-sh:xray-quota-check\n${cron_expr} root cd $(printf '%q' "$script_dir") && /bin/bash $(printf '%q' "$script_path") --quota-check $(printf '%q' "$script_dir") >/dev/null 2>&1\n"
         printf "%b" "$cron_content" | $SUDO tee "$cron_file" > /dev/null
         $SUDO chmod 0644 "$cron_file"
         echo -e "${GREEN}System cron automatic quota check enabled:${NC} ${cron_expr}"
@@ -3262,10 +3359,10 @@ configure_xray_quota_auto_check_cron() {
         return 1
     fi
 
-    cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check"
+    cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check $(printf '%q' "$script_dir")"
     local current_cron
     current_cron=$(crontab -l 2>/dev/null || true)
-    current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -Fv -- "$cron_cmd" || true)
+    current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -v -- "--quota-check" || true)
 
     local new_entry="${cron_expr} ${cron_cmd} >/dev/null 2>&1 ${XRAY_QUOTA_CRON_MARKER}"
     if [[ -n "$current_cron" ]]; then
@@ -3291,6 +3388,14 @@ configure_xray_quota_auto_check_systemd() {
         return 1
     fi
     script_dir=$(dirname "$script_path")
+    if [[ "$script_dir" == "/usr/local/lib/proxy-sh" ]]; then
+        if [[ -d "xray" ]]; then
+            script_dir="$PWD"
+        fi
+    fi
+    if [[ "$(basename "$script_dir")" == "xray" && -f "${script_dir}/../proxy.sh" ]]; then
+        script_dir="$(cd "${script_dir}/.." && pwd -P)"
+    fi
     printf -v escaped_dir '%q' "$script_dir"
 
     local auto_choice
@@ -3340,7 +3445,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-check"
+ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-check $escaped_dir"
 EOL
 
     $SUDO tee /etc/systemd/system/xray-quota-check.timer >/dev/null << EOL
@@ -3349,6 +3454,7 @@ Description=Run Xray quota check periodically
 
 [Timer]
 OnBootSec=1min
+OnActiveSec=1s
 OnUnitActiveSec=$unit_interval
 AccuracySec=10s
 Persistent=true
@@ -3360,6 +3466,7 @@ EOL
 
     $SUDO systemctl daemon-reload
     $SUDO systemctl enable --now xray-quota-check.timer
+    $SUDO systemctl start xray-quota-check.service >/dev/null 2>&1 || true
 
     # Avoid duplicate checks from cron if systemd timer is enabled.
     disable_xray_quota_cron_silent
@@ -3463,6 +3570,7 @@ configure_xray_quota_auto_check() {
 }
 
 show_xray_quota_auto_check_status() {
+    sync_xray_quota_systemd_runner || true
     local systemd_enabled=0
     local systemd_interval=""
     local cron_enabled=0
@@ -3968,6 +4076,8 @@ perform_script_update() {
     fi
     rm -f "$tmp_sha" "$tmp_sig"
 
+    sync_xray_quota_systemd_runner || true
+
     echo -e "${GREEN}Script updated and signature/checksum verified successfully! Restarting...${NC}"
     exec bash "$script_path"
 }
@@ -4166,9 +4276,26 @@ run_main_menu() {
 }
 
 main() {
-    local script_dir
-    script_dir=$(dirname "$(resolve_script_path)")
-    cd "$script_dir" || return 1
+    local target_dir=""
+    case "${1:-}" in
+        --quota-check)
+            if [[ -n "${2:-}" && -d "$2" ]]; then
+                target_dir="$2"
+            elif [[ -d "xray" || -f "xray/user_limits.db" ]]; then
+                target_dir="$PWD"
+            fi
+            ;;
+    esac
+
+    if [[ -n "$target_dir" ]]; then
+        cd "$target_dir" || return 1
+    else
+        local script_dir
+        script_dir=$(dirname "$(resolve_script_path)")
+        if [[ "$script_dir" != "/usr/local/lib/proxy-sh" ]]; then
+            cd "$script_dir" || return 1
+        fi
+    fi
 
     case "${1:-}" in
         --quota-check)
@@ -4183,6 +4310,8 @@ main() {
             return
             ;;
     esac
+
+    sync_xray_quota_systemd_runner || true
 
     check_dependencies
     auto_check_script_update
