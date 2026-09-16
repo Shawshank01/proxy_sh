@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.1.1"
+SCRIPT_VERSION="5.2.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -698,15 +698,30 @@ update_container() {
 		return 0
 	fi
 
+	local old_img_id=""
+	old_img_id=$($SUDO docker inspect -f '{{.Image}}' "$container_name" 2>/dev/null || true)
+
 	echo "Updating ${container_name} to latest image..."
 
-	if (cd "$compose_dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d); then
-		echo -e "${GREEN}${container_name} updated successfully.${NC}"
-		return 0
-	else
+	if ! (cd "$compose_dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull); then
+		echo -e "${RED}Failed to pull latest image for ${container_name}.${NC}"
+		return 1
+	fi
+
+	if ! (cd "$compose_dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d); then
 		echo -e "${RED}Failed to update ${container_name}.${NC}"
 		return 1
 	fi
+
+	local new_img_id=""
+	new_img_id=$($SUDO docker inspect -f '{{.Image}}' "$container_name" 2>/dev/null || true)
+
+	if [[ -n "$old_img_id" && -n "$new_img_id" && "$old_img_id" == "$new_img_id" ]]; then
+		echo -e "${GREEN}${container_name} is already up to date.${NC}"
+	else
+		echo -e "${GREEN}${container_name} updated successfully.${NC}"
+	fi
+	return 0
 }
 
 update_xray() {
