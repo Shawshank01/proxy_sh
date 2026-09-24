@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.2.0"
+SCRIPT_VERSION="5.3.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -36,8 +36,8 @@ require_gnu_linux() {
 		echo -e "${RED}This script supports GNU/Linux only.${NC}" >&2
 		exit 1
 	fi
-	if ! date -d now +%s >/dev/null 2>&1 || ! stat -c %u / >/dev/null 2>&1; then
-		echo -e "${RED}GNU date and GNU stat are required. Please use a GNU/Linux system.${NC}" >&2
+	if ! date -d now +%s >/dev/null 2>&1 || ! stat -c %u / >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+		echo -e "${RED}GNU coreutils (date, stat, timeout) are required. Please use a GNU/Linux system.${NC}" >&2
 		exit 1
 	fi
 }
@@ -1773,7 +1773,7 @@ EOL
 		if [[ "$has_quota_limits" -eq 1 ]]; then
 			echo ""
 			while true; do
-				read -p "Enable automatic background quota check timer now? [Y/n]: " enable_auto_sched
+				read -p "Enable automatic background quota check daemon now? [Y/n]: " enable_auto_sched
 				case "$enable_auto_sched" in
 				[yY] | "")
 					configure_xray_quota_auto_check
@@ -2566,7 +2566,11 @@ collect_xray_user_stats() {
 	fi
 
 	local raw_stats
-	raw_stats=$($SUDO docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
+	if command -v timeout >/dev/null 2>&1; then
+		raw_stats=$(timeout 15s $SUDO docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
+	else
+		raw_stats=$($SUDO docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
+	fi
 
 	if [[ -z "$raw_stats" ]]; then
 		stats_error="empty statsquery output"
@@ -2634,10 +2638,15 @@ collect_xray_user_stats() {
 }
 
 check_and_apply_xray_quotas() {
-	with_xray_quota_lock _check_and_apply_xray_quotas_internal
+	with_xray_quota_lock _check_and_apply_xray_quotas_internal "$@"
 }
 
 _check_and_apply_xray_quotas_internal() {
+	local quiet=0
+	if [[ "${1:-}" == "quiet" || "${1:-}" == "1" ]]; then
+		quiet=1
+	fi
+
 	local db_file="xray/user_limits.db"
 	local conf_file="xray/user_limits.conf"
 
@@ -2660,11 +2669,13 @@ _check_and_apply_xray_quotas_internal() {
 	local xray_stats_last_error="${stats_result##*|}"
 
 	if [[ "${collected_stats_count:-0}" -eq 0 ]]; then
-		echo -e "${YELLOW}Warning: no per-user traffic stats were collected from Xray.${NC}"
-		if [[ -n "${xray_stats_last_error:-}" ]]; then
-			echo -e "${YELLOW}Xray stats response:${NC} ${xray_stats_last_error}"
+		if [[ "$quiet" -ne 1 || -n "${xray_stats_last_error:-}" ]]; then
+			echo -e "${YELLOW}Warning: no per-user traffic stats were collected from Xray.${NC}"
+			if [[ -n "${xray_stats_last_error:-}" ]]; then
+				echo -e "${YELLOW}Xray stats response:${NC} ${xray_stats_last_error}"
+			fi
+			echo -e "${YELLOW}Usage values may remain unchanged until stats become available.${NC}"
 		fi
-		echo -e "${YELLOW}Usage values may remain unchanged until stats become available.${NC}"
 	fi
 
 	declare -A uplink_map
@@ -2757,7 +2768,9 @@ _check_and_apply_xray_quotas_internal() {
 
 	finalize_quota_db_update "$db_lines" "$config_changed"
 
-	echo -e "${GREEN}Quota check complete.${NC}"
+	if [[ "$quiet" -ne 1 ]]; then
+		echo -e "${GREEN}Quota check complete.${NC}"
+	fi
 }
 
 show_xray_quota_status() {
@@ -3094,7 +3107,7 @@ manage_xray_quotas() {
 		echo "3) Reset one user's current cycle usage"
 		echo "4) Change one user's monthly limit"
 		echo "5) Change one user's billing cycle dates"
-		echo "6) Configure automatic quota checks (systemd timer / cron)"
+		echo "6) Configure automatic quota checks (systemd daemon / cron)"
 		echo "7) Show automatic quota check configuration status"
 		echo "8) Change quota billing timezone"
 		echo "0) Back"
@@ -3143,6 +3156,39 @@ systemd_available() {
 	command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
 }
 
+parse_systemd_timespan_sec() {
+	local val="${1:-60}"
+	val=$(echo "$val" | tr -d '[:space:]"')
+
+	if [[ "$val" =~ ^([0-9]+)(min|m)$ ]]; then
+		echo $((${BASH_REMATCH[1]} * 60))
+	elif [[ "$val" =~ ^([0-9]+)h$ ]]; then
+		echo $((${BASH_REMATCH[1]} * 3600))
+	elif [[ "$val" =~ ^([0-9]+)d$ ]]; then
+		echo $((${BASH_REMATCH[1]} * 86400))
+	elif [[ "$val" =~ ^([0-9]+)s?$ ]]; then
+		echo "${BASH_REMATCH[1]}"
+	else
+		echo "60"
+	fi
+}
+
+format_seconds_label() {
+	local sec=${1:-60}
+	if [[ "$sec" -ge 86400 ]] && [[ $((sec % 86400)) -eq 0 ]]; then
+		local days=$((sec / 86400))
+		if [[ "$days" -eq 1 ]]; then echo "1 day"; else echo "$days days"; fi
+	elif [[ "$sec" -ge 3600 ]] && [[ $((sec % 3600)) -eq 0 ]]; then
+		local hrs=$((sec / 3600))
+		if [[ "$hrs" -eq 1 ]]; then echo "1 hour"; else echo "$hrs hours"; fi
+	elif [[ "$sec" -ge 60 ]] && [[ $((sec % 60)) -eq 0 ]]; then
+		local mins=$((sec / 60))
+		if [[ "$mins" -eq 1 ]]; then echo "1 minute"; else echo "$mins minutes"; fi
+	else
+		echo "${sec} seconds"
+	fi
+}
+
 disable_xray_quota_cron_silent() {
 	local cron_file="/etc/cron.d/xray-quota-check"
 	if [[ -f "$cron_file" ]]; then
@@ -3167,6 +3213,7 @@ disable_xray_quota_systemd_silent() {
 		return 0
 	fi
 
+	$SUDO systemctl disable --now xray-quota-check.service >/dev/null 2>&1 || true
 	$SUDO systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
 	$SUDO rm -f /etc/systemd/system/xray-quota-check.timer /etc/systemd/system/xray-quota-check.service >/dev/null 2>&1 || true
 	$SUDO rm -f /usr/local/lib/proxy-sh/quota-check.sh >/dev/null 2>&1 || true
@@ -3212,62 +3259,61 @@ sync_xray_quota_systemd_runner() {
 		script_dir="$(cd "${script_dir}/.." && pwd -P)"
 	fi
 
+	local updated_runner=0
 	# Ensure quota-check.sh is up-to-date
 	if [[ ! -f "$quota_runner" ]] || ! cmp -s "$script_path" "$quota_runner" 2>/dev/null; then
 		$SUDO install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh >/dev/null 2>&1 || true
-		$SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner" >/dev/null 2>&1 || true
+		if $SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner" >/dev/null 2>&1; then
+			updated_runner=1
+		fi
 	fi
 
-	# Repair service and timer files if they exist and are missing key directives
-	if [[ -f "$service_file" && -f "$timer_file" ]]; then
-		local timer_missing_active=0
-		local service_missing_dir_arg=0
+	# Detect legacy timer migration or outdated service file
+	local needs_service_update=0
+	local interval_sec="60"
 
-		if ! grep -q "^OnActiveSec=" "$timer_file" 2>/dev/null; then
-			timer_missing_active=1
+	# If legacy timer exists, migrate from timer to continuous daemon
+	if [[ -f "$timer_file" ]]; then
+		local old_interval
+		old_interval=$(grep "^OnUnitActiveSec=" "$timer_file" 2>/dev/null | cut -d'=' -f2 || true)
+		interval_sec=$(parse_systemd_timespan_sec "$old_interval")
+
+		$SUDO systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
+		$SUDO rm -f "$timer_file" >/dev/null 2>&1 || true
+		needs_service_update=1
+	elif [[ -f "$service_file" ]]; then
+		if grep -q "Type=oneshot" "$service_file" 2>/dev/null || ! grep -q -- "--quota-daemon" "$service_file" 2>/dev/null; then
+			needs_service_update=1
 		fi
-		if ! grep -q -- "--quota-check [^>\"]" "$service_file" 2>/dev/null; then
-			service_missing_dir_arg=1
-		fi
+	fi
 
-		if [[ "$timer_missing_active" -eq 1 || "$service_missing_dir_arg" -eq 1 ]]; then
-			local unit_interval escaped_dir
-			unit_interval=$(grep "^OnUnitActiveSec=" "$timer_file" 2>/dev/null | cut -d'=' -f2 || true)
-			unit_interval=${unit_interval:-1min}
-			printf -v escaped_dir '%q' "$script_dir"
+	if [[ "$needs_service_update" -eq 1 && (-f "$service_file" || -f "$quota_runner") ]]; then
+		local escaped_dir
+		printf -v escaped_dir '%q' "$script_dir"
 
-			$SUDO tee "$service_file" >/dev/null <<EOL
+		$SUDO tee "$service_file" >/dev/null <<EOL
 [Unit]
-Description=Xray per-user quota check
+Description=Xray per-user quota check daemon
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-check $escaped_dir"
-EOL
-
-			$SUDO tee "$timer_file" >/dev/null <<EOL
-[Unit]
-Description=Run Xray quota check periodically
-
-[Timer]
-OnBootSec=1min
-OnActiveSec=1s
-OnUnitActiveSec=$unit_interval
-AccuracySec=10s
-Persistent=true
-Unit=xray-quota-check.service
+Type=simple
+ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-daemon $interval_sec $escaped_dir"
+Restart=always
+RestartSec=5s
+TimeoutStopSec=10s
 
 [Install]
-WantedBy=timers.target
+WantedBy=multi-user.target
 EOL
 
-			$SUDO systemctl daemon-reload >/dev/null 2>&1 || true
-			if systemctl is-active xray-quota-check.timer >/dev/null 2>&1 || systemctl is-enabled xray-quota-check.timer >/dev/null 2>&1; then
-				$SUDO systemctl enable --now xray-quota-check.timer >/dev/null 2>&1 || true
-				$SUDO systemctl start xray-quota-check.service >/dev/null 2>&1 || true
-			fi
+		$SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+		$SUDO systemctl enable --now xray-quota-check.service >/dev/null 2>&1 || true
+		$SUDO systemctl restart xray-quota-check.service >/dev/null 2>&1 || true
+	elif [[ "$updated_runner" -eq 1 ]]; then
+		if systemctl is-active xray-quota-check.service >/dev/null 2>&1 || systemctl is-enabled xray-quota-check.service >/dev/null 2>&1; then
+			$SUDO systemctl restart xray-quota-check.service >/dev/null 2>&1 || true
 		fi
 	fi
 }
@@ -3391,16 +3437,48 @@ configure_xray_quota_auto_check_cron() {
 	echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
 }
 
+run_xray_quota_daemon() {
+	local interval="${1:-60}"
+	if ! [[ "$interval" =~ ^[0-9]+$ ]] || [[ "$interval" -le 0 ]]; then
+		interval=60
+	fi
+
+	local script_path
+	script_path=$(resolve_script_path) || script_path="${BASH_SOURCE[0]:-$0}"
+	local initial_mtime
+	initial_mtime=$(stat -c %Y "$script_path" 2>/dev/null || true)
+
+	local running=1
+	trap 'running=0; exit 0' SIGTERM SIGINT
+
+	echo "Xray quota daemon started (check interval: ${interval}s)."
+
+	while [[ "$running" -eq 1 ]]; do
+		# Self-detection: reload if the script file on disk has been updated
+		local current_mtime
+		current_mtime=$(stat -c %Y "$script_path" 2>/dev/null || true)
+		if [[ -n "$initial_mtime" && -n "$current_mtime" && "$current_mtime" != "$initial_mtime" ]]; then
+			echo "Script update detected on disk (${script_path}). Reloading quota daemon..."
+			exec /bin/bash "$script_path" --quota-daemon "$interval" "$PWD"
+		fi
+
+		check_and_apply_xray_quotas quiet || true
+
+		sleep "$interval" &
+		wait $! 2>/dev/null || true
+	done
+}
+
 configure_xray_quota_auto_check_systemd() {
 	if ! systemd_available; then
 		echo -e "${RED}Systemd is not available on this host.${NC}"
 		return 1
 	fi
 
-	local script_path script_dir unit_interval escaped_dir
+	local script_path script_dir unit_interval_sec unit_interval_label escaped_dir
 	local quota_runner="/usr/local/lib/proxy-sh/quota-check.sh"
 	if ! script_path=$(resolve_script_path) || [[ ! -f "$script_path" ]]; then
-		echo -e "${RED}Cannot determine script path for systemd timer setup.${NC}"
+		echo -e "${RED}Cannot determine script path for systemd daemon setup.${NC}"
 		return 1
 	fi
 	script_dir=$(dirname "$script_path")
@@ -3417,29 +3495,32 @@ configure_xray_quota_auto_check_systemd() {
 	local auto_choice
 	while true; do
 		echo ""
-		echo "Set automatic quota check interval (systemd timer):"
+		echo "Set automatic quota check interval (systemd daemon):"
 		echo "1) Every 1 minute"
 		echo "2) Every 2 minutes"
 		echo "3) Every 5 minutes"
-		echo "4) Disable systemd timer auto quota check"
+		echo "4) Disable systemd daemon auto quota check"
 		read -p "Enter your choice [1-4]: " auto_choice
 
 		case $auto_choice in
 		1)
-			unit_interval="1min"
+			unit_interval_sec="60"
+			unit_interval_label="1 minute"
 			break
 			;;
 		2)
-			unit_interval="2min"
+			unit_interval_sec="120"
+			unit_interval_label="2 minutes"
 			break
 			;;
 		3)
-			unit_interval="5min"
+			unit_interval_sec="300"
+			unit_interval_label="5 minutes"
 			break
 			;;
 		4)
 			disable_xray_quota_systemd_silent
-			echo -e "${GREEN}Systemd timer automatic quota check disabled.${NC}"
+			echo -e "${GREEN}Systemd daemon automatic quota check disabled.${NC}"
 			return 0
 			;;
 		*)
@@ -3448,47 +3529,41 @@ configure_xray_quota_auto_check_systemd() {
 		esac
 	done
 
-	# The timer runs as root, so execute a root-owned copy rather than the
+	# Remove legacy timer if present
+	$SUDO systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
+	$SUDO rm -f /etc/systemd/system/xray-quota-check.timer >/dev/null 2>&1 || true
+
+	# The service runs as root, so execute a root-owned copy rather than the
 	# potentially user-writable interactive script.
 	$SUDO install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh
 	$SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner"
 
 	$SUDO tee /etc/systemd/system/xray-quota-check.service >/dev/null <<EOL
 [Unit]
-Description=Xray per-user quota check
+Description=Xray per-user quota check daemon
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-check $escaped_dir"
-EOL
-
-	$SUDO tee /etc/systemd/system/xray-quota-check.timer >/dev/null <<EOL
-[Unit]
-Description=Run Xray quota check periodically
-
-[Timer]
-OnBootSec=1min
-OnActiveSec=1s
-OnUnitActiveSec=$unit_interval
-AccuracySec=10s
-Persistent=true
-Unit=xray-quota-check.service
+Type=simple
+ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-daemon $unit_interval_sec $escaped_dir"
+Restart=always
+RestartSec=5s
+TimeoutStopSec=10s
 
 [Install]
-WantedBy=timers.target
+WantedBy=multi-user.target
 EOL
 
 	$SUDO systemctl daemon-reload
-	$SUDO systemctl enable --now xray-quota-check.timer
-	$SUDO systemctl start xray-quota-check.service >/dev/null 2>&1 || true
+	$SUDO systemctl enable --now xray-quota-check.service
+	$SUDO systemctl restart xray-quota-check.service >/dev/null 2>&1 || true
 
-	# Avoid duplicate checks from cron if systemd timer is enabled.
+	# Avoid duplicate checks from cron if systemd daemon is enabled.
 	disable_xray_quota_cron_silent
 
-	echo -e "${GREEN}Systemd timer automatic quota check enabled:${NC} every $unit_interval"
-	echo -e "${YELLOW}Check status: sudo systemctl status xray-quota-check.timer${NC}"
+	echo -e "${GREEN}Systemd daemon automatic quota check enabled:${NC} every $unit_interval_label"
+	echo -e "${YELLOW}Check status: sudo systemctl status xray-quota-check.service${NC}"
 	echo -e "${YELLOW}Logs: sudo journalctl -u xray-quota-check.service -n 50 --no-pager${NC}"
 }
 
@@ -3552,7 +3627,7 @@ configure_xray_quota_auto_check() {
 		while true; do
 			echo ""
 			echo "Choose scheduler for automatic quota checks:"
-			echo "1) Systemd timer (recommended)"
+			echo "1) Systemd daemon (recommended)"
 			echo "2) Cron"
 			echo "3) Disable all automatic quota checks"
 			read -p "Enter your choice [1-3]: " scheduler_choice
@@ -3592,12 +3667,23 @@ show_xray_quota_auto_check_status() {
 	local cron_enabled=0
 	local cron_schedule=""
 
-	# Check systemd timer
+	# Check systemd daemon service
 	if systemd_available; then
-		if [[ -f "/etc/systemd/system/xray-quota-check.timer" ]]; then
-			if systemctl is-active xray-quota-check.timer >/dev/null 2>&1 || systemctl is-enabled xray-quota-check.timer >/dev/null 2>&1; then
+		if [[ -f "/etc/systemd/system/xray-quota-check.service" ]]; then
+			if systemctl is-active xray-quota-check.service >/dev/null 2>&1 || systemctl is-enabled xray-quota-check.service >/dev/null 2>&1; then
 				systemd_enabled=1
-				systemd_interval=$(grep "^OnUnitActiveSec=" "/etc/systemd/system/xray-quota-check.timer" | cut -d'=' -f2 || true)
+				local exec_start
+				exec_start=$(grep "^ExecStart=" "/etc/systemd/system/xray-quota-check.service" 2>/dev/null || true)
+				if [[ "$exec_start" =~ --quota-daemon[[:space:]]+([0-9]+) ]]; then
+					local sec="${BASH_REMATCH[1]}"
+					systemd_interval=$(format_seconds_label "$sec")
+				elif [[ -f "/etc/systemd/system/xray-quota-check.timer" ]]; then
+					local old_timer_interval
+					old_timer_interval=$(grep "^OnUnitActiveSec=" "/etc/systemd/system/xray-quota-check.timer" | cut -d'=' -f2 || true)
+					local parsed_sec
+					parsed_sec=$(parse_systemd_timespan_sec "$old_timer_interval")
+					systemd_interval=$(format_seconds_label "$parsed_sec")
+				fi
 			fi
 		fi
 	fi
@@ -3623,13 +3709,8 @@ show_xray_quota_auto_check_status() {
 	echo -e "${YELLOW}--- Automatic Quota Check Configuration Status ---${NC}"
 	if [[ "$systemd_enabled" -eq 1 ]]; then
 		echo -e "${GREEN}Status:${NC} Enabled"
-		echo -e "${GREEN}Method:${NC} Systemd Timer"
-		case "$systemd_interval" in
-		"1min") echo -e "${GREEN}Time Period:${NC} Every 1 minute" ;;
-		"2min") echo -e "${GREEN}Time Period:${NC} Every 2 minutes" ;;
-		"5min") echo -e "${GREEN}Time Period:${NC} Every 5 minutes" ;;
-		*) echo -e "${GREEN}Time Period:${NC} ${systemd_interval:-Unknown}" ;;
-		esac
+		echo -e "${GREEN}Method:${NC} Systemd Daemon Service"
+		echo -e "${GREEN}Time Period:${NC} Every ${systemd_interval:-1 minute}"
 	elif [[ "$cron_enabled" -eq 1 ]]; then
 		echo -e "${GREEN}Status:${NC} Enabled"
 		echo -e "${GREEN}Method:${NC} Cron Job"
@@ -4293,11 +4374,25 @@ run_main_menu() {
 
 main() {
 	local target_dir=""
+	local daemon_interval="60"
 	case "${1:-}" in
 	--quota-check)
 		if [[ -n "${2:-}" && -d "$2" ]]; then
 			target_dir="$2"
 		elif [[ -d "xray" || -f "xray/user_limits.db" ]]; then
+			target_dir="$PWD"
+		fi
+		;;
+	--quota-daemon)
+		if [[ -n "${2:-}" && "${2:-}" =~ ^[0-9]+$ ]]; then
+			daemon_interval="$2"
+			if [[ -n "${3:-}" && -d "$3" ]]; then
+				target_dir="$3"
+			fi
+		elif [[ -n "${2:-}" && -d "$2" ]]; then
+			target_dir="$2"
+		fi
+		if [[ -z "$target_dir" && (-d "xray" || -f "xray/user_limits.db") ]]; then
 			target_dir="$PWD"
 		fi
 		;;
@@ -4319,6 +4414,13 @@ main() {
 			return 1
 		fi
 		check_and_apply_xray_quotas
+		return
+		;;
+	--quota-daemon)
+		if ! ensure_docker_compose; then
+			return 1
+		fi
+		run_xray_quota_daemon "$daemon_interval"
 		return
 		;;
 	--quota-check-status)

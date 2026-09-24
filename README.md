@@ -70,7 +70,7 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
   - Reset one user's current-cycle usage
   - Change one user's monthly limit
   - Change one user's billing cycle dates
-  - Configure automatic quota checks via systemd timer (recommended for mainstream distributions) or cron fallback (1/2/5-minute intervals)
+  - Configure automatic quota checks via systemd daemon (recommended for mainstream distributions, auto-restarts on script update) or cron fallback (1/2/5-minute intervals)
   - Show automatic quota check configuration status (method and interval/schedule)
   - Change quota billing timezone
 - **11) Manage users (Add/Remove for Xray / Shadowsocks)**:
@@ -100,7 +100,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
   - `xray/user_limits.conf` (timezone)
   - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
 - Billing cycle is per-user **anniversary monthly** (from account creation timestamp to next month same local time, clamped to month-end when needed).
-- Quota checks run when you execute menu option `9 -> 2` (recommended to automate with a systemd timer on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `9 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
+- Quota checks run when you execute menu option `10 -> 2` (recommended to automate with a systemd daemon on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `10 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
 - All configuration files are created in a new `xray` directory relative to the script's location.
 
 >[!CAUTION]
