@@ -2487,7 +2487,7 @@ sync_xray_clients_from_quota_db() {
 		return 1
 	fi
 
-	if ! jq -e empty "$tmp_file" >/dev/null 2>&1; then
+	if ! jq empty "$tmp_file" >/dev/null 2>&1; then
 		echo -e "${RED}Generated Xray config failed JSON validation. No changes were made.${NC}" >&2
 		rm -f "$tmp_file"
 		return 1
