@@ -17,6 +17,7 @@ This is an automated shell script that installs and manages Docker containers on
 - **Shadowsocks (2022) Install**: Deploys ssserver-rust (2022-blake3-chacha20-poly1305) with multi-user support.
 - **IPv6 Support**: Optional dual-stack listening for both Xray and Shadowsocks.
 - **REALITY Fallback Hardening**: Routes failed REALITY handshakes through a loopback-only Xray Tunnel (`dokodemo-door`) with a fixed destination.
+- **Outbound Safety & `finalRules`**: Complies with Xray's `FinalRuleObject` on the Freedom outbound, blocking SMTP port 25 to prevent abuse, enforcing socket-level IP blocks, and guaranteeing safe fallback and API tunnel access.
 - **Secure Key Generation**: Automatically generates a private/public key pair (`x25519`) and UUIDs for the configuration.
 - **VLESS Link Generation**: Creates and saves shareable VLESS links based on your server settings.
 - **Container Management**: Easy-to-use menu for updating, changing/downgrading versions, viewing links, or deleting containers and configurations.
@@ -58,7 +59,7 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
   - Ask for the number of users and the listening port.
   - Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
   - Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
-- **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest.
+- **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest, and Xray configuration files (`server.jsonc`) are automatically migrated for modern core compatibility (`finalRules`, `minClientVer`).
 - **5) Change Xray Reality target domain**: Re-runs the strict Reality target validation, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. On legacy configs, this also adds the loopback Tunnel. Failed restarts automatically roll back the previous configuration.
 - **6) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
 - **7) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
@@ -93,6 +94,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 ## Xray Configuration Details
 
 - During installation, you can optionally enable built-in routing rules to block mainland China domains and IPs (`geosite:cn`, `geoip:cn`), or use lightweight direct routing to minimize memory usage on low-RAM VPS instances.
+- **Freedom Outbound & `finalRules`**: Configured in compliance with Xray's `FinalRuleObject` specification. The `direct` outbound blocks port 25 (SMTP) to protect VPS IP reputation, applies `geoip:cn` at the socket egress layer when China rules are active, and includes an explicit `allow` fallback to prevent Xray's default safe policy from blocking legitimate proxy connections or loopback tunnels.
 - The configuration uses the Reality protocol for obfuscation.
 - Failed REALITY handshakes are sent to `127.0.0.1:10086`, where a loopback-only `tunnel` (`dokodemo-door`) inbound rewrites the connection to the selected target on its configured port.
 - Tunnel routing allows only the configured Reality `serverNames` to use the `direct` outbound, every other fallback SNI is sent to `block`. Continue to choose a direct-origin, non-CDN Reality target. This protects the fallback path, but does not restrict destinations chosen by authenticated VLESS users.
