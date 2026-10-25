@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.3.1"
+SCRIPT_VERSION="5.4.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -724,7 +724,44 @@ update_container() {
 	return 0
 }
 
+migrate_xray_config_for_finalrules() {
+	local config_file="xray/server.jsonc"
+	if [[ ! -f "$config_file" ]] || ! command -v jq >/dev/null 2>&1; then
+		return 0
+	fi
+
+	local tmp_config
+	make_temp_file tmp_config
+
+	if jq '
+        ((.routing.rules // []) | any(.ip? // [] | index("geoip:cn"))) as $has_china_rules |
+        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings) |= (.minClientVer //= "") |
+        (.outbounds[] | select(.tag == "direct" and .protocol == "freedom")) |= (
+            .settings //= {} |
+            .settings.domainStrategy //= "AsIs" |
+            if .settings.finalRules == null then
+                .settings.finalRules = (
+                    (if $has_china_rules then [{"action": "block", "ip": ["geoip:cn"]}] else [] end)
+                    + [{"action": "block", "network": "tcp", "port": "25"}, {"action": "allow"}]
+                )
+            else . end
+        ) |
+        (.outbounds[] | select(.tag == "api" and .protocol == "freedom")) |= (
+            .settings //= {} |
+            if .settings.finalRules == null then
+                .settings.finalRules = [{"action": "allow"}]
+            else . end
+        )
+    ' "$config_file" >"$tmp_config" && jq -e . "$tmp_config" >/dev/null 2>&1; then
+		apply_preserved_file_metadata "$config_file" "$tmp_config"
+		mv "$tmp_config" "$config_file"
+	else
+		rm -f "$tmp_config"
+	fi
+}
+
 update_xray() {
+	migrate_xray_config_for_finalrules || true
 	update_container "xray_server" "xray" "${XRAY_DOCKER_IMAGE%%:*}" "latest"
 }
 
@@ -815,6 +852,10 @@ change_container_version() {
 	fi
 	apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
 	mv "$tmp_file" "$dir/docker-compose.yml"
+
+	if [[ "$dir" == "xray" ]]; then
+		migrate_xray_config_for_finalrules || true
+	fi
 
 	echo "Pulling new image version..."
 	if (cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d); then
@@ -1642,6 +1683,7 @@ EOL
                         "target": $target,
                         "serverNames": $server_names,
                         "privateKey": $private_key,
+                        "minClientVer": "",
                         "shortIds": $shortids
                     }
                 },
@@ -1681,11 +1723,41 @@ EOL
         "outbounds": [
             {
                 "protocol": "freedom",
-                "tag": "direct"
+                "tag": "direct",
+                "settings": {
+                    "domainStrategy": "AsIs",
+                    "finalRules": (
+                        (if $enable_china_rules then [
+                            {
+                                "action": "block",
+                                "ip": [
+                                    "geoip:cn"
+                                ]
+                            }
+                        ] else [] end)
+                        + [
+                            {
+                                "action": "block",
+                                "network": "tcp",
+                                "port": "25"
+                            },
+                            {
+                                "action": "allow"
+                            }
+                        ]
+                    )
+                }
             },
             {
                 "protocol": "freedom",
-                "tag": "api"
+                "tag": "api",
+                "settings": {
+                    "finalRules": [
+                        {
+                            "action": "allow"
+                        }
+                    ]
+                }
             },
             {
                 "protocol": "blackhole",
