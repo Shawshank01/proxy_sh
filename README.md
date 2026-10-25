@@ -131,6 +131,85 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 > [!TIP]
 > Remember to open **443 (TCP & UDP)** for Xray and the configured Shadowsocks listening port (TCP & UDP) in your server's firewall.
 
+## Troubleshooting
+
+### 1. Checking Container Logs
+
+If you cannot establish a proxy connection or services fail to start, check the Docker container logs:
+
+- **View recent Xray logs:**
+
+  ```bash
+  sudo docker logs --tail 100 xray_server
+  ```
+
+- **Follow live Xray logs in real-time:**
+
+  ```bash
+  sudo docker logs -f xray_server
+  ```
+  
+- **View Shadowsocks logs:**
+
+  ```bash
+  sudo docker logs --tail 100 ssserver
+  ```
+
+  ```bash
+  sudo docker logs -f ssserver
+  ```
+
+- **View logs via Docker Compose:**
+
+  ```bash
+  cd xray && sudo docker compose logs -f
+  ```
+  
+  ```bash
+  cd shadowsocks && sudo docker compose logs -f
+  ```
+
+### 2. Checking Automatic Quota Check Logs
+
+If per-user quota checking is automated via systemd, inspect the daemon logs:
+
+- **View recent quota check logs:**
+
+  ```bash
+  sudo journalctl -u xray-quota-check.service -n 50 --no-pager
+  ```
+
+- **Follow live quota check daemon logs:**
+
+  ```bash
+  sudo journalctl -u xray-quota-check.service -f
+  ```
+
+### 3. Validating Xray Configuration
+
+Test `xray/server.jsonc` syntax and schema compatibility without stopping your running container:
+
+```bash
+sudo docker run --rm -v $(pwd)/xray/server.jsonc:/etc/xray/config.json ghcr.io/xtls/xray-core:latest run -test -c /etc/xray/config.json
+```
+
+### 4. Checking Port & Listening Status
+
+Verify that Xray (port 443) or Shadowsocks ports are actively listening on host interfaces:
+
+```bash
+sudo ss -tulpn | grep -E ':(443|80)\b'
+```
+
+### 5. Rolling Back / Changing Core Version
+
+If a newly released upstream Xray version introduces regressions or protocol handshake issues, you can pin or downgrade to a proven stable version (such as `26.7.28`):
+
+1. Run `./proxy.sh`.
+2. Select **`4) Update / Change version of existing container`**.
+3. Select **`2) Downgrade / Change container version`**.
+4. Choose **`1) Xray`** and input the target version tag (e.g., `26.7.28`).
+
 ## Credits
 
 - [Xray](https://github.com/XTLS/Xray-core) — The core proxy software.
