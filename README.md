@@ -103,6 +103,9 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
   - `xray/user_limits.conf` (timezone)
   - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
 - A user's monthly cycle can begin at account creation or on a configured calendar day. The billing date is clamped to the last day of shorter months.
+- Usage is checkpointed before Xray restarts managed by this script. Each counter sample records the container and its start time, so a restart starts a fresh counter baseline. Traffic the old process never reported before an unexpected stop cannot be recovered.
+- The quota daemon wakes at the next billing cutoff if it falls before the regular poll. Cron checks use their configured cadence. If a counter sample spans a cutoff, its unsplittable delta is counted in the closing cycle, which appears in the quota status.
+- Quota timezones use installed IANA timezone names or whole-hour UTC offsets. If a billing time falls in a daylight-saving gap, it shifts forward by the size of the gap. If the time occurs twice, the first occurrence is used.
 - Quota checks run when you execute menu option `10 -> 2` (recommended to automate with a systemd daemon on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `10 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
 - All configuration files are created in a new `xray` directory relative to the script's location.
 

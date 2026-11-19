@@ -987,6 +987,7 @@ apply_xray_image_change() (
 		return 0
 	fi
 
+	(cd .. && checkpoint_xray_quota_usage)
 	rollback_needed=1
 	if [[ "$compose_changed" -eq 1 ]]; then
 		mv -f "$work_dir/next-compose.yml" docker-compose.yml || return 1
@@ -1726,7 +1727,7 @@ install_xray() (
 				echo -e "${YELLOW}Invalid day. Using day 1.${NC}"
 				clean_day=1
 			fi
-			default_anchor_epoch=$(TZ="$QUOTA_TIMEZONE" date -d "2000-01-$(printf "%02d" "$clean_day") 00:00:00" +%s)
+			default_anchor_epoch=$(quota_wall_time_epoch "2000-01-$(printf "%02d" "$clean_day") 00:00:00" "$QUOTA_TIMEZONE") || return 1
 		fi
 	fi
 
@@ -2280,6 +2281,7 @@ apply_xray_reality_target() {
 		return 1
 	fi
 
+	checkpoint_xray_quota_usage
 	echo "Restarting Xray with the new Reality target..."
 	if ! reload_xray_container || { [[ -n "$tmp_links" ]] && ! mv "$tmp_links" "$links_file"; }; then
 		rm -f "$tmp_links"
@@ -2466,10 +2468,50 @@ days_in_month() {
 	esac
 }
 
+quota_wall_time_epoch() {
+	local wall_time=$1 timezone=$2 wall_epoch probe offset seconds candidate actual
+	local first_match="" shifted_epoch="" shifted_time=""
+	local -A offsets_seen=()
+	wall_epoch=$(TZ=UTC0 date -d "$wall_time" +%s) || return 1
+
+	# Try the offsets on either side of a possible transition. Two matches
+	# indicate a repeated time. A gap has no match, so use the forward shift.
+	for probe in "$((wall_epoch - 86400))" "$wall_epoch" "$((wall_epoch + 86400))"; do
+		offset=$(TZ="$timezone" date -d "@$probe" +%::z) || return 1
+		[[ -n "$offset" ]] || return 1
+		if [[ -n "${offsets_seen[$offset]+set}" ]]; then
+			continue
+		fi
+		offsets_seen["$offset"]=1
+		seconds=$((10#${offset:1:2} * 3600 + 10#${offset:4:2} * 60 + 10#${offset:7:2}))
+		if [[ "$offset" == -* ]]; then
+			seconds=$((-seconds))
+		fi
+		candidate=$((wall_epoch - seconds))
+		actual=$(TZ="$timezone" date -d "@$candidate" +'%F %T') || return 1
+		if [[ "$actual" == "$wall_time" ]]; then
+			if [[ -z "$first_match" || "$candidate" -lt "$first_match" ]]; then
+				first_match=$candidate
+			fi
+		elif [[ "$actual" > "$wall_time" && (-z "$shifted_time" || "$actual" < "$shifted_time") ]]; then
+			shifted_time=$actual
+			shifted_epoch=$candidate
+		fi
+	done
+
+	local result=${first_match:-$shifted_epoch}
+	[[ -n "$result" ]] || return 1
+	printf '%s\n' "$result"
+}
+
 add_months_clamped_epoch() {
 	local anchor_epoch=$1
 	local add_months=$2
 	local timezone=$3
+	if [[ "$add_months" -eq 0 ]]; then
+		printf '%s\n' "$anchor_epoch"
+		return
+	fi
 
 	local ay am ad ah amin asec
 	read -r ay am ad ah amin asec < <(TZ="$timezone" date -d "@$anchor_epoch" +'%Y %m %d %H %M %S') || return 1
@@ -2486,7 +2528,7 @@ add_months_clamped_epoch() {
 		nd=$dim
 	fi
 
-	TZ="$timezone" date -d "$(printf "%04d-%02d-%02d %02d:%02d:%02d" "$ny" "$nm" "$nd" "$ah" "$amin" "$asec")" +%s
+	quota_wall_time_epoch "$(printf "%04d-%02d-%02d %s:%s:%s" "$ny" "$nm" "$nd" "$ah" "$amin" "$asec")" "$timezone"
 }
 
 calculate_cycle_bounds() {
@@ -2519,40 +2561,40 @@ calculate_cycle_bounds() {
 	echo "${start_epoch}|${end_epoch}"
 }
 
-normalize_timezone_input() {
-	local input=$1
-	local default_tz=${2:-"UTC"}
+is_quota_timezone() {
+	local zone=$1
+	[[ "$zone" == "UTC" ]] && return 0
+	[[ "$zone" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] &&
+		[[ "$(head -c 4 -- "${TZDIR:-/usr/share/zoneinfo}/$zone" 2>/dev/null)" == "TZif" ]]
+}
 
+normalize_timezone_input() {
+	local input=$1 default_tz=${2:-UTC}
 	if [[ -z "$input" ]]; then
 		echo "$default_tz"
 		return
 	fi
 
-	# Handle UTC+8, UTC-7, GMT+8, GMT-7
-	if [[ "$input" =~ ^[Uu][Tt][Cc]([+-][0-9]+)$ ]] || [[ "$input" =~ ^[Gg][Mm][Tt]([+-][0-9]+)$ ]]; then
-		local offset="${BASH_REMATCH[1]}"
-		local num="${offset:1}"
-		if [[ "${offset:0:1}" == "+" ]]; then
-			echo "Etc/GMT-${num}"
-		else
-			echo "Etc/GMT+${num}"
-		fi
-		return
+	local sign hours max=14 normalized
+	if [[ "$input" =~ ^([Uu][Tt][Cc]|[Gg][Mm][Tt])([+-][0-9]+)$ ]]; then
+		input=${BASH_REMATCH[2]}
 	fi
-
-	# Handle raw numbers like -7, +8, 8
 	if [[ "$input" =~ ^([+-]?)([0-9]+)$ ]]; then
-		local sign="${BASH_REMATCH[1]}"
-		local num="${BASH_REMATCH[2]}"
-		if [[ "$sign" == "-" ]]; then
-			echo "Etc/GMT+${num}"
-		else
-			echo "Etc/GMT-${num}"
+		sign=${BASH_REMATCH[1]}
+		hours=${BASH_REMATCH[2]}
+		[[ "$sign" != "-" ]] || max=12
+		if hours=$(parse_decimal_range "$hours" 0 "$max"); then
+			if [[ "$hours" -eq 0 ]]; then
+				echo UTC
+				return
+			fi
+			normalized="Etc/GMT-$hours"
+			[[ "$sign" != "-" ]] || normalized="Etc/GMT+$hours"
+			input=$normalized
 		fi
-		return
 	fi
 
-	if TZ="$input" date +%s >/dev/null 2>&1; then
+	if is_quota_timezone "$input"; then
 		echo "$input"
 	else
 		echo -e "${YELLOW}Invalid timezone '$input', falling back to ${default_tz}.${NC}" >&2
@@ -2605,8 +2647,7 @@ prompt_select_timezone() {
 	15)
 		local custom_tz
 		read -p "Enter timezone name or offset (e.g. America/Phoenix, UTC-7, +8): " custom_tz || return 1
-		custom_tz=$(echo "$custom_tz" | xargs)
-		selected_tz=$(normalize_timezone_input "$custom_tz" "$default_tz")
+		selected_tz=$(normalize_timezone_input "$custom_tz" "$default_tz") || return 1
 		;;
 	*)
 		echo -e "${YELLOW}Invalid choice, defaulting to ${default_tz}.${NC}"
@@ -2614,6 +2655,10 @@ prompt_select_timezone() {
 		;;
 	esac
 
+	if ! is_quota_timezone "$selected_tz"; then
+		echo -e "${YELLOW}Timezone '$selected_tz' is unavailable on this host. Using $default_tz.${NC}" >&2
+		selected_tz=$default_tz
+	fi
 	echo -e "Configured timezone: ${GREEN}${selected_tz}${NC}"
 	printf -v "$tz_result_var" '%s' "$selected_tz"
 }
@@ -2630,11 +2675,7 @@ read_xray_quota_timezone() {
 		fi
 	fi
 
-	if ! TZ="$tz" date +%s >/dev/null 2>&1; then
-		tz="$DEFAULT_QUOTA_TIMEZONE"
-	fi
-
-	echo "$tz"
+	normalize_timezone_input "$tz" "$DEFAULT_QUOTA_TIMEZONE"
 }
 
 with_xray_quota_lock() {
@@ -2738,13 +2779,26 @@ parse_quota_db_line() {
 		(${#limit_gb} -eq ${#MAX_USER_LIMIT_GB} && ! "$limit_gb" > "$MAX_USER_LIMIT_GB") ]]
 }
 
+get_quota_accounting_metadata() {
+	local db_file="xray/user_limits.db"
+	if [[ -f "$db_file" ]]; then
+		awk '/^# quota-(sample|closed)\|/' "$db_file"
+	fi
+}
+
 save_quota_db_content() {
 	local content="$1"
 	local db_file="xray/user_limits.db"
-	local tmp_db
+	local tmp_db metadata
+	if [[ $# -ge 2 ]]; then
+		metadata=$2
+	else
+		metadata=$(get_quota_accounting_metadata) || return 1
+	fi
 	make_temp_file tmp_db "$PWD/xray/.user_limits.db.XXXXXX" || return 1
 	if ! {
 		printf '%s\n' '# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status' &&
+			{ [[ -z "$metadata" ]] || printf '%s\n' "$metadata"; } &&
 			{ [[ -z "$content" ]] || printf '%s\n' "$content"; }
 	} >"$tmp_db"; then
 		rm -f "$tmp_db"
@@ -2855,7 +2909,7 @@ _finalize_quota_db_update_internal() {
 	fi
 
 	if [[ "$config_changed" -ne 1 ]]; then
-		save_quota_db_content "$db_lines"
+		save_quota_db_content "$db_lines" "${@:3}"
 		return
 	fi
 
@@ -2873,7 +2927,7 @@ _finalize_quota_db_update_internal() {
 		return 1
 	fi
 
-	if ! save_quota_db_content "$db_lines" || ! sync_xray_clients_from_quota_db; then
+	if ! save_quota_db_content "$db_lines" "${@:3}" || ! sync_xray_clients_from_quota_db; then
 		echo -e "${RED}Failed to prepare quota enforcement. Restoring previous state.${NC}" >&2
 		cp -p "$db_backup" "$db_file"
 		cp -p "$config_backup" "$config_file"
@@ -2896,81 +2950,202 @@ _finalize_quota_db_update_internal() {
 
 collect_xray_user_stats() {
 	local map_file=$1
-
 	: >"$map_file" || return 1
-	local stats_count=0
-	local stats_error=""
 
-	local running_container
-	if ! running_container=$($SUDO docker ps -q -f name="^/xray_server$" 2>&1); then
-		printf '0|%s\n' "${running_container:-could not query Docker}"
+	local container_id
+	if ! container_id=$($SUDO docker ps -q -f name="^/xray_server$" 2>&1); then
+		echo '|||Could not query Docker for the Xray container.'
 		return 0
 	fi
-	if [[ -z "$running_container" ]]; then
-		echo "0|"
+	if [[ -z "$container_id" ]]; then
+		echo '|||'
 		return 0
 	fi
 
-	local raw_stats
-	if ! raw_stats=$(timeout 15s $SUDO docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1); then
-		stats_error=$(printf '%s' "${raw_stats:-statsquery failed or timed out}" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
-	elif [[ -z "$raw_stats" ]]; then
-		stats_error="empty statsquery output"
+	local inspect_format='{{.Id}}|{{.State.StartedAt}}|{{.State.Running}}'
+	local before after full_id started_at running raw_stats sample_epoch started_epoch
+	if ! before=$(timeout 5s $SUDO docker inspect --type container -f "$inspect_format" "$container_id" 2>/dev/null); then
+		echo '|||Could not inspect the running Xray container.'
+		return 0
+	fi
+	IFS='|' read -r full_id started_at running <<<"$before"
+	if [[ -z "$full_id" || "$running" != "true" ]]; then
+		echo '|||Xray stopped before its counters could be read.'
+		return 0
 	fi
 
-	if [[ -z "$stats_error" ]]; then
-		awk '
-            /user>>>.*>>>traffic>>>(uplink|downlink)/ {
-                line = $0
-                match(line, /user>>>([^>"]+)>>>traffic>>>(uplink|downlink)/)
-                s = substr(line, RSTART, RLENGTH)
-                split(s, parts, ">>>")
-                user = parts[2]
-                dir = parts[4]
+	if ! raw_stats=$(timeout 15s $SUDO docker exec "$full_id" xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1); then
+		printf '|||%s\n' "$(printf '%s' "${raw_stats:-statsquery failed or timed out}" | tr '\n' ' ')"
+		return 0
+	fi
+	sample_epoch=$(date +%s) || return 1
+	if ! after=$(timeout 5s $SUDO docker inspect --type container -f "$inspect_format" xray_server 2>/dev/null) ||
+		[[ "$before" != "$after" ]]; then
+		echo '|||Xray changed during the counter query. Discarded the sample.'
+		return 0
+	fi
+	started_epoch=$(date -d "$started_at" +%s) || return 1
 
-                if (match(line, /"value":[[:space:]]*"?([0-9]+)"?/)) {
-                    val_str = substr(line, RSTART, RLENGTH)
-                    gsub(/[^0-9]/, "", val_str)
-                    if (val_str != "") {
-                        print user "|" dir "|" val_str
-                        user = ""; dir = ""
-                    }
-                } else if (match(line, /value:[[:space:]]*([0-9]+)/)) {
-                    val_str = substr(line, RSTART, RLENGTH)
-                    gsub(/[^0-9]/, "", val_str)
-                    if (val_str != "") {
-                        print user "|" dir "|" val_str
-                        user = ""; dir = ""
-                    }
-                }
-                next
-            }
-            user != "" && /"value":/ {
-                val_str = $0
-                gsub(/[^0-9]/, "", val_str)
-                if (val_str != "") {
-                    print user "|" dir "|" val_str
-                    user = ""; dir = ""
-                }
-                next
-            }
-            user != "" && /value:[[:space:]]*[0-9]+/ {
-                val_str = $0
-                gsub(/[^0-9]/, "", val_str)
-                if (val_str != "") {
-                    print user "|" dir "|" val_str
-                    user = ""; dir = ""
-                }
-                next
-            }
-        ' <<<"$raw_stats" >"$map_file"
+	# Xray omits zero-valued fields and may return an empty object before
+	# any user has connected. Reject invalid responses before using totals.
+	if [[ -z "$raw_stats" ]] || ! jq -r '
+        if type != "object" or (length != 0 and (has("stat") | not)) or ((.stat // []) | type) != "array" then
+            error("invalid StatsService response")
+        else
+            (.stat // [])[] |
+            (.name | capture("^user>>>(?<user>[^>|\r\n]+)>>>traffic>>>(?<direction>uplink|downlink)$")) as $counter |
+            ((.value // 0) | tostring) as $value |
+            if $value | test("^[0-9]+$") then
+                [$counter.user, $counter.direction, $value] | join("|")
+            else
+                error("invalid traffic counter")
+            end
+        end
+    ' <<<"$raw_stats" >"$map_file"; then
+		: >"$map_file" || return 1
+		echo '|||Could not parse the Xray traffic counters.'
+		return 0
 	fi
 
-	if [[ -s "$map_file" ]]; then
-		stats_count=$(wc -l <"$map_file" | tr -d ' ')
+	printf '%s@%s|%s|%s|\n' "$full_id" "$started_at" "$sample_epoch" "$started_epoch"
+}
+
+# Metadata stays in comments so a quota DB still has the existing nine fields.
+# The collector and all quota writes hold the same lock.
+refresh_xray_quota_accounting() {
+	local mode=${1:-quiet}
+	local stats_map_file result generation sample_epoch started_epoch stats_error
+	local db_records metadata previous_generation="" previous_sample=0 calendar_initialized=0
+	local kind first second closed_start closed_end closed_usage pending_resume
+	local -A closed_cycles=() totals=()
+	db_records=$(get_quota_db_records) || return 1
+	[[ -n "$db_records" ]] || return 0
+	metadata=$(get_quota_accounting_metadata) || return 1
+	while IFS='|' read -r kind first second closed_start closed_end closed_usage pending_resume; do
+		case "$kind" in
+		'# quota-sample')
+			if ! [[ "$second" =~ ^[0-9]+$ ]]; then
+				echo -e "${RED}Invalid quota sample metadata.${NC}" >&2
+				return 1
+			fi
+			previous_generation=$first
+			previous_sample=$second
+			calendar_initialized=1
+			;;
+		'# quota-closed')
+			if ! [[ -n "$second" && "$closed_start" =~ ^[0-9]+$ && "$closed_end" =~ ^[0-9]+$ &&
+				"$closed_usage" =~ ^[0-9]+$ && "$pending_resume" =~ ^[01]$ ]]; then
+				echo -e "${RED}Invalid quota cycle metadata.${NC}" >&2
+				return 1
+			fi
+			closed_cycles["$second"]="$closed_start|$closed_end|$closed_usage|$pending_resume"
+			;;
+		esac
+	done <<<"$metadata"
+
+	make_temp_file stats_map_file || return 1
+	if ! result=$(collect_xray_user_stats "$stats_map_file"); then
+		rm -f "$stats_map_file"
+		return 1
+	fi
+	IFS='|' read -r generation sample_epoch started_epoch stats_error <<<"$result"
+	if [[ -n "$stats_error" ]]; then
+		echo -e "${YELLOW}Could not sample Xray traffic: ${stats_error}${NC}" >&2
+		if [[ "$mode" == "strict" ]]; then
+			rm -f "$stats_map_file"
+			return 1
+		fi
+	fi
+	local counter_email direction value
+	while IFS='|' read -r counter_email direction value; do
+		[[ -n "$counter_email" ]] || continue
+		totals["$counter_email"]=$((${totals[$counter_email]:-0} + 10#$value))
+	done <"$stats_map_file"
+	rm -f "$stats_map_file"
+
+	local now_epoch timezone new_run=0
+	now_epoch=${sample_epoch:-$(date +%s)}
+	timezone=$(read_xray_quota_timezone) || return 1
+	if [[ -n "$generation" && -n "$previous_generation" && "$generation" != "$previous_generation" ]]; then
+		new_run=1
 	fi
 
-	echo "${stats_count}|${stats_error}"
+	local db_lines="" closed_lines="" raw_line
+	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+	local cycle_bounds new_start new_end old_month new_month delta interval_start current_total
+	while IFS= read -r raw_line; do
+		if ! parse_quota_db_line "$raw_line"; then
+			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
+			return 1
+		fi
+		IFS='|' read -r closed_start closed_end closed_usage pending_resume <<<"${closed_cycles[$uuid]:-}"
+		delta=0
+		interval_start=$previous_sample
+		if [[ -n "$generation" ]]; then
+			if [[ "$new_run" -eq 1 || ("$previous_sample" -eq 0 && "$last_total" -eq 0) ]]; then
+				interval_start=$started_epoch
+				last_total=0
+			fi
+			current_total=${totals[$email]:-$last_total}
+			delta=$((current_total - last_total))
+			if [[ "$delta" -lt 0 ]]; then
+				# Adopt a reset counter even within the same running container.
+				delta=$current_total
+			fi
+			last_total=$current_total
+		fi
+
+		if [[ "$calendar_initialized" -eq 0 || "$now_epoch" -ge "$cycle_end" ]]; then
+			cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone") || return 1
+			new_start=${cycle_bounds%%|*}
+			new_end=${cycle_bounds##*|}
+			if [[ "$new_start" != "$cycle_start" ]]; then
+				# Compare calendar months so a corrected DST occurrence
+				# in the same monthly cycle preserves accumulated usage.
+				old_month=$(TZ="$timezone" date -d "@$cycle_start" +%Y-%m) || return 1
+				new_month=$(TZ="$timezone" date -d "@$new_start" +%Y-%m) || return 1
+				if [[ "$cycle_start" -gt 0 && "$cycle_end" -gt "$cycle_start" && "$new_month" > "$old_month" ]]; then
+					closed_start=$cycle_start
+					closed_end=$new_start
+					# When several cutoffs passed, retain the actual end
+					# of the cycle being closed.
+					if [[ "$cycle_end" -lt "$closed_end" ]]; then
+						closed_end=$cycle_end
+					fi
+					closed_usage=$cycle_usage
+					pending_resume=0
+					[[ "$status" != "suspended" ]] || pending_resume=1
+					cycle_usage=0
+				fi
+			fi
+			cycle_start=$new_start
+			cycle_end=$new_end
+		fi
+
+		if [[ -n "$closed_start" && "$interval_start" -lt "$cycle_start" ]]; then
+			closed_usage=$((closed_usage + delta))
+		else
+			cycle_usage=$((cycle_usage + delta))
+		fi
+
+		if [[ -n "$closed_start" ]]; then
+			closed_lines+="${closed_lines:+$'\n'}# quota-closed|${email}|${uuid}|${closed_start}|${closed_end}|${closed_usage}|${pending_resume}"
+		fi
+		db_lines+="${db_lines:+$'\n'}${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
+	done <<<"$db_records"
+
+	local new_metadata="# quota-sample|${generation:-$previous_generation}|${sample_epoch:-$previous_sample}"
+	new_metadata+="${closed_lines:+$'\n'$closed_lines}"
+	if [[ "$db_lines" != "$db_records" || "$new_metadata" != "$metadata" ]]; then
+		save_quota_db_content "$db_lines" "$new_metadata"
+	fi
+}
+
+checkpoint_xray_quota_usage() {
+	[[ -f "xray/user_limits.db" && -f "xray/user_limits.conf" ]] || return 0
+	if ! refresh_xray_quota_accounting strict; then
+		echo -e "${YELLOW}Continuing without a fresh quota checkpoint.${NC}" >&2
+	fi
 }
 
 check_and_apply_xray_quotas() {
@@ -2978,131 +3153,60 @@ check_and_apply_xray_quotas() {
 }
 
 _check_and_apply_xray_quotas_internal() {
-	local quiet=0
-	if [[ "${1:-}" == "quiet" || "${1:-}" == "1" ]]; then
-		quiet=1
-	fi
-
-	local db_file="xray/user_limits.db"
-	local conf_file="xray/user_limits.conf"
-
-	if [[ ! -f "$db_file" ]] || [[ ! -f "$conf_file" ]]; then
+	if [[ ! -f "xray/user_limits.db" || ! -f "xray/user_limits.conf" ]]; then
 		echo -e "${RED}Quota files not found. Install Xray with quotas first.${NC}"
 		return 1
 	fi
 
-	local timezone
-	timezone=$(read_xray_quota_timezone) || return 1
-
-	local now_epoch
-	now_epoch=$(date +%s)
-
-	local stats_map_file
-	make_temp_file stats_map_file || return 1
-	local stats_result
-	stats_result=$(collect_xray_user_stats "$stats_map_file") || return 1
-	local collected_stats_count="${stats_result%%|*}"
-	local xray_stats_last_error="${stats_result#*|}"
-
-	if [[ "${collected_stats_count:-0}" -eq 0 ]]; then
-		if [[ "$quiet" -ne 1 || -n "${xray_stats_last_error:-}" ]]; then
-			echo -e "${YELLOW}Warning: no per-user traffic stats were collected from Xray.${NC}"
-			if [[ -n "${xray_stats_last_error:-}" ]]; then
-				echo -e "${YELLOW}Xray stats response:${NC} ${xray_stats_last_error}"
-			fi
-			echo -e "${YELLOW}Usage values may remain unchanged until stats become available.${NC}"
-		fi
-	fi
-
-	declare -A uplink_map
-	declare -A downlink_map
-
-	while IFS='|' read -r email dir value; do
-		[ -z "$email" ] && continue
-		value=${value:-0}
-		if [[ "$dir" = "uplink" ]]; then
-			uplink_map["$email"]=$value
-		elif [[ "$dir" = "downlink" ]]; then
-			downlink_map["$email"]=$value
-		fi
-	done <"$stats_map_file"
-
-	rm -f "$stats_map_file"
-
-	local db_records
+	# Commit accounting before changing access. If the enforcement restart
+	# fails, its rollback keeps the bytes measured by the outgoing process.
+	refresh_xray_quota_accounting || return 1
+	local db_records metadata
 	db_records=$(get_quota_db_records) || return 1
+	metadata=$(get_quota_accounting_metadata) || return 1
+	local -A resume_users=()
+	local kind close_email close_uuid close_start close_end close_usage resume_flag new_metadata=""
+	local metadata_line
+	while IFS= read -r metadata_line; do
+		[[ -n "$metadata_line" ]] || continue
+		IFS='|' read -r kind close_email close_uuid close_start close_end close_usage resume_flag <<<"$metadata_line"
+		if [[ "$kind" == '# quota-closed' && -n "$close_uuid" && "$resume_flag" == 1 ]]; then
+			resume_users["$close_uuid"]=1
+			metadata_line="${metadata_line%|*}|0"
+		fi
+		new_metadata+="${new_metadata:+$'\n'}$metadata_line"
+	done <<<"$metadata"
 
-	local db_lines=""
-	local config_changed=0
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
-
+	local db_lines="" config_changed=0 raw_line old_status
+	local -a notices=()
 	while IFS= read -r raw_line; do
-		[ -z "$raw_line" ] && continue
-		if ! parse_quota_db_line "$raw_line"; then
-			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
-			return 1
+		[[ -n "$raw_line" ]] || continue
+		parse_quota_db_line "$raw_line" || return 1
+		old_status=$status
+		if ((limit_gb > 0 && cycle_usage >= limit_gb * 1073741824)); then
+			status=suspended
+		elif [[ -n "${resume_users[$uuid]+set}" ]]; then
+			status=active
 		fi
-
-		local cycle_rotated=0
-		if [[ -z "$cycle_start" || -z "$cycle_end" || "$now_epoch" -ge "$cycle_end" || "$now_epoch" -lt "$cycle_start" ]]; then
-			local cycle_bounds
-			cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone") || return 1
-			local new_cycle_start="${cycle_bounds%%|*}"
-			local new_cycle_end="${cycle_bounds##*|}"
-
-			if [[ "$cycle_start" != "$new_cycle_start" ]] || [[ "$cycle_end" != "$new_cycle_end" ]]; then
-				cycle_usage=0
-				cycle_start=$new_cycle_start
-				cycle_end=$new_cycle_end
-				cycle_rotated=1
-				if [[ "$status" = "suspended" ]]; then
-					status="active"
-					config_changed=1
-					echo -e "${GREEN}Re-enabled user ${email} for new cycle.${NC}"
-				fi
+		if [[ "$status" != "$old_status" ]]; then
+			config_changed=1
+			if [[ "$status" == "suspended" ]]; then
+				notices+=("User $email reached quota ($limit_gb GB). Suspended.")
+			else
+				notices+=("Re-enabled user $email for the new cycle.")
 			fi
 		fi
-
-		local current_total=$last_total
-		if [[ -n "${uplink_map[$email]+set}" ]] || [[ -n "${downlink_map[$email]+set}" ]]; then
-			local current_uplink=${uplink_map["$email"]:-0}
-			local current_downlink=${downlink_map["$email"]:-0}
-			current_total=$((current_uplink + current_downlink))
-		fi
-
-		local delta
-		if [[ "$cycle_rotated" -eq 1 ]]; then
-			delta=0
-		else
-			delta=$((current_total - last_total))
-			if [[ "$delta" -lt 0 ]]; then
-				delta=$current_total
-			fi
-		fi
-
-		cycle_usage=$((cycle_usage + delta))
-		last_total=$current_total
-
-		if [[ "$limit_gb" -gt 0 ]]; then
-			local limit_bytes=$((limit_gb * 1024 * 1024 * 1024))
-			if [[ "$cycle_usage" -ge "$limit_bytes" ]] && [[ "$status" != "suspended" ]]; then
-				status="suspended"
-				config_changed=1
-				echo -e "${YELLOW}User ${email} reached quota (${limit_gb} GB). Suspended.${NC}"
-			fi
-		fi
-
-		if [[ -n "$db_lines" ]]; then
-			db_lines+=$'\n'
-		fi
-		db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
+		db_lines+="${db_lines:+$'\n'}${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
 	done <<<"$db_records"
 
-	if [[ "$db_lines" != "$db_records" || "$config_changed" -eq 1 ]]; then
-		finalize_quota_db_update "$db_lines" "$config_changed" || return 1
+	if [[ "$config_changed" -eq 1 || "$new_metadata" != "$metadata" ]]; then
+		finalize_quota_db_update "$db_lines" "$config_changed" "$new_metadata" || return 1
 	fi
-
-	if [[ "$quiet" -ne 1 ]]; then
+	if [[ ${#notices[@]} -gt 0 ]]; then
+		printf '%s\n' "${notices[@]}"
+	fi
+	if [[ "${1:-}" != "quiet" && "${1:-}" != "1" ]]; then
 		echo -e "${GREEN}Quota check complete.${NC}"
 	fi
 }
@@ -3121,6 +3225,15 @@ show_xray_quota_status() {
 	echo -e "${YELLOW}Timezone:${NC} ${timezone}"
 	echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
 
+	local -A closed_cycles=()
+	local metadata kind closed_email closed_uuid closed_start closed_end closed_usage resume_flag
+	metadata=$(get_quota_accounting_metadata) || return 1
+	while IFS='|' read -r kind closed_email closed_uuid closed_start closed_end closed_usage resume_flag; do
+		if [[ "$kind" == '# quota-closed' && -n "$closed_uuid" ]]; then
+			closed_cycles["$closed_uuid"]="$closed_start|$closed_end|$closed_usage"
+		fi
+	done <<<"$metadata"
+
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
 	while IFS= read -r raw_line; do
 		[ -z "$raw_line" ] && continue
@@ -3138,6 +3251,14 @@ show_xray_quota_status() {
 			echo "- ${email} | status=${status} | usage=${usage_gb}GB / ${limit_gb}GB (${percent}%) | cycle=${cycle_start_h} -> ${cycle_end_h}"
 		else
 			echo "- ${email} | status=${status} | usage=${usage_gb}GB / unlimited | cycle=${cycle_start_h} -> ${cycle_end_h}"
+		fi
+		if [[ -n "${closed_cycles[$uuid]+set}" ]]; then
+			IFS='|' read -r closed_start closed_end closed_usage <<<"${closed_cycles[$uuid]}"
+			local closing_gb closing_start_display closing_end_display
+			closing_gb=$(awk -v b="$closed_usage" 'BEGIN { printf "%.2f", b/1073741824 }')
+			closing_start_display=$(TZ="$timezone" date -d "@$closed_start" '+%Y-%m-%d %H:%M:%S')
+			closing_end_display=$(TZ="$timezone" date -d "@$closed_end" '+%Y-%m-%d %H:%M:%S')
+			printf '  Previous cycle %s -> %s | usage=%sGB\n' "$closing_start_display" "$closing_end_display" "$closing_gb"
 		fi
 	done < <(get_quota_db_records)
 }
@@ -3194,28 +3315,41 @@ reset_xray_user_usage() {
 	with_xray_quota_lock _reset_xray_user_usage "$target_email"
 }
 
+prompt_xray_quota_resume() {
+	local selected_email=$1 result_var=$2 allowed_limit=$3 prompt=$4
+	local record reply decision=0
+	if [[ "$selected_email" == "ALL" ]]; then
+		decision=1
+	else
+		record=$(get_quota_db_records | awk -F'|' -v selected="$selected_email" '$1 == selected && !found {print; found=1}') || return 1
+		if [[ -n "$record" ]]; then
+			local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+			parse_quota_db_line "$record" || return 1
+			if [[ "$status" == "suspended" ]] && ((allowed_limit == 0 || cycle_usage < allowed_limit * 1073741824)); then
+				read -p "$prompt" reply || return 1
+				[[ "$reply" == [nN] ]] || decision=1
+			fi
+		fi
+	fi
+	printf -v "$result_var" '%s' "$decision"
+}
+
 _reset_xray_user_usage() {
 	local target_email=$1
 	[[ -f "xray/user_limits.db" ]] || return 1
 
-	local stats_map_file
-	make_temp_file stats_map_file || return 1
-	local stats_result
-	stats_result=$(collect_xray_user_stats "$stats_map_file") || return 1
-	if [[ -n "${stats_result#*|}" ]]; then
-		echo -e "${RED}Could not read traffic counters: ${stats_result#*|}${NC}" >&2
-		rm -f "$stats_map_file"
-		return 1
-	fi
+	local resume_requested
+	prompt_xray_quota_resume "$target_email" resume_requested 0 "User is suspended. Re-enable now? [Y/n]: " || return 1
+	refresh_xray_quota_accounting strict || return 1
 
 	local db_records
 	db_records=$(get_quota_db_records) || return 1
 
-	local db_lines="" reenable
+	local db_lines=""
 	local config_changed=0
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
 
-	while IFS= read -r -u 3 raw_line; do
+	while IFS= read -r raw_line; do
 		[ -z "$raw_line" ] && continue
 		if ! parse_quota_db_line "$raw_line"; then
 			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
@@ -3223,26 +3357,10 @@ _reset_xray_user_usage() {
 		fi
 
 		if [[ "$target_email" = "ALL" ]] || [[ "$email" = "$target_email" ]]; then
-			local current_total=0
-			while IFS='|' read -r s_email s_dir s_value; do
-				if [[ "$s_email" = "$email" ]]; then
-					current_total=$((current_total + ${s_value:-0}))
-				fi
-			done <"$stats_map_file"
-
 			cycle_usage=0
-			last_total=$current_total
-			if [[ "$status" = "suspended" ]]; then
-				if [[ "$target_email" = "ALL" ]]; then
-					status="active"
-					config_changed=1
-				else
-					read -p "User is suspended. Re-enable now? [Y/n]: " reenable || return 1
-					if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
-						status="active"
-						config_changed=1
-					fi
-				fi
+			if [[ "$status" == "suspended" && "$resume_requested" -eq 1 ]]; then
+				status=active
+				config_changed=1
 			fi
 		fi
 
@@ -3250,9 +3368,8 @@ _reset_xray_user_usage() {
 			db_lines+=$'\n'
 		fi
 		db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-	done 3<<<"$db_records"
+	done <<<"$db_records"
 
-	rm -f "${stats_map_file:-}"
 	finalize_quota_db_update "$db_lines" "$config_changed" || return 1
 	echo -e "${GREEN}Usage reset.${NC}"
 }
@@ -3274,15 +3391,18 @@ change_xray_user_limit() {
 _change_xray_user_limit() {
 	local target_email=$1 new_limit_gb=$2
 	[[ -f "xray/user_limits.db" ]] || return 1
+	local resume_requested
+	prompt_xray_quota_resume "$target_email" resume_requested "$new_limit_gb" "New limit allows usage. Re-enable now? [Y/n]: " || return 1
+	checkpoint_xray_quota_usage
 
 	local db_records
 	db_records=$(get_quota_db_records) || return 1
 
-	local db_lines="" reenable
+	local db_lines=""
 	local config_changed=0
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
 
-	while IFS= read -r -u 3 raw_line; do
+	while IFS= read -r raw_line; do
 		[ -z "$raw_line" ] && continue
 		if ! parse_quota_db_line "$raw_line"; then
 			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
@@ -3291,24 +3411,10 @@ _change_xray_user_limit() {
 
 		if [[ "$email" = "$target_email" ]]; then
 			limit_gb=$new_limit_gb
-			if [[ "$status" = "suspended" ]]; then
-				local should_reenable=0
-				if [[ "$limit_gb" -eq 0 ]]; then
-					should_reenable=1
-				else
-					local limit_bytes=$((limit_gb * 1024 * 1024 * 1024))
-					if [[ "$cycle_usage" -lt "$limit_bytes" ]]; then
-						should_reenable=1
-					fi
-				fi
-
-				if [[ "$should_reenable" -eq 1 ]]; then
-					read -p "New limit allows usage. Re-enable now? [Y/n]: " reenable || return 1
-					if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
-						status="active"
-						config_changed=1
-					fi
-				fi
+			if [[ "$status" == "suspended" && "$resume_requested" -eq 1 ]] &&
+				((limit_gb == 0 || cycle_usage < limit_gb * 1073741824)); then
+				status=active
+				config_changed=1
 			fi
 		fi
 
@@ -3316,7 +3422,7 @@ _change_xray_user_limit() {
 			db_lines+=$'\n'
 		fi
 		db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-	done 3<<<"$db_records"
+	done <<<"$db_records"
 
 	finalize_quota_db_update "$db_lines" "$config_changed" || return 1
 	echo -e "${GREEN}Updated monthly limit to ${new_limit_gb} GB.${NC}"
@@ -3362,34 +3468,30 @@ _change_xray_user_billing_cycle() {
 	local target_email=$1 clean_day=$2 reset_usage=$3
 	[[ -f "xray/user_limits.db" ]] || return 1
 
+	local resume_requested=0
+	if [[ "$reset_usage" == [yY] ]]; then
+		prompt_xray_quota_resume "$target_email" resume_requested 0 "User is suspended. Re-enable now? [Y/n]: " || return 1
+		refresh_xray_quota_accounting strict || return 1
+	else
+		checkpoint_xray_quota_usage
+	fi
+
 	local now_epoch timezone new_anchor_epoch
 	now_epoch=$(date +%s) || return 1
 	timezone=$(read_xray_quota_timezone) || return 1
 	new_anchor_epoch=$now_epoch
 	if [[ -n "$clean_day" ]]; then
-		new_anchor_epoch=$(TZ="$timezone" date -d "2000-01-$(printf "%02d" "$clean_day") 00:00:00" +%s) || return 1
-	fi
-
-	local stats_map_file
-	if [[ "$reset_usage" == "y" || "$reset_usage" == "Y" ]]; then
-		make_temp_file stats_map_file || return 1
-		local stats_result
-		stats_result=$(collect_xray_user_stats "$stats_map_file") || return 1
-		if [[ -n "${stats_result#*|}" ]]; then
-			echo -e "${RED}Could not read traffic counters: ${stats_result#*|}${NC}" >&2
-			rm -f "$stats_map_file"
-			return 1
-		fi
+		new_anchor_epoch=$(quota_wall_time_epoch "2000-01-$(printf "%02d" "$clean_day") 00:00:00" "$timezone") || return 1
 	fi
 
 	local db_records
 	db_records=$(get_quota_db_records) || return 1
 
-	local db_lines="" reenable
+	local db_lines=""
 	local config_changed=0
 
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
-	while IFS= read -r -u 3 raw_line; do
+	while IFS= read -r raw_line; do
 		[ -z "$raw_line" ] && continue
 		if ! parse_quota_db_line "$raw_line"; then
 			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
@@ -3403,28 +3505,11 @@ _change_xray_user_billing_cycle() {
 			cycle_start="${cycle_bounds%%|*}"
 			cycle_end="${cycle_bounds##*|}"
 
-			if [[ "$reset_usage" == "y" || "$reset_usage" == "Y" ]]; then
-				local current_total=0
-				while IFS='|' read -r s_email s_dir s_value; do
-					if [[ "$s_email" = "$email" ]]; then
-						current_total=$((current_total + ${s_value:-0}))
-					fi
-				done <"$stats_map_file"
-
+			if [[ "$reset_usage" == [yY] ]]; then
 				cycle_usage=0
-				last_total=$current_total
-
-				if [[ "$status" = "suspended" ]]; then
-					if [[ "$target_email" = "ALL" ]]; then
-						status="active"
-						config_changed=1
-					else
-						read -p "User is suspended. Re-enable now? [Y/n]: " reenable || return 1
-						if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
-							status="active"
-							config_changed=1
-						fi
-					fi
+				if [[ "$status" == "suspended" && "$resume_requested" -eq 1 ]]; then
+					status=active
+					config_changed=1
 				fi
 			fi
 		fi
@@ -3433,9 +3518,8 @@ _change_xray_user_billing_cycle() {
 			db_lines+=$'\n'
 		fi
 		db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-	done 3<<<"$db_records"
+	done <<<"$db_records"
 
-	rm -f "${stats_map_file:-}"
 	finalize_quota_db_update "$db_lines" "$config_changed" || return 1
 	echo -e "${GREEN}Billing cycle updated.${NC}"
 }
@@ -3778,6 +3862,19 @@ configure_xray_quota_auto_check_cron() {
 	echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
 }
 
+quota_daemon_sleep_seconds() {
+	local interval=$1 now_epoch=$2
+	awk -F'|' -v now="$now_epoch" -v interval="$interval" '
+        !/^[[:space:]]*#/ && NF == 9 && $6 ~ /^[0-9]+$/ && $6 > now {
+            if (!next_cutoff || $6 < next_cutoff) next_cutoff = $6
+        }
+        END {
+            if (next_cutoff && next_cutoff - now < interval) printf "%.0f\n", next_cutoff - now
+            else print interval
+        }
+	' xray/user_limits.db
+}
+
 run_xray_quota_daemon() {
 	local interval="${1:-60}"
 	if ! interval=$(parse_decimal_range "$interval" 1 9223372036854775807); then
@@ -3806,7 +3903,11 @@ run_xray_quota_daemon() {
 
 		check_and_apply_xray_quotas quiet || true
 
-		sleep "$interval" &
+		local sleep_seconds=$interval
+		if [[ -f "xray/user_limits.db" ]]; then
+			sleep_seconds=$(quota_daemon_sleep_seconds "$interval" "$(date +%s)") || sleep_seconds=$interval
+		fi
+		sleep "$sleep_seconds" &
 		wait $! 2>/dev/null || true
 	done
 }
@@ -3929,6 +4030,7 @@ change_xray_quota_timezone() {
 _change_xray_quota_timezone() {
 	local new_tz=$1
 	local conf_file="xray/user_limits.conf"
+	checkpoint_xray_quota_usage
 	local db_records db_lines="" now_epoch cycle_bounds
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
 	db_records=$(get_quota_db_records) || return 1
@@ -4127,6 +4229,7 @@ add_xray_user() {
 	local cycle_end="${cycle_bounds##*|}"
 
 	apply_add_user() {
+		checkpoint_xray_quota_usage
 		local db_backup config_backup
 		make_temp_file db_backup || return 1
 		make_temp_file config_backup || return 1
@@ -4236,6 +4339,7 @@ remove_xray_user() {
 	[[ -n "$target_uuid" ]] || return 1
 
 	apply_remove_user() {
+		checkpoint_xray_quota_usage
 		local db_backup config_backup
 		make_temp_file db_backup || return 1
 		make_temp_file config_backup || return 1
@@ -4244,9 +4348,10 @@ remove_xray_user() {
 			return 1
 		fi
 
-		local filtered_db
+		local filtered_db filtered_metadata
 		filtered_db=$(get_quota_db_records | awk -F'|' -v email="$target_email" '$1 != email') || return 1
-		if save_quota_db_content "$filtered_db" &&
+		filtered_metadata=$(get_quota_accounting_metadata | awk -F'|' -v uuid="$target_uuid" '$1 != "# quota-closed" || $3 != uuid') || return 1
+		if save_quota_db_content "$filtered_db" "$filtered_metadata" &&
 			sync_xray_clients_from_quota_db &&
 			reload_xray_container; then
 			rm -f "$db_backup" "$config_backup"
