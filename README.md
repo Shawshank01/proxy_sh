@@ -41,7 +41,7 @@ This is an automated shell script that installs and manages Docker containers on
 
 ### Release signing (for Fork)
 
-Self-updates verify a detached OpenSSL signature before replacing the script. For a fork, add the PEM-encoded private key once as the repository Actions secret `RELEASE_PRIVATE_KEY`. The matching public key is pinned in `proxy.sh`, and the GitHub Actions workflow automatically regenerates `proxy.sh.sha256` and signs each pushed `proxy.sh` as `proxy.sh.sig`.
+Self-updates verify a detached OpenSSL signature before replacing the script. For a fork, add the PEM-encoded private key once as the repository Actions secret `RELEASE_PRIVATE_KEY`. Pin the matching public key in `proxy.sh` and change the self-update repository URLs to point to your fork. After a push to `main`, the **Update Release Artifacts** workflow verifies the signature against that public key and commits `proxy.sh.sha256` and `proxy.sh.sig` together. If `main` moves during signing, rerun the workflow on `main`.
 Using Actions to automate the signing process means you fully trust GitHub hosting, Actions runners, and secret handling, and you must keep strict control of your GitHub account and repository protections.
 
 ## Menu Options
@@ -60,7 +60,7 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
   - Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
   - Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
 - **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest, and Xray configuration files (`server.jsonc`) are automatically migrated for modern core compatibility (`finalRules`, `minClientVer`).
-- **5) Change Xray Reality target domain**: Re-runs the strict Reality target validation, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. On legacy configs, this also adds the loopback Tunnel. Failed restarts automatically roll back the previous configuration.
+- **5) Change Xray Reality target domain**: Re-runs the Reality target checks, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. On legacy configs, this also adds the loopback Tunnel. Failed restarts automatically roll back the previous configuration.
 - **6) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
 - **7) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
 - **8) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
@@ -77,7 +77,8 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
 - **11) Manage users (Add/Remove for Xray / Shadowsocks)**:
   - Add Xray users without recreating existing users
   - Remove specific Xray users without affecting others
-  - Add Shadowsocks users without recreating existing users - Remove specific Shadowsocks users without affecting others
+  - Add Shadowsocks users without recreating existing users
+  - Remove a selected Shadowsocks user without affecting others
 - **12) Exit**
 
 ## Recommended Clients
@@ -101,7 +102,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 - Xray per-user quota enforcement uses Xray user traffic stats (`StatsService`) and stores state in:
   - `xray/user_limits.conf` (timezone)
   - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
-- Billing cycle is per-user **anniversary monthly** (from account creation timestamp to next month same local time, clamped to month-end when needed).
+- A user's monthly cycle can begin at account creation or on a configured calendar day. The billing date is clamped to the last day of shorter months.
 - Quota checks run when you execute menu option `10 -> 2` (recommended to automate with a systemd daemon on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `10 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
 - All configuration files are created in a new `xray` directory relative to the script's location.
 
@@ -190,7 +191,7 @@ If per-user quota checking is automated via systemd, inspect the daemon logs:
 Test `xray/server.jsonc` syntax and schema compatibility without stopping your running container:
 
 ```bash
-sudo docker run --rm -v $(pwd)/xray/server.jsonc:/etc/xray/config.json ghcr.io/xtls/xray-core:latest run -test -c /etc/xray/config.json
+sudo docker run --rm -v "$(pwd)/xray/server.jsonc:/etc/xray/config.json:ro" ghcr.io/xtls/xray-core:latest run -test -c /etc/xray/config.json
 ```
 
 ### 4. Checking Port & Listening Status

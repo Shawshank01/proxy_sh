@@ -1,4 +1,4 @@
-name: Update SHA256 Checksum
+name: Update Release Artifacts
 
 on:
   push:
@@ -6,17 +6,27 @@ on:
     - main
     paths:
     - 'proxy.sh'
+    - '.github/workflows/update-checksum.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: proxy-sh-release-artifacts
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   update-checksum:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v7
+      with:
+        ref: main
+        persist-credentials: false
 
     - name: Generate checksum and detached signature
       env:
@@ -29,47 +39,39 @@ jobs:
           exit 1
         fi
 
-        printf '%s\n' "$RELEASE_PRIVATE_KEY" > release-private.pem
-        chmod 600 release-private.pem
-        openssl pkey -in release-private.pem -check -noout
-        openssl dgst -sha256 -sign release-private.pem -out proxy.sh.sig proxy.sh
-        NEW_HASH=$(sha256sum proxy.sh | awk '{print $1}')
-        OLD_HASH=$(cat proxy.sh.sha256 2>/dev/null | awk '{print $1}' || true)
-        NEW_SIGNATURE=$(base64 -w 0 proxy.sh.sig)
-        OLD_SIGNATURE_SHA=$(gh api repos/${{ github.repository }}/contents/proxy.sh.sig --jq .sha 2>/dev/null || echo "")
+        umask 077
+        signing_dir=$(mktemp -d)
+        trap 'rm -rf "$signing_dir"' EXIT
+        printf '%s\n' "$RELEASE_PRIVATE_KEY" > "$signing_dir/private.pem"
+        awk '
+          /^RELEASE_PUBLIC_KEY=/ { sub(/^RELEASE_PUBLIC_KEY=./, ""); key=1 }
+          key && /^-----END PUBLIC KEY-----/ { sub(/.$/, ""); print; exit }
+          key { print }
+        ' proxy.sh > "$signing_dir/public.pem"
 
-        if [ "$NEW_HASH" != "$OLD_HASH" ]; then
-          echo "Checksum mismatch detected. Updating proxy.sh.sha256 via API..."
-          CONTENT=$(printf "%s  proxy.sh\n" "$NEW_HASH" | base64 -w 0)
-          SHA=$(gh api repos/${{ github.repository }}/contents/proxy.sh.sha256 --jq .sha 2>/dev/null || echo "")
+        bash -n proxy.sh
+        openssl dgst -sha256 -sign "$signing_dir/private.pem" -out "$signing_dir/proxy.sh.sig" proxy.sh
+        openssl dgst -sha256 -verify "$signing_dir/public.pem" -signature "$signing_dir/proxy.sh.sig" proxy.sh
+        sha256sum proxy.sh > "$signing_dir/proxy.sh.sha256"
 
-          if [ -n "$SHA" ]; then
-            gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sha256 \
-              -f message="chore: update proxy.sh.sha256 checksum [skip ci]" \
-              -f content="$CONTENT" \
-              -f sha="$SHA" \
-              -f branch="main"
-          else
-            gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sha256 \
-              -f message="chore: update proxy.sh.sha256 checksum [skip ci]" \
-              -f content="$CONTENT" \
-              -f branch="main"
-          fi
-          echo "Successfully updated and signed checksum commit."
-        else
-          echo "Checksum is already up to date. No commit needed."
+        if cmp -s proxy.sh.sig "$signing_dir/proxy.sh.sig" && cmp -s proxy.sh.sha256 "$signing_dir/proxy.sh.sha256"; then
+          echo "Release artifacts are already up to date."
+          exit 0
         fi
 
-        if [ -n "$OLD_SIGNATURE_SHA" ]; then
-          gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sig \
-            -f message="chore: update proxy.sh release signature [skip ci]" \
-            -f content="$NEW_SIGNATURE" \
-            -f sha="$OLD_SIGNATURE_SHA" \
-            -f branch="main"
-        else
-          gh api --method PUT repos/${{ github.repository }}/contents/proxy.sh.sig \
-            -f message="chore: add proxy.sh release signature [skip ci]" \
-            -f content="$NEW_SIGNATURE" \
-            -f branch="main"
-        fi
-        rm -f release-private.pem proxy.sh.sig
+        # Commit both files together, only if main still points to the revision
+        # used for signing. A concurrent push must never receive stale artifacts.
+        jq -n --arg repository "$GITHUB_REPOSITORY" --arg head "$(git rev-parse HEAD)" \
+          --arg checksum "$(base64 -w 0 "$signing_dir/proxy.sh.sha256")" \
+          --arg signature "$(base64 -w 0 "$signing_dir/proxy.sh.sig")" '{
+            query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+            variables: { input: {
+              branch: { repositoryNameWithOwner: $repository, refName: "main" },
+              expectedHeadOid: $head,
+              message: { headline: "chore: update proxy.sh release artifacts [skip ci]" },
+              fileChanges: { additions: [
+                { path: "proxy.sh.sha256", contents: $checksum },
+                { path: "proxy.sh.sig", contents: $signature }
+              ] }
+            } }
+          }' | gh api graphql --input - --jq '.data.createCommitOnBranch.commit.oid'

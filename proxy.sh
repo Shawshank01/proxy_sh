@@ -19,13 +19,14 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="5.4.0"
+SCRIPT_VERSION="5.4.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
 DEFAULT_SS_PORT=80
 DEFAULT_QUOTA_TIMEZONE="UTC"
 DEFAULT_USER_LIMIT_GB=300
+MAX_USER_LIMIT_GB=8589934591
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -56,6 +57,20 @@ require_valid_label() {
 		echo -e "${RED}User label must be 1-128 characters and cannot contain '|'.${NC}" >&2
 		return 1
 	fi
+}
+
+# Normalise decimal input before using it in arithmetic or passing it to jq.
+parse_decimal_range() {
+	local number=$1 min=$2 max=$3
+	[[ "$number" =~ ^[0-9]+$ ]] || return 1
+	number=${number#"${number%%[!0]*}"}
+	number=${number:-0}
+	[[ ${#number} -le ${#max} ]] || return 1
+	if [[ ${#number} -eq ${#max} && "$number" > "$max" ]]; then
+		return 1
+	fi
+	((number >= min)) || return 1
+	printf '%s\n' "$number"
 }
 
 require_gnu_linux
@@ -125,7 +140,7 @@ generate_uuid() {
 		uuidgen | tr '[:upper:]' '[:lower:]'
 	else
 		local hex
-		hex=$(openssl rand -hex 16)
+		hex=$(openssl rand -hex 16) || return 1
 		printf '%s-%s-4%s-%s%s-%s\n' \
 			"${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
 			"$(printf '%x' $(((0x${hex:16:2} & 0x3f) | 0x80)))" "${hex:18:2}" "${hex:20:12}"
@@ -135,10 +150,10 @@ generate_uuid() {
 ensure_service_dir() {
 	local dir=$1
 	if [[ ! -d "$dir" ]]; then
-		mkdir -p "$dir" 2>/dev/null || $SUDO mkdir -p "$dir"
+		mkdir -p "$dir" 2>/dev/null || $SUDO mkdir -p "$dir" || return 1
 	fi
 	if [[ "$EUID" -ne 0 ]] && [[ -n "$SUDO" ]] && [[ -d "$dir" ]]; then
-		$SUDO chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
+		$SUDO chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || return 1
 	fi
 }
 
@@ -340,7 +355,7 @@ setup_docker_apt_repo() {
 		check_distro || return 1
 	fi
 
-	$SUDO install -m 0755 -d /etc/apt/keyrings
+	$SUDO install -m 0755 -d /etc/apt/keyrings || return 1
 
 	local repo_url repo_codename
 	if [[ "$DISTRO" = "linuxmint" ]]; then
@@ -371,10 +386,17 @@ setup_docker_apt_repo() {
 		return 1
 	fi
 
-	curl -fsSL "${repo_url}/gpg" | $SUDO gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-	$SUDO chmod a+r /etc/apt/keyrings/docker.gpg
+	local docker_key architecture
+	make_temp_file docker_key || return 1
+	if ! curl -fsSL "${repo_url}/gpg" | gpg --batch --yes --dearmor -o "$docker_key"; then
+		rm -f "$docker_key"
+		return 1
+	fi
+	$SUDO install -m 0644 "$docker_key" /etc/apt/keyrings/docker.gpg || return 1
+	rm -f "$docker_key"
+	architecture=$(dpkg --print-architecture) || return 1
 
-	echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $repo_url $repo_codename stable" | $SUDO tee /etc/apt/sources.list.d/docker.list >/dev/null
+	echo "deb [arch=$architecture signed-by=/etc/apt/keyrings/docker.gpg] $repo_url $repo_codename stable" | $SUDO tee /etc/apt/sources.list.d/docker.list >/dev/null
 }
 
 install_docker_packages() {
@@ -386,25 +408,30 @@ install_docker_packages() {
 	case "$DISTRO" in
 	ubuntu | debian | linuxmint)
 
-		$SUDO apt-get update
+		$SUDO apt-get update || return 1
 		if ! $SUDO apt-get install -y ca-certificates curl gnupg; then
 			echo -e "${RED}Failed to install prerequisites. Please install them manually.${NC}"
 			return 1
 		fi
 
-		setup_docker_apt_repo
+		setup_docker_apt_repo || return 1
 
 		# Update and install Docker
-		$SUDO apt-get update
+		$SUDO apt-get update || return 1
 		if ! $SUDO apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
 			echo -e "${RED}Failed to install Docker. Please install it manually.${NC}"
 			return 1
 		fi
 		;;
 	centos | rhel | fedora)
-		$SUDO dnf -y install dnf-plugins-core
-		$SUDO dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-		$SUDO dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+		local repo_url="https://download.docker.com/linux/$DISTRO/docker-ce.repo"
+		if dnf --version 2>/dev/null | awk '/^dnf5 version / { found=1 } END { exit !found }'; then
+			$SUDO dnf config-manager addrepo --overwrite --from-repofile="$repo_url" || return 1
+		else
+			$SUDO dnf -y install dnf-plugins-core || return 1
+			$SUDO dnf config-manager --add-repo "$repo_url" || return 1
+		fi
+		$SUDO dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
 		;;
 	*)
 		echo -e "${RED}Unsupported distribution for automatic Docker installation. Please install Docker and Docker Compose manually.${NC}"
@@ -452,13 +479,13 @@ install_docker_compose() {
 				return 1
 			fi
 
-			setup_docker_apt_repo
+			setup_docker_apt_repo || return 1
 
 			# Remove conflicting packages that might be installed from distro repos
 			echo -e "${YELLOW}Removing conflicting packages to avoid installation errors...${NC}"
 			$SUDO apt-get remove -y docker-buildx docker-compose docker-doc podman-docker || true
 
-			$SUDO apt-get update
+			$SUDO apt-get update || return 1
 			if $SUDO apt-get install -y docker-compose-plugin; then
 				echo -e "${GREEN}Docker Compose plugin installed successfully from Docker repository.${NC}"
 			else
@@ -483,7 +510,7 @@ install_docker() {
 		echo -e "${GREEN}Docker is already installed.${NC}"
 	else
 		echo -e "${YELLOW}Docker is not installed.${NC}"
-		read -p "$(echo -e ${YELLOW}Would you like to install Docker? [y/N]: ${NC})" install_confirm
+		read -p "$(echo -e ${YELLOW}Would you like to install Docker? [y/N]: ${NC})" install_confirm || return 1
 		if [[ "$install_confirm" != "y" && "$install_confirm" != "Y" ]]; then
 			echo -e "${RED}Docker installation cancelled.${NC}"
 			return 1
@@ -502,22 +529,24 @@ install_docker() {
 			return
 		else
 			echo -e "${YELLOW}Docker Compose is installed but not working (broken on newer Python versions).${NC}"
-			read -p "$(echo -e ${YELLOW}Would you like to upgrade to a working Docker Compose version? [y/N]: ${NC})" upgrade_confirm
+			read -p "$(echo -e ${YELLOW}Would you like to upgrade to a working Docker Compose version? [y/N]: ${NC})" upgrade_confirm || return 1
 			if [[ "$upgrade_confirm" == "y" || "$upgrade_confirm" == "Y" ]]; then
 				echo -e "${YELLOW}Upgrading Docker Compose...${NC}"
 				install_docker_compose
 			else
 				echo -e "${RED}Docker Compose upgrade cancelled. Some features may not work.${NC}"
+				return 1
 			fi
 			return
 		fi
 	else
 		echo -e "${YELLOW}Docker Compose is not installed.${NC}"
-		read -p "$(echo -e ${YELLOW}Would you like to install Docker Compose? [y/N]: ${NC})" install_confirm
+		read -p "$(echo -e ${YELLOW}Would you like to install Docker Compose? [y/N]: ${NC})" install_confirm || return 1
 		if [[ "$install_confirm" == "y" || "$install_confirm" == "Y" ]]; then
 			install_docker_compose
 		else
 			echo -e "${RED}Docker Compose installation cancelled. Some features may not work.${NC}"
+			return 1
 		fi
 		return
 	fi
@@ -557,8 +586,8 @@ ensure_docker_compose() {
 
 check_environment() {
 	echo -e "${YELLOW}Checking environment...${NC}"
-	check_distro
-	install_docker
+	check_distro || return 1
+	install_docker || return 1
 	echo -e "${GREEN}Environment check completed!${NC}"
 }
 
@@ -647,9 +676,9 @@ release_version_lock_if_needed() {
 
 		echo -e "${YELLOW}Releasing version lock ($current_image) and resetting to latest...${NC}"
 		local tmp_file backup_file
-		make_temp_file tmp_file
-		make_temp_file backup_file
-		cp -p "$dir/docker-compose.yml" "$backup_file"
+		make_temp_file tmp_file || return 1
+		make_temp_file backup_file || return 1
+		cp -p "$dir/docker-compose.yml" "$backup_file" || return 1
 
 		if ! awk -v new_img="$expected_default" '/^[[:space:]]*image:[[:space:]]*/ { sub(/image:[[:space:]]*.*/, "image: " new_img) } { print }' "$dir/docker-compose.yml" >"$tmp_file"; then
 			rm -f "$tmp_file" "$backup_file"
@@ -657,7 +686,7 @@ release_version_lock_if_needed() {
 			return 1
 		fi
 		apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
-		mv "$tmp_file" "$dir/docker-compose.yml"
+		mv "$tmp_file" "$dir/docker-compose.yml" || return 1
 
 		echo "Recreating container with latest image..."
 		if (cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d); then
@@ -731,11 +760,11 @@ migrate_xray_config_for_finalrules() {
 	fi
 
 	local tmp_config
-	make_temp_file tmp_config
+	make_temp_file tmp_config || return 1
 
 	if jq '
         ((.routing.rules // []) | any(.ip? // [] | index("geoip:cn"))) as $has_china_rules |
-        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings) |= (.minClientVer //= "") |
+        (.inbounds[] | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings) |= (.minClientVer //= "") |
         (.outbounds[] | select(.tag == "direct" and .protocol == "freedom")) |= (
             .settings //= {} |
             .settings.domainStrategy //= "AsIs" |
@@ -753,8 +782,12 @@ migrate_xray_config_for_finalrules() {
             else . end
         )
     ' "$config_file" >"$tmp_config" && jq -e . "$tmp_config" >/dev/null 2>&1; then
-		apply_preserved_file_metadata "$config_file" "$tmp_config"
-		mv "$tmp_config" "$config_file"
+		if cmp -s "$config_file" "$tmp_config"; then
+			rm -f "$tmp_config"
+		else
+			apply_preserved_file_metadata "$config_file" "$tmp_config"
+			mv "$tmp_config" "$config_file" || return 1
+		fi
 	else
 		rm -f "$tmp_config"
 	fi
@@ -775,7 +808,7 @@ change_container_version() {
 	echo "1) Xray"
 	echo "2) Shadowsocks"
 	echo "0) Back"
-	read -p "Select the container [0-2]: " container_choice
+	read -p "Select the container [0-2]: " container_choice || return 1
 
 	local dir=""
 	local container_name=""
@@ -817,7 +850,7 @@ change_container_version() {
 
 	echo ""
 	echo "Enter the specific version tag you want to downgrade/upgrade to:"
-	read -p "Target version tag: " target_version
+	read -p "Target version tag: " target_version || return 1
 
 	target_version=$(echo "$target_version" | xargs)
 	if [[ -z "$target_version" ]]; then
@@ -841,9 +874,9 @@ change_container_version() {
 	fi
 
 	local tmp_file backup_file
-	make_temp_file tmp_file
-	make_temp_file backup_file
-	cp -p "$dir/docker-compose.yml" "$backup_file"
+	make_temp_file tmp_file || return 1
+	make_temp_file backup_file || return 1
+	cp -p "$dir/docker-compose.yml" "$backup_file" || return 1
 
 	if ! awk -v new_img="$new_image" '/^[[:space:]]*image:[[:space:]]*/ { sub(/image:[[:space:]]*.*/, "image: " new_img) } { print }' "$dir/docker-compose.yml" >"$tmp_file"; then
 		rm -f "$tmp_file" "$backup_file"
@@ -851,7 +884,7 @@ change_container_version() {
 		return 1
 	fi
 	apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
-	mv "$tmp_file" "$dir/docker-compose.yml"
+	mv "$tmp_file" "$dir/docker-compose.yml" || return 1
 
 	if [[ "$dir" == "xray" ]]; then
 		migrate_xray_config_for_finalrules || true
@@ -874,9 +907,8 @@ restore_container() {
 	local service_name=$1
 	local container_name=$2
 	local dir=$3
-	local docker_image=$4
-	local links_file=$5
-	local link_type=$6
+	local links_file=$4
+	local link_type=$5
 
 	echo -e "\n${YELLOW}Restoring ${service_name} deployment...${NC}"
 
@@ -894,12 +926,8 @@ restore_container() {
 		fi
 	fi
 
-	echo "Pulling ${docker_image} image..."
-	$SUDO docker pull "$docker_image"
-
 	(
 		cd "$dir" || return 1
-
 		echo -e "${YELLOW}Starting ${service_name} container...${NC}"
 		if $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d; then
 			echo -e "${GREEN}${service_name} container has been restored and started!${NC}"
@@ -921,11 +949,11 @@ restore_container() {
 }
 
 restore_xray() {
-	restore_container "Xray" "xray_server" "xray" "$XRAY_DOCKER_IMAGE" "vless_links.txt" "VLESS"
+	restore_container "Xray" "xray_server" "xray" "vless_links.txt" "VLESS"
 }
 
 restore_shadowsocks() {
-	restore_container "Shadowsocks" "ssserver" "shadowsocks" "$SS_DOCKER_IMAGE" "ss_links.txt" "SS"
+	restore_container "Shadowsocks" "ssserver" "shadowsocks" "ss_links.txt" "SS"
 }
 
 restore_deployment() {
@@ -978,7 +1006,7 @@ restore_deployment() {
 		echo "3) Both"
 	fi
 	echo "0) Cancel"
-	read -p "Enter your choice: " restore_choice
+	read -p "Enter your choice: " restore_choice || return 1
 
 	case $restore_choice in
 	1)
@@ -997,8 +1025,10 @@ restore_deployment() {
 		;;
 	3)
 		if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]] && [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
-			restore_xray
-			restore_shadowsocks
+			local restore_status=0
+			restore_xray || restore_status=1
+			restore_shadowsocks || restore_status=1
+			return "$restore_status"
 		else
 			echo -e "${RED}Both configurations are not available.${NC}"
 		fi
@@ -1051,9 +1081,11 @@ delete_container() {
 }
 
 delete_xray() {
+	if [[ -d "xray" ]]; then
+		with_xray_quota_lock delete_container "Xray" "xray" || return 1
+	fi
 	disable_xray_quota_systemd_silent
 	disable_xray_quota_cron_silent
-	delete_container "Xray" "xray"
 }
 
 delete_shadowsocks() {
@@ -1130,12 +1162,12 @@ is_chinese_domain() {
 }
 
 prompt_reality_target() {
-	local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
+	local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST probe_port probe_target DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
 	local ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry
-	local extracted_domains ping_host_in_cert ping_lower d d_lower wd base_wd aux_domains inc_aux sni_choice chosen_primary remaining_aux i
+	local ping_lower d wd inc_aux sni_choice i
 
 	while true; do
-		read -p "Enter a domain to probe with 'xray tls ping': " REALITY_DOMAIN
+		read -p "Enter a domain to probe with 'xray tls ping': " REALITY_DOMAIN || return 1
 		if [[ -z "$REALITY_DOMAIN" ]]; then
 			echo -e "${RED}A domain is required. Please enter a domain.${NC}"
 			continue
@@ -1149,7 +1181,18 @@ prompt_reality_target() {
 		fi
 
 		PING_HOST=${REALITY_DOMAIN_CLEAN%%:*}
-		if is_microsoft_domain "$PING_HOST"; then
+		probe_port=443
+		if [[ -z "$PING_HOST" || "$PING_HOST" == -* || ! "$PING_HOST" =~ ^[[:alnum:]_.-]+$ ]]; then
+			echo -e "${RED}Enter a domain name with an optional port.${NC}"
+			continue
+		fi
+		if [[ "$REALITY_DOMAIN_CLEAN" == *":"* ]] &&
+			! probe_port=$(parse_decimal_range "${REALITY_DOMAIN_CLEAN#*:}" 1 65535); then
+			echo -e "${RED}Reality target port must be between 1 and 65535.${NC}"
+			continue
+		fi
+		probe_target="${PING_HOST}:${probe_port}"
+		if is_microsoft_domain "${PING_HOST%.}"; then
 			echo -e "${RED}Error: Microsoft domains (e.g., microsoft.com, azure.com, office.com, bing.com, etc.) are not accepted for Reality SNI. Please enter a different domain.${NC}"
 			continue
 		fi
@@ -1161,19 +1204,19 @@ prompt_reality_target() {
 
 		if [[ -n "$DOMAIN_WARNING" ]]; then
 			echo -e "$DOMAIN_WARNING"
-			read -p "Are you sure you want to continue with this domain? [y/N]: " china_confirm
+			read -p "Are you sure you want to continue with this domain? [y/N]: " china_confirm || return 1
 			if [[ "$china_confirm" != "y" && "$china_confirm" != "Y" ]]; then
 				continue
 			fi
 		fi
 
-		echo "Running xray tls ping for $PING_HOST..."
-		PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" tls ping "$PING_HOST" 2>&1)
+		echo "Running xray tls ping for $probe_target..."
+		VALIDATION_ERRORS=0
+		PING_OUTPUT=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" tls ping "$probe_target" 2>&1) || VALIDATION_ERRORS=1
 		echo "----- tls ping output -----"
 		echo "$PING_OUTPUT"
 		echo "---------------------------"
 
-		VALIDATION_ERRORS=0
 		if echo "$PING_OUTPUT" | grep -qi "TLS 1.3\|TLSv1.3\|Version:.*303"; then
 			echo -e "${GREEN}✓ TLSv1.3 supported${NC}"
 		else
@@ -1181,7 +1224,7 @@ prompt_reality_target() {
 			VALIDATION_ERRORS=1
 		fi
 
-		CURL_H2_HEADERS=$(curl -I --http2 --max-time 10 -sS "https://${PING_HOST}" 2>&1 || true)
+		CURL_H2_HEADERS=$(curl -I --http2 --max-time 10 -sS "https://${probe_target}" 2>&1 || true)
 		if echo "$CURL_H2_HEADERS" | grep -qiE '^HTTP/2'; then
 			echo -e "${GREEN}✓ HTTP/2 (H2) supported (curl)${NC}"
 		else
@@ -1200,22 +1243,18 @@ prompt_reality_target() {
 
 		if [[ "$VALIDATION_ERRORS" -eq 1 ]]; then
 			echo -e "${YELLOW}This domain may not be suitable as a Reality target.${NC}"
-			read -p "Continue anyway? [y/N]: " force_continue
+			read -p "Continue anyway? [y/N]: " force_continue || return 1
 			if [[ "$force_continue" != "y" && "$force_continue" != "Y" ]]; then
 				continue
 			fi
 		fi
 
-		read -p "Use this domain and output? [Y/n]: " use_domain
+		read -p "Use this domain and output? [Y/n]: " use_domain || return 1
 		if [[ "$use_domain" == "n" || "$use_domain" == "N" ]]; then
 			continue
 		fi
 
-		if [[ "$REALITY_DOMAIN_CLEAN" == *":"* ]]; then
-			REALITY_TARGET="$REALITY_DOMAIN_CLEAN"
-		else
-			REALITY_TARGET="${REALITY_DOMAIN_CLEAN}:443"
-		fi
+		REALITY_TARGET="$probe_target"
 
 		local extracted_domains=()
 		ALLOWED_DOMAINS=$(echo "$PING_OUTPUT" | sed -nE "s/.*Cert's allowed domains: *\[([^]]*)\].*/\1/p")
@@ -1282,7 +1321,7 @@ prompt_reality_target() {
 				echo -e "\n${YELLOW}Notice: The certificate contains multiple domains:${NC}"
 				echo -e "  Primary target: ${GREEN}$PING_HOST${NC}"
 				echo -e "  Auxiliary:      ${aux_domains[*]}"
-				read -p "Include auxiliary domains in serverNames? (Recommended 'N' to keep only $PING_HOST) [y/N]: " inc_aux
+				read -p "Include auxiliary domains in serverNames? (Recommended 'N' to keep only $PING_HOST) [y/N]: " inc_aux || return 1
 				if [[ "$inc_aux" == "y" || "$inc_aux" == "Y" ]]; then
 					REALITY_SERVER_NAMES=("$PING_HOST" "${aux_domains[@]}")
 				else
@@ -1296,10 +1335,9 @@ prompt_reality_target() {
 			for i in "${!extracted_domains[@]}"; do
 				echo "  $((i + 1))) ${extracted_domains[$i]}"
 			done
-			read -p "Select primary SNI [1-${#extracted_domains[@]}] (Default: 1): " sni_choice
-			sni_choice=$(echo "$sni_choice" | tr -cd '0-9')
+			read -p "Select primary SNI [1-${#extracted_domains[@]}] (Default: 1): " sni_choice || return 1
 			local chosen_primary=""
-			if [[ -n "$sni_choice" ]] && ((sni_choice >= 1 && sni_choice <= ${#extracted_domains[@]})); then
+			if sni_choice=$(parse_decimal_range "$sni_choice" 1 "${#extracted_domains[@]}"); then
 				chosen_primary="${extracted_domains[$((sni_choice - 1))]}"
 			else
 				chosen_primary="${extracted_domains[0]}"
@@ -1311,7 +1349,7 @@ prompt_reality_target() {
 			done
 
 			if [[ ${#remaining_aux[@]} -gt 0 ]]; then
-				read -p "Include other auxiliary domains in serverNames? [y/N]: " inc_aux
+				read -p "Include other auxiliary domains in serverNames? [y/N]: " inc_aux || return 1
 				if [[ "$inc_aux" == "y" || "$inc_aux" == "Y" ]]; then
 					REALITY_SERVER_NAMES=("$chosen_primary" "${remaining_aux[@]}")
 				else
@@ -1321,7 +1359,7 @@ prompt_reality_target() {
 				REALITY_SERVER_NAMES=("$chosen_primary")
 			fi
 		else
-			read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $PING_HOST]: " SERVER_NAMES_INPUT
+			read -p "Enter serverNames (comma-separated, no * wildcards) [Default: $PING_HOST]: " SERVER_NAMES_INPUT || return 1
 			if [[ -n "$SERVER_NAMES_INPUT" ]]; then
 				IFS=',' read -r -a sni_input_arr <<<"$SERVER_NAMES_INPUT"
 				for sni_entry in "${sni_input_arr[@]}"; do
@@ -1347,23 +1385,21 @@ install_xray() (
 	local default_anchor_epoch has_quota_limits cycle_type_choice cycle_day clean_day now_epoch u_email u_uuid u_limit u_anchor
 	local XHTTP_PATH REALITY_TARGET REALITY_SERVER_NAMES
 	local REALITY_FALLBACK_ADDRESS REALITY_FALLBACK_PORT
-	local REALITY_DOMAIN REALITY_DOMAIN_CLEAN PING_HOST DOMAIN_WARNING china_confirm PING_OUTPUT VALIDATION_ERRORS CURL_H2_HEADERS force_continue use_domain
-	local ALLOWED_DOMAINS DROPPED_WILDCARDS SEEN_DOMAINS domain SERVER_NAMES_INPUT sni_input_arr sni_entry
 	local enable_ipv6 LISTEN_ADDR client_pairs idx shortids_json server_names_json clients_json
 	local SERVER_ADDR REMARKS SNI_DOMAIN TARGET_VALUE LINKS link server_uri_host sni_url public_key_url xhttp_path_url fragment_url start_confirm enable_auto_sched
 
 	echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
-	ensure_service_dir "xray"
+	ensure_service_dir "xray" || return 1
 	cd xray || return 1
 
 	echo "Pulling $XRAY_DOCKER_IMAGE image..."
-	$SUDO docker pull "$XRAY_DOCKER_IMAGE"
+	$SUDO docker pull "$XRAY_DOCKER_IMAGE" || return 1
 
-	read -p "How many users do you need? [Default: $DEFAULT_UUIDS]: " num_uuids
+	read -p "How many users do you need? [Default: $DEFAULT_UUIDS]: " num_uuids || return 1
 	num_uuids=${num_uuids:-$DEFAULT_UUIDS}
 
-	if ! [[ "$num_uuids" =~ ^[0-9]+$ ]] || [[ "$num_uuids" -lt 1 ]]; then
+	if ! num_uuids=$(parse_decimal_range "$num_uuids" 1 9223372036854775806); then
 		echo -e "${RED}User count must be a positive integer.${NC}"
 		return 1
 	fi
@@ -1372,7 +1408,7 @@ install_xray() (
 
 	# Generate keys and IDs
 	echo "Generating keys and IDs..."
-	KEYS=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" x25519)
+	KEYS=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" x25519) || return 1
 	PRIVATE_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /private[[:space:]]*key/ {gsub(/\r/, "", $2); print $2; exit}')
 	PUBLIC_KEY=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
 
@@ -1383,7 +1419,7 @@ install_xray() (
 	fi
 
 	if [[ -z "$PUBLIC_KEY" ]]; then
-		DERIVED=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" x25519 -i "$PRIVATE_KEY")
+		DERIVED=$($SUDO docker run --rm "$XRAY_DOCKER_IMAGE" x25519 -i "$PRIVATE_KEY") || return 1
 		PUBLIC_KEY=$(echo "$DERIVED" | awk -F': *' 'tolower($0) ~ /(public[[:space:]]*key|password)/ {gsub(/\r/, "", $2); print $2; exit}')
 	fi
 
@@ -1417,8 +1453,8 @@ install_xray() (
 	USER_EMAILS=()
 	USER_LIMITS=()
 
-	for i in $(seq 1 $num_uuids); do
-		uuid=$(generate_uuid)
+	for ((i = 1; i <= num_uuids; i++)); do
+		uuid=$(generate_uuid) || return 1
 
 		while true; do
 			user_email="u$(openssl rand -hex 8)"
@@ -1429,16 +1465,16 @@ install_xray() (
 		done
 		echo "Generated user ID for user ${i}: ${user_email}"
 
-		read -p "Set monthly data limit for ${user_email}? [Y/n]: " set_limit
+		read -p "Set monthly data limit for ${user_email}? [Y/n]: " set_limit || return 1
 		user_limit_gb=0
 		if [[ -z "$set_limit" || "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
 			while true; do
-				read -p "Enter monthly limit for ${user_email} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb
+				read -p "Enter monthly limit for ${user_email} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb || return 1
 				user_limit_gb=${user_limit_gb:-$DEFAULT_USER_LIMIT_GB}
-				if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [[ "$user_limit_gb" -gt 0 ]]; then
+				if user_limit_gb=$(parse_decimal_range "$user_limit_gb" 1 "$MAX_USER_LIMIT_GB"); then
 					break
 				fi
-				echo -e "${RED}Please enter a positive integer GB value.${NC}"
+				echo -e "${RED}Please enter an integer between 1 and ${MAX_USER_LIMIT_GB} GB.${NC}"
 			done
 		fi
 
@@ -1458,20 +1494,20 @@ install_xray() (
 	done
 
 	if [[ "$has_quota_limits" -eq 1 ]]; then
-		prompt_select_timezone QUOTA_TIMEZONE "$DEFAULT_QUOTA_TIMEZONE"
+		prompt_select_timezone QUOTA_TIMEZONE "$DEFAULT_QUOTA_TIMEZONE" || return 1
 
 		echo ""
 		echo "Choose billing cycle reset schedule for users with data limits:"
 		echo "1) Start today (resets 1 month from right now) [Default]"
 		echo "2) Reset on a specific day of every month (e.g. 1st of the month)"
-		read -p "Enter choice [1-2, Default: 1]: " cycle_type_choice
+		read -p "Enter choice [1-2, Default: 1]: " cycle_type_choice || return 1
 		cycle_type_choice=${cycle_type_choice:-1}
 
 		if [[ "$cycle_type_choice" == "2" ]]; then
-			read -p "Enter the day of the month [1-31, Default: 1]: " cycle_day
+			read -p "Enter the day of the month [1-31, Default: 1]: " cycle_day || return 1
 			cycle_day=${cycle_day:-1}
-			clean_day=$((10#$cycle_day))
-			if [[ "$clean_day" -lt 1 ]] || [[ "$clean_day" -gt 31 ]]; then
+			if ! clean_day=$(parse_decimal_range "$cycle_day" 1 31); then
+				echo -e "${YELLOW}Invalid day. Using day 1.${NC}"
 				clean_day=1
 			fi
 			default_anchor_epoch=$(TZ="$QUOTA_TIMEZONE" date -d "2000-01-$(printf "%02d" "$clean_day") 00:00:00" +%s)
@@ -1485,7 +1521,7 @@ install_xray() (
 		u_limit="${USER_LIMITS[$idx]}"
 		u_anchor="$default_anchor_epoch"
 
-		cycle_bounds=$(calculate_cycle_bounds "$u_anchor" "$now_epoch" "$QUOTA_TIMEZONE")
+		cycle_bounds=$(calculate_cycle_bounds "$u_anchor" "$now_epoch" "$QUOTA_TIMEZONE") || return 1
 		user_cycle_start="${cycle_bounds%%|*}"
 		user_cycle_end="${cycle_bounds##*|}"
 
@@ -1496,33 +1532,21 @@ install_xray() (
 	done
 
 	# Generate random XHTTP path for security
-	XHTTP_PATH=$(openssl rand -hex 4)
+	XHTTP_PATH=$(openssl rand -hex 4) || return 1
 
 	REALITY_TARGET=""
 	REALITY_SERVER_NAMES=()
-	prompt_reality_target
+	prompt_reality_target || return 1
 
 	# Keep the REALITY fallback target behind a loopback-only Tunnel. This prevents
 	# failed REALITY handshakes from directly exposing a configurable egress target.
-	REALITY_FALLBACK_ADDRESS="${REALITY_TARGET%%:*}"
-	REALITY_FALLBACK_PORT=443
-	if [[ "$REALITY_TARGET" == *":"* ]]; then
-		REALITY_FALLBACK_PORT="${REALITY_TARGET##*:}"
-	fi
-	if ! [[ "$REALITY_FALLBACK_PORT" =~ ^[0-9]+$ ]]; then
-		echo -e "${RED}Reality target port must be between 1 and 65535.${NC}"
-		return 1
-	fi
-	REALITY_FALLBACK_PORT=$((10#$REALITY_FALLBACK_PORT))
-	if ((REALITY_FALLBACK_PORT < 1 || REALITY_FALLBACK_PORT > 65535)); then
-		echo -e "${RED}Reality target port must be between 1 and 65535.${NC}"
-		return 1
-	fi
+	REALITY_FALLBACK_ADDRESS="${REALITY_TARGET%:*}"
+	REALITY_FALLBACK_PORT="${REALITY_TARGET##*:}"
 	REALITY_TARGET="127.0.0.1:${XRAY_REALITY_FALLBACK_PORT}"
 
 	local enable_ipv6
 	while true; do
-		read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6
+		read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ipv6 || return 1
 		case "$enable_ipv6" in
 		[yY])
 			LISTEN_ADDR="::"
@@ -1541,7 +1565,7 @@ install_xray() (
 	local enable_china_rules=true
 	local china_rules_choice
 	while true; do
-		read -p "Enable routing rules to block mainland China domains and IPs (geosite:cn, geoip:cn)? [Y/n]: " china_rules_choice
+		read -p "Enable routing rules to block mainland China domains and IPs (geosite:cn, geoip:cn)? [Y/n]: " china_rules_choice || return 1
 		case "$china_rules_choice" in
 		[yY] | "")
 			enable_china_rules=true
@@ -1557,7 +1581,7 @@ install_xray() (
 		esac
 	done
 
-	cat >docker-compose.yml <<EOL
+	cat >docker-compose.yml <<EOL || return 1
 services:
   xray:
     image: $XRAY_DOCKER_IMAGE
@@ -1582,9 +1606,9 @@ EOL
 	done
 
 	local clients_json shortids_json server_names_json
-	clients_json=$(jq -nc '$ARGS.positional | [range(0; length; 2) as $i | {id: .[$i], flow: "", email: .[$i+1]}]' --args "${client_pairs[@]}")
-	shortids_json=$(jq -nc '$ARGS.positional' --args "${SERVER_SHORTIDS[@]}")
-	server_names_json=$(jq -nc '$ARGS.positional' --args "${REALITY_SERVER_NAMES[@]}")
+	clients_json=$(jq -nc '$ARGS.positional | [range(0; length; 2) as $i | {id: .[$i], flow: "", email: .[$i+1]}]' --args "${client_pairs[@]}") || return 1
+	shortids_json=$(jq -nc '$ARGS.positional' --args "${SERVER_SHORTIDS[@]}") || return 1
+	server_names_json=$(jq -nc '$ARGS.positional' --args "${REALITY_SERVER_NAMES[@]}") || return 1
 
 	jq -n \
 		--arg listen "$LISTEN_ADDR" \
@@ -1764,7 +1788,7 @@ EOL
                 "tag": "block"
             }
         ]
-      }' >server.jsonc
+      }' >server.jsonc || return 1
 
 	echo -e "${GREEN}Configuration files created successfully!${NC}"
 	echo "--- docker-compose.yml ---"
@@ -1777,10 +1801,10 @@ EOL
 
 	# Prompt for server IP/domain and remarks
 	while true; do
-		read -p "Enter your server IP address or domain: " SERVER_ADDR
+		read -p "Enter your server IP address or domain: " SERVER_ADDR || return 1
 		require_valid_server_address "$SERVER_ADDR" && break
 	done
-	read -p "Enter a remarks name for this server: " REMARKS
+	read -p "Enter a remarks name for this server: " REMARKS || return 1
 
 	# Determine the SNI domain (first serverName, fallback to target host if list empty)
 	SNI_DOMAIN=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // empty' server.jsonc 2>/dev/null | head -n1)
@@ -1821,34 +1845,35 @@ EOL
 		done
 	done
 
+	umask 077
 	echo -e "\nSaving links to vless_links.txt..."
-	printf "%b" "$LINKS" >vless_links.txt
+	printf "%b" "$LINKS" >vless_links.txt || return 1
 	echo "Links saved successfully!"
 
-	cat >user_limits.conf <<EOL
+	cat >user_limits.conf <<EOL || return 1
 TIMEZONE=$QUOTA_TIMEZONE
 EOL
 
-	cat >user_limits.db <<EOL
+	cat >user_limits.db <<EOL || return 1
 # email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status
 $QUOTA_DB_LINES
 EOL
 
 	echo -e "${GREEN}Saved quota metadata:${NC} xray/user_limits.conf, xray/user_limits.db"
 
-	read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm
+	read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm || return 1
 	if [[ -z "$start_confirm" || "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
-		$SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d
+		$SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d || return 1
 		echo -e "${GREEN}Xray container has been started!${NC}"
 		echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
 
 		if [[ "$has_quota_limits" -eq 1 ]]; then
 			echo ""
 			while true; do
-				read -p "Enable automatic background quota check daemon now? [Y/n]: " enable_auto_sched
+				read -p "Enable automatic background quota check daemon now? [Y/n]: " enable_auto_sched || return 1
 				case "$enable_auto_sched" in
 				[yY] | "")
-					configure_xray_quota_auto_check
+					configure_xray_quota_auto_check || return 1
 					break
 					;;
 				[nN])
@@ -1868,7 +1893,6 @@ EOL
 
 change_xray_reality_target() {
 	local config_file="xray/server.jsonc"
-	local links_file="xray/vless_links.txt"
 
 	if [[ ! -f "$config_file" ]]; then
 		echo -e "${RED}Xray configuration not found. Install Xray first.${NC}"
@@ -1889,8 +1913,8 @@ change_xray_reality_target() {
 	fi
 
 	if [[ "$tunnel_count" -eq 1 ]]; then
-		tunnel_port=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].port // empty' "$config_file")
-		if ! [[ "$tunnel_port" =~ ^[0-9]+$ ]] || ((tunnel_port < 1 || tunnel_port > 65535)); then
+		tunnel_port=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].port // empty' "$config_file") || return 1
+		if ! tunnel_port=$(parse_decimal_range "$tunnel_port" 1 65535); then
 			echo -e "${RED}The reality-fallback Tunnel has an invalid listening port. No changes were made.${NC}"
 			return 1
 		fi
@@ -1921,28 +1945,24 @@ change_xray_reality_target() {
 	fi
 
 	local REALITY_TARGET REALITY_SERVER_NAMES=()
-	prompt_reality_target
+	prompt_reality_target || return 1
+	with_xray_quota_lock apply_xray_reality_target "$tunnel_count" "$tunnel_port" "$REALITY_TARGET" "${REALITY_SERVER_NAMES[@]}"
+}
 
-	local fallback_address fallback_port tunnel_target
-	fallback_address="${REALITY_TARGET%%:*}"
-	fallback_port="${REALITY_TARGET##*:}"
-	if [[ -z "$fallback_address" ]] || ! [[ "$fallback_port" =~ ^[0-9]+$ ]]; then
-		echo -e "${RED}The selected Reality target has an invalid address or port. No changes were made.${NC}"
-		return 1
-	fi
-	fallback_port=$((10#$fallback_port))
-	if ((fallback_port < 1 || fallback_port > 65535)); then
-		echo -e "${RED}The selected Reality target has an invalid address or port. No changes were made.${NC}"
-		return 1
-	fi
-	tunnel_target="127.0.0.1:${tunnel_port}"
+apply_xray_reality_target() {
+	local tunnel_count=$1 tunnel_port=$2 reality_target=$3
+	shift 3
+	local server_names=("$@")
+	local config_file="xray/server.jsonc" links_file="xray/vless_links.txt"
+	local fallback_address="${reality_target%:*}" fallback_port="${reality_target##*:}"
+	local tunnel_target="127.0.0.1:${tunnel_port}"
 
 	local server_names_json
-	server_names_json=$(jq -nc '$ARGS.positional' --args "${REALITY_SERVER_NAMES[@]}")
+	server_names_json=$(jq -nc '$ARGS.positional' --args "${server_names[@]}") || return 1
 
-	local tmp_config config_backup links_backup
-	make_temp_file tmp_config
-	make_temp_file config_backup
+	local tmp_config config_backup
+	make_temp_file tmp_config || return 1
+	make_temp_file config_backup || return 1
 	if ! cp -p "$config_file" "$config_backup"; then
 		rm -f "$tmp_config"
 		echo -e "${RED}Failed to back up Xray configuration. No changes were made.${NC}"
@@ -1955,11 +1975,13 @@ change_xray_reality_target() {
 			--arg fallback_address "$fallback_address" \
 			--argjson fallback_port "$fallback_port" \
 			--argjson server_names "$server_names_json" '
-            (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
+            (.inbounds[] | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings)
             |= (.target = $target | .serverNames = $server_names)
             | (.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door")))
             |= (.protocol = "dokodemo-door"
+                | .listen = "127.0.0.1"
                 | .settings = ((.settings // {})
+                    | del(.rewriteAddress, .rewritePort, .portMap)
                     | .network = "tcp"
                     | .address = $fallback_address
                     | .port = $fallback_port
@@ -1988,7 +2010,7 @@ change_xray_reality_target() {
 			--argjson fallback_port "$fallback_port" \
 			--argjson tunnel_port "$tunnel_port" \
 			--argjson server_names "$server_names_json" '
-            (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings)
+            (.inbounds[] | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings)
             |= (.target = $target | .serverNames = $server_names)
             | .inbounds += [{
                 "listen": "127.0.0.1",
@@ -2025,44 +2047,39 @@ change_xray_reality_target() {
 		fi
 	fi
 
-	apply_preserved_file_metadata "$config_file" "$tmp_config"
-	mv "$tmp_config" "$config_file"
-
+	local tmp_links="" sni_url
 	if [[ -f "$links_file" ]]; then
-		make_temp_file links_backup
-		if ! cp -p "$links_file" "$links_backup"; then
-			cp -p "$config_backup" "$config_file"
-			rm -f "$config_backup" "$links_backup"
-			echo -e "${RED}Failed to back up saved VLESS links. No changes were made.${NC}"
+		sni_url=$(url_encode_component "${server_names[0]}") || return 1
+		make_temp_file tmp_links "$PWD/xray/.vless_links.XXXXXX" || return 1
+		if ! sed -E "s|([?&]sni=)[^&#]*|\1${sni_url}|" "$links_file" >"$tmp_links"; then
+			rm -f "$tmp_links"
 			return 1
 		fi
+		apply_preserved_file_metadata "$links_file" "$tmp_links"
 	fi
 
-	echo "Restarting Xray with the new Reality target..."
-	if ! reload_xray_container; then
-		cp -p "$config_backup" "$config_file"
-		if [[ -n "${links_backup:-}" && -f "$links_backup" ]]; then
-			cp -p "$links_backup" "$links_file"
-		fi
-		reload_xray_container || true
-		rm -f "$config_backup" "${links_backup:-}"
-		echo -e "${RED}Reality target change failed. The previous configuration was restored.${NC}"
+	apply_preserved_file_metadata "$config_file" "$tmp_config"
+	if ! mv "$tmp_config" "$config_file"; then
+		rm -f "$tmp_links" "$tmp_config"
 		return 1
 	fi
 
-	if [[ -f "$links_file" ]]; then
-		local new_sni sni_url tmp_links
-		new_sni="${REALITY_SERVER_NAMES[0]}"
-		sni_url=$(url_encode_component "$new_sni")
-		make_temp_file tmp_links
-		sed -E "s#([?&]sni=)[^&]*#\1${sni_url}#" "$links_file" >"$tmp_links"
-		apply_preserved_file_metadata "$links_file" "$tmp_links"
-		mv "$tmp_links" "$links_file"
+	echo "Restarting Xray with the new Reality target..."
+	if ! reload_xray_container || { [[ -n "$tmp_links" ]] && ! mv "$tmp_links" "$links_file"; }; then
+		rm -f "$tmp_links"
+		if cp -p "$config_backup" "$config_file" && reload_xray_container; then
+			echo -e "${RED}Reality target change failed. The previous configuration was restored.${NC}"
+		else
+			echo -e "${RED}Could not restore the previous running Xray configuration.${NC}" >&2
+		fi
+		return 1
 	fi
 
-	rm -f "$config_backup" "${links_backup:-}"
-	echo -e "${GREEN}Xray Reality target changed successfully to ${REALITY_TARGET}.${NC}"
-	echo -e "${YELLOW}Saved VLESS links were updated with SNI ${REALITY_SERVER_NAMES[0]}.${NC}"
+	rm -f "$config_backup"
+	echo -e "${GREEN}Xray Reality target changed successfully to ${reality_target}.${NC}"
+	if [[ -n "$tmp_links" ]]; then
+		echo -e "${YELLOW}Saved VLESS links were updated with SNI ${server_names[0]}.${NC}"
+	fi
 }
 
 # --- Shadowsocks installation ---
@@ -2074,31 +2091,31 @@ install_shadowsocks() (
 
 	echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
 
-	ensure_service_dir "shadowsocks"
+	ensure_service_dir "shadowsocks" || return 1
 	cd shadowsocks || return 1
 
 	echo "Pulling $SS_DOCKER_IMAGE image..."
-	$SUDO docker pull "$SS_DOCKER_IMAGE"
+	$SUDO docker pull "$SS_DOCKER_IMAGE" || return 1
 
 	while true; do
-		read -p "How many users do you need? [Default: $DEFAULT_SS_USERS]: " num_users
+		read -p "How many users do you need? [Default: $DEFAULT_SS_USERS]: " num_users || return 1
 		num_users=${num_users:-$DEFAULT_SS_USERS}
-		if [[ "$num_users" =~ ^[1-9][0-9]*$ ]] && ((num_users <= 1000)); then
+		if num_users=$(parse_decimal_range "$num_users" 1 1000); then
 			break
 		fi
 		echo -e "${RED}User count must be an integer between 1 and 1000.${NC}"
 	done
 
 	while true; do
-		read -p "Which port should Shadowsocks listen on? [Default: $DEFAULT_SS_PORT]: " ss_port
+		read -p "Which port should Shadowsocks listen on? [Default: $DEFAULT_SS_PORT]: " ss_port || return 1
 		ss_port=${ss_port:-$DEFAULT_SS_PORT}
-		if [[ "$ss_port" =~ ^[0-9]+$ ]] && ((ss_port >= 1 && ss_port <= 65535)); then
+		if ss_port=$(parse_decimal_range "$ss_port" 1 65535); then
 			break
 		fi
 		echo -e "${RED}Port must be an integer between 1 and 65535.${NC}"
 	done
 
-	read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ss_ipv6
+	read -p "Enable IPv6 listening (dual-stack)? [y/N]: " enable_ss_ipv6 || return 1
 	if [[ "$enable_ss_ipv6" == "y" || "$enable_ss_ipv6" == "Y" ]]; then
 		SS_LISTEN_ADDR="::"
 	else
@@ -2106,17 +2123,17 @@ install_shadowsocks() (
 	fi
 
 	SS_METHOD="2022-blake3-chacha20-poly1305"
-	SERVER_PSK=$(openssl rand -base64 32)
+	SERVER_PSK=$(openssl rand -base64 32) || return 1
 
 	local ss_users_args=()
 	USER_PSKS=()
 	USER_LABELS=()
-	for i in $(seq 1 $num_users); do
+	for ((i = 1; i <= num_users; i++)); do
 		local user_psk default_label user_label
-		user_psk=$(openssl rand -base64 32)
+		user_psk=$(openssl rand -base64 32) || return 1
 		default_label="user${i}"
 		while true; do
-			read -p "Enter a label for user ${i} [${default_label}]: " user_label
+			read -p "Enter a label for user ${i} [${default_label}]: " user_label || return 1
 			user_label=${user_label:-$default_label}
 			require_valid_label "$user_label" && break
 		done
@@ -2126,7 +2143,7 @@ install_shadowsocks() (
 		ss_users_args+=("$user_label" "$user_psk")
 	done
 
-	cat >docker-compose.yml <<EOL
+	cat >docker-compose.yml <<EOL || return 1
 services:
   ssserver:
     image: $SS_DOCKER_IMAGE
@@ -2145,7 +2162,7 @@ services:
 EOL
 
 	local ss_users_json
-	ss_users_json=$(jq -nc '$ARGS.positional | [range(0; length; 2) as $i | {name: .[$i], password: .[$i+1]}]' --args "${ss_users_args[@]}")
+	ss_users_json=$(jq -nc '$ARGS.positional | [range(0; length; 2) as $i | {name: .[$i], password: .[$i+1]}]' --args "${ss_users_args[@]}") || return 1
 
 	jq -n \
 		--arg server "$SS_LISTEN_ADDR" \
@@ -2161,7 +2178,7 @@ EOL
         "method": $method,
         "mode": $mode,
         "users": $users
-      }' >server.json
+      }' >server.json || return 1
 
 	echo -e "${GREEN}Configuration files created successfully!${NC}"
 	echo "--- docker-compose.yml ---"
@@ -2173,13 +2190,13 @@ EOL
 
 	# Prompt for server IP/domain and remarks
 	while true; do
-		read -p "Enter your server IP address or domain: " SERVER_ADDR
+		read -p "Enter your server IP address or domain: " SERVER_ADDR || return 1
 		require_valid_server_address "$SERVER_ADDR" && break
 	done
-	read -p "Enter a remarks name for this server: " REMARKS
+	read -p "Enter a remarks name for this server: " REMARKS || return 1
 	REMARKS=${REMARKS:-shadowsocks_rust}
 
-	read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm
+	read -p "Is the configuration correct? Do you want to start the container? [Y/n]: " start_confirm || return 1
 	if [[ -z "$start_confirm" || "$start_confirm" == "y" || "$start_confirm" == "Y" ]]; then
 		if $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d; then
 			echo -e "${GREEN}Shadowsocks container has been started!${NC}"
@@ -2201,11 +2218,13 @@ EOL
 				LINKS+="$link\n"
 			done
 
+			umask 077
 			echo -e "\nSaving links to ss_links.txt..."
-			printf "%b" "$LINKS" >ss_links.txt
+			printf "%b" "$LINKS" >ss_links.txt || return 1
 			echo "Links saved successfully!"
 		else
 			echo -e "${RED}Failed to start Shadowsocks container.${NC}"
+			return 1
 		fi
 	else
 		echo -e "${RED}Container start cancelled.${NC}"
@@ -2237,7 +2256,7 @@ add_months_clamped_epoch() {
 	local timezone=$3
 
 	local ay am ad ah amin asec
-	read -r ay am ad ah amin asec < <(TZ="$timezone" date -d "@$anchor_epoch" +'%Y %m %d %H %M %S')
+	read -r ay am ad ah amin asec < <(TZ="$timezone" date -d "@$anchor_epoch" +'%Y %m %d %H %M %S') || return 1
 
 	local total_months=$((10#$ay * 12 + 10#$am - 1 + add_months))
 	local ny=$((total_months / 12))
@@ -2260,8 +2279,8 @@ calculate_cycle_bounds() {
 	local timezone=$3
 
 	local ay am ny nm
-	read -r ay am < <(TZ="$timezone" date -d "@$anchor_epoch" +'%Y %m')
-	read -r ny nm < <(TZ="$timezone" date -d "@$now_epoch" +'%Y %m')
+	read -r ay am < <(TZ="$timezone" date -d "@$anchor_epoch" +'%Y %m') || return 1
+	read -r ny nm < <(TZ="$timezone" date -d "@$now_epoch" +'%Y %m') || return 1
 
 	local elapsed_months=$(((10#$ny * 12 + 10#$nm) - (10#$ay * 12 + 10#$am)))
 	if [[ "$elapsed_months" -lt 0 ]]; then
@@ -2269,18 +2288,18 @@ calculate_cycle_bounds() {
 	fi
 
 	local start_epoch
-	start_epoch=$(add_months_clamped_epoch "$anchor_epoch" "$elapsed_months" "$timezone")
+	start_epoch=$(add_months_clamped_epoch "$anchor_epoch" "$elapsed_months" "$timezone") || return 1
 
 	if [[ "$start_epoch" -gt "$now_epoch" ]]; then
 		elapsed_months=$((elapsed_months - 1))
 		if [[ "$elapsed_months" -lt 0 ]]; then
 			elapsed_months=0
 		fi
-		start_epoch=$(add_months_clamped_epoch "$anchor_epoch" "$elapsed_months" "$timezone")
+		start_epoch=$(add_months_clamped_epoch "$anchor_epoch" "$elapsed_months" "$timezone") || return 1
 	fi
 
 	local end_epoch
-	end_epoch=$(add_months_clamped_epoch "$anchor_epoch" $((elapsed_months + 1)) "$timezone")
+	end_epoch=$(add_months_clamped_epoch "$anchor_epoch" $((elapsed_months + 1)) "$timezone") || return 1
 	echo "${start_epoch}|${end_epoch}"
 }
 
@@ -2348,7 +2367,7 @@ prompt_select_timezone() {
 	echo "15) Custom / Other timezone"
 
 	local choice
-	read -p "Enter choice [1-15, Default: 1]: " choice
+	read -p "Enter choice [1-15, Default: 1]: " choice || return 1
 	choice=${choice:-1}
 
 	local selected_tz="UTC"
@@ -2369,7 +2388,7 @@ prompt_select_timezone() {
 	14) selected_tz="Australia/Sydney" ;;
 	15)
 		local custom_tz
-		read -p "Enter timezone name or offset (e.g. America/Phoenix, UTC-7, +8): " custom_tz
+		read -p "Enter timezone name or offset (e.g. America/Phoenix, UTC-7, +8): " custom_tz || return 1
 		custom_tz=$(echo "$custom_tz" | xargs)
 		selected_tz=$(normalize_timezone_input "$custom_tz" "$default_tz")
 		;;
@@ -2389,7 +2408,7 @@ read_xray_quota_timezone() {
 
 	if [[ -f "$conf_file" ]]; then
 		local parsed_tz
-		parsed_tz=$(grep -E '^TIMEZONE=' "$conf_file" | tail -n1 | cut -d'=' -f2-)
+		parsed_tz=$(awk '/^TIMEZONE=/ { tz = substr($0, 10) } END { print tz }' "$conf_file") || return 1
 		if [[ -n "$parsed_tz" ]]; then
 			tz="$parsed_tz"
 		fi
@@ -2413,16 +2432,24 @@ with_xray_quota_lock() {
 	local lock_dir="xray/.user_limits.lock.d"
 	local max_wait=10
 
-	ensure_service_dir "xray"
-
-	_XRAY_QUOTA_LOCK_HELD=1
+	if [[ ! -d "xray" ]]; then
+		echo -e "${RED}Xray configuration directory not found.${NC}" >&2
+		return 1
+	fi
 
 	if command -v flock >/dev/null 2>&1; then
 		local lock_fd
-		exec {lock_fd}>"$lock_file"
+		if [[ ! -e "$lock_file" ]]; then
+			(
+				umask 022
+				touch -- "$lock_file"
+			) || return 1
+		fi
+		exec {lock_fd}<"$lock_file" || return 1
 		if flock -x -w "$max_wait" "$lock_fd"; then
-			"$@"
-			local ret=$?
+			local ret=0
+			_XRAY_QUOTA_LOCK_HELD=1
+			"$@" || ret=$?
 			flock -u "$lock_fd" 2>/dev/null || true
 			exec {lock_fd}>&-
 			_XRAY_QUOTA_LOCK_HELD=0
@@ -2439,7 +2466,7 @@ with_xray_quota_lock() {
 			if [[ -d "$lock_dir" ]]; then
 				local lock_age=$(($(date +%s) - $(date -r "$lock_dir" +%s 2>/dev/null || date +%s)))
 				if [[ "$lock_age" -gt 60 ]]; then
-					rm -rf "$lock_dir" 2>/dev/null || true
+					rmdir "$lock_dir" 2>/dev/null || true
 				fi
 			fi
 			sleep 0.1
@@ -2450,9 +2477,10 @@ with_xray_quota_lock() {
 				return 1
 			fi
 		done
-		"$@"
-		local ret=$?
-		rm -rf "$lock_dir" 2>/dev/null || true
+		local ret=0
+		_XRAY_QUOTA_LOCK_HELD=1
+		"$@" || ret=$?
+		rmdir "$lock_dir" 2>/dev/null || true
 		_XRAY_QUOTA_LOCK_HELD=0
 		return $ret
 	fi
@@ -2461,7 +2489,7 @@ with_xray_quota_lock() {
 get_quota_db_records() {
 	local db_file="xray/user_limits.db"
 	if [[ -f "$db_file" ]]; then
-		grep -v '^[[:space:]]*$' "$db_file" | grep -v '^[[:space:]]*#' || true
+		awk 'NF && $0 !~ /^[[:space:]]*#/' "$db_file"
 	fi
 }
 
@@ -2478,20 +2506,31 @@ parse_quota_db_line() {
 	if [[ "$status" != "active" && "$status" != "suspended" ]]; then
 		return 1
 	fi
-	return 0
+
+	# Older installations can have zero-padded limits in the database.
+	limit_gb=${limit_gb#"${limit_gb%%[!0]*}"}
+	limit_gb=${limit_gb:-0}
+	[[ ${#limit_gb} -lt ${#MAX_USER_LIMIT_GB} ||
+		(${#limit_gb} -eq ${#MAX_USER_LIMIT_GB} && ! "$limit_gb" > "$MAX_USER_LIMIT_GB") ]]
 }
 
 save_quota_db_content() {
 	local content="$1"
 	local db_file="xray/user_limits.db"
 	local tmp_db
-	make_temp_file tmp_db
-	echo "# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status" >"$tmp_db"
-	if [[ -n "$content" ]]; then
-		printf "%s\n" "$content" >>"$tmp_db"
+	make_temp_file tmp_db "$PWD/xray/.user_limits.db.XXXXXX" || return 1
+	if ! {
+		printf '%s\n' '# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status' &&
+			{ [[ -z "$content" ]] || printf '%s\n' "$content"; }
+	} >"$tmp_db"; then
+		rm -f "$tmp_db"
+		return 1
 	fi
 	apply_preserved_file_metadata "$db_file" "$tmp_db"
-	mv "$tmp_db" "$db_file"
+	if ! mv "$tmp_db" "$db_file"; then
+		rm -f "$tmp_db"
+		return 1
+	fi
 }
 
 sync_xray_clients_from_quota_db() {
@@ -2543,7 +2582,7 @@ sync_xray_clients_from_quota_db() {
 	fi
 
 	local tmp_file
-	make_temp_file tmp_file
+	make_temp_file tmp_file "$PWD/xray/.server.jsonc.XXXXXX" || return 1
 	if ! jq --argjson clients "$clients_json" '
         (
             .inbounds[]
@@ -2566,7 +2605,10 @@ sync_xray_clients_from_quota_db() {
 	fi
 
 	apply_preserved_file_metadata "$config_file" "$tmp_file"
-	mv "$tmp_file" "$config_file"
+	if ! mv "$tmp_file" "$config_file"; then
+		rm -f "$tmp_file"
+		return 1
+	fi
 	echo -e "${GREEN}Updated the VLESS clients list from the quota database.${NC}"
 }
 
@@ -2582,7 +2624,7 @@ _finalize_quota_db_update_internal() {
 
 	# Safety Guard: Prevent overwriting populated DB with empty content
 	local existing_records
-	existing_records=$(get_quota_db_records)
+	existing_records=$(get_quota_db_records) || return 1
 	if [[ -z "$db_lines" ]] && [[ -n "$existing_records" ]]; then
 		echo -e "${RED}CRITICAL: Quota update produced empty database while records exist on disk. Aborting update to protect data.${NC}" >&2
 		return 1
@@ -2590,7 +2632,7 @@ _finalize_quota_db_update_internal() {
 
 	if [[ "$config_changed" -ne 1 ]]; then
 		save_quota_db_content "$db_lines"
-		return 0
+		return
 	fi
 
 	if [[ ! -f "$db_file" ]] || [[ ! -f "$config_file" ]]; then
@@ -2599,10 +2641,13 @@ _finalize_quota_db_update_internal() {
 	fi
 
 	local db_backup config_backup
-	make_temp_file db_backup
-	make_temp_file config_backup
-	cp -p "$db_file" "$db_backup"
-	cp -p "$config_file" "$config_backup"
+	make_temp_file db_backup || return 1
+	make_temp_file config_backup || return 1
+	if ! cp -p "$db_file" "$db_backup" || ! cp -p "$config_file" "$config_backup"; then
+		rm -f "$db_backup" "$config_backup"
+		echo -e "${RED}Could not back up quota state. No changes were made.${NC}" >&2
+		return 1
+	fi
 
 	if ! save_quota_db_content "$db_lines" || ! sync_xray_clients_from_quota_db; then
 		echo -e "${RED}Failed to prepare quota enforcement. Restoring previous state.${NC}" >&2
@@ -2628,30 +2673,25 @@ _finalize_quota_db_update_internal() {
 collect_xray_user_stats() {
 	local map_file=$1
 
-	: >"$map_file"
+	: >"$map_file" || return 1
 	local stats_count=0
 	local stats_error=""
 
-	if ! $SUDO docker ps -q -f name="^/xray_server$" | grep -q .; then
-		echo "${stats_count}|${stats_error}"
+	local running_container
+	if ! running_container=$($SUDO docker ps -q -f name="^/xray_server$" 2>&1); then
+		printf '0|%s\n' "${running_container:-could not query Docker}"
+		return 0
+	fi
+	if [[ -z "$running_container" ]]; then
+		echo "0|"
 		return 0
 	fi
 
 	local raw_stats
-	if command -v timeout >/dev/null 2>&1; then
-		raw_stats=$(timeout 15s $SUDO docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
-	else
-		raw_stats=$($SUDO docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1 || true)
-	fi
-
-	if [[ -z "$raw_stats" ]]; then
+	if ! raw_stats=$(timeout 15s $SUDO docker exec xray_server xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" 2>&1); then
+		stats_error=$(printf '%s' "${raw_stats:-statsquery failed or timed out}" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+	elif [[ -z "$raw_stats" ]]; then
 		stats_error="empty statsquery output"
-		echo "${stats_count}|${stats_error}"
-		return 0
-	fi
-
-	if echo "$raw_stats" | grep -qiE "failed|error|unavailable|connection refused"; then
-		stats_error=$(echo "$raw_stats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
 	fi
 
 	if [[ -z "$stats_error" ]]; then
@@ -2728,17 +2768,17 @@ _check_and_apply_xray_quotas_internal() {
 	fi
 
 	local timezone
-	timezone=$(read_xray_quota_timezone)
+	timezone=$(read_xray_quota_timezone) || return 1
 
 	local now_epoch
 	now_epoch=$(date +%s)
 
 	local stats_map_file
-	make_temp_file stats_map_file
+	make_temp_file stats_map_file || return 1
 	local stats_result
-	stats_result=$(collect_xray_user_stats "$stats_map_file")
+	stats_result=$(collect_xray_user_stats "$stats_map_file") || return 1
 	local collected_stats_count="${stats_result%%|*}"
-	local xray_stats_last_error="${stats_result##*|}"
+	local xray_stats_last_error="${stats_result#*|}"
 
 	if [[ "${collected_stats_count:-0}" -eq 0 ]]; then
 		if [[ "$quiet" -ne 1 || -n "${xray_stats_last_error:-}" ]]; then
@@ -2766,11 +2806,7 @@ _check_and_apply_xray_quotas_internal() {
 	rm -f "$stats_map_file"
 
 	local db_records
-	db_records=$(get_quota_db_records)
-	if [[ -z "$db_records" ]] && grep -q '^[^#[:space:]]' "$db_file" 2>/dev/null; then
-		echo -e "${RED}CRITICAL: Failed to read existing records from ${db_file}. Aborting to protect data.${NC}" >&2
-		return 1
-	fi
+	db_records=$(get_quota_db_records) || return 1
 
 	local db_lines=""
 	local config_changed=0
@@ -2779,14 +2815,14 @@ _check_and_apply_xray_quotas_internal() {
 	while IFS= read -r raw_line; do
 		[ -z "$raw_line" ] && continue
 		if ! parse_quota_db_line "$raw_line"; then
-			echo -e "${YELLOW}Warning: Skipping malformed quota database line: ${raw_line}${NC}" >&2
-			continue
+			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
+			return 1
 		fi
 
 		local cycle_rotated=0
 		if [[ -z "$cycle_start" || -z "$cycle_end" || "$now_epoch" -ge "$cycle_end" || "$now_epoch" -lt "$cycle_start" ]]; then
 			local cycle_bounds
-			cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone")
+			cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone") || return 1
 			local new_cycle_start="${cycle_bounds%%|*}"
 			local new_cycle_end="${cycle_bounds##*|}"
 
@@ -2838,7 +2874,9 @@ _check_and_apply_xray_quotas_internal() {
 		db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
 	done <<<"$db_records"
 
-	finalize_quota_db_update "$db_lines" "$config_changed"
+	if [[ "$db_lines" != "$db_records" || "$config_changed" -eq 1 ]]; then
+		finalize_quota_db_update "$db_lines" "$config_changed" || return 1
+	fi
 
 	if [[ "$quiet" -ne 1 ]]; then
 		echo -e "${GREEN}Quota check complete.${NC}"
@@ -2854,7 +2892,7 @@ show_xray_quota_status() {
 	fi
 
 	local timezone
-	timezone=$(read_xray_quota_timezone)
+	timezone=$(read_xray_quota_timezone) || return 1
 
 	echo -e "${YELLOW}Timezone:${NC} ${timezone}"
 	echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
@@ -2871,7 +2909,8 @@ show_xray_quota_status() {
 		cycle_end_h=$(TZ="$timezone" date -d "@${cycle_end}" "+%Y-%m-%d %H:%M:%S")
 
 		if [[ "$limit_gb" -gt 0 ]]; then
-			local percent=$((cycle_usage * 100 / (limit_gb * 1024 * 1024 * 1024)))
+			local percent
+			percent=$(awk -v b="$cycle_usage" -v limit="$limit_gb" 'BEGIN { printf "%.0f", int(b / 1073741824 / limit * 100) }')
 			echo "- ${email} | status=${status} | usage=${usage_gb}GB / ${limit_gb}GB (${percent}%) | cycle=${cycle_start_h} -> ${cycle_end_h}"
 		else
 			echo "- ${email} | status=${status} | usage=${usage_gb}GB / unlimited | cycle=${cycle_start_h} -> ${cycle_end_h}"
@@ -2904,16 +2943,12 @@ select_quota_user() {
 	fi
 
 	echo "0) Cancel & Go Back" >&2
-	read -p "Select user [0-${#lines[@]}]: " select_idx </dev/tty
+	read -p "Select user [0-${#lines[@]}]: " select_idx </dev/tty || return 1
 	if [[ "$select_idx" = "0" ]]; then
 		return 1
 	fi
-	if ! [[ "$select_idx" =~ ^[0-9]+$ ]]; then
-		echo -e "${RED}Invalid selection.${NC}" >&2
-		return 1
-	fi
-	local sel_val=$((10#$select_idx))
-	if [[ "$sel_val" -lt 1 ]] || [[ "$sel_val" -gt ${#lines[@]} ]]; then
+	local sel_val
+	if ! sel_val=$(parse_decimal_range "$select_idx" 1 "${#lines[@]}"); then
 		echo -e "${RED}Invalid selection.${NC}" >&2
 		return 1
 	fi
@@ -2923,7 +2958,7 @@ select_quota_user() {
 }
 
 reset_xray_user_usage() {
-	read -p "Do you want to reset usage for ALL users? [y/N]: " reset_all
+	read -p "Do you want to reset usage for ALL users? [y/N]: " reset_all || return 1
 	local target_email=""
 
 	if [[ "$reset_all" == "y" || "$reset_all" == "Y" ]]; then
@@ -2932,28 +2967,35 @@ reset_xray_user_usage() {
 		target_email=$(select_quota_user) || return 0
 	fi
 
-	local db_file="xray/user_limits.db"
+	with_xray_quota_lock _reset_xray_user_usage "$target_email"
+}
+
+_reset_xray_user_usage() {
+	local target_email=$1
+	[[ -f "xray/user_limits.db" ]] || return 1
 
 	local stats_map_file
-	make_temp_file stats_map_file
-	collect_xray_user_stats "$stats_map_file" >/dev/null
-
-	local db_records
-	db_records=$(get_quota_db_records)
-	if [[ -z "$db_records" ]] && grep -q '^[^#[:space:]]' "$db_file" 2>/dev/null; then
-		echo -e "${RED}CRITICAL: Failed to read existing records from ${db_file}. Aborting to protect data.${NC}" >&2
+	make_temp_file stats_map_file || return 1
+	local stats_result
+	stats_result=$(collect_xray_user_stats "$stats_map_file") || return 1
+	if [[ -n "${stats_result#*|}" ]]; then
+		echo -e "${RED}Could not read traffic counters: ${stats_result#*|}${NC}" >&2
+		rm -f "$stats_map_file"
 		return 1
 	fi
 
-	local db_lines=""
+	local db_records
+	db_records=$(get_quota_db_records) || return 1
+
+	local db_lines="" reenable
 	local config_changed=0
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
 
-	while IFS= read -r raw_line; do
+	while IFS= read -r -u 3 raw_line; do
 		[ -z "$raw_line" ] && continue
 		if ! parse_quota_db_line "$raw_line"; then
-			echo -e "${YELLOW}Warning: Skipping malformed quota database line: ${raw_line}${NC}" >&2
-			continue
+			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
+			return 1
 		fi
 
 		if [[ "$target_email" = "ALL" ]] || [[ "$email" = "$target_email" ]]; then
@@ -2971,53 +3013,56 @@ reset_xray_user_usage() {
 					status="active"
 					config_changed=1
 				else
-					read -p "User is suspended. Re-enable now? [Y/n]: " reenable
+					read -p "User is suspended. Re-enable now? [Y/n]: " reenable || return 1
 					if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
 						status="active"
 						config_changed=1
 					fi
 				fi
 			fi
-			echo -e "${GREEN}Usage reset for ${email}.${NC}"
 		fi
 
 		if [[ -n "$db_lines" ]]; then
 			db_lines+=$'\n'
 		fi
 		db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-	done <<<"$db_records"
+	done 3<<<"$db_records"
 
-	finalize_quota_db_update "$db_lines" "$config_changed"
+	rm -f "${stats_map_file:-}"
+	finalize_quota_db_update "$db_lines" "$config_changed" || return 1
+	echo -e "${GREEN}Usage reset.${NC}"
 }
 
 change_xray_user_limit() {
 	local target_email
 	target_email=$(select_quota_user) || return 0
-	local db_file="xray/user_limits.db"
 
-	read -p "Enter new monthly limit in GB (0 = unlimited): " new_limit_gb
-	if ! [[ "$new_limit_gb" =~ ^[0-9]+$ ]]; then
-		echo -e "${RED}Limit must be a non-negative integer.${NC}"
+	local new_limit_gb
+	read -p "Enter new monthly limit in GB (0 = unlimited): " new_limit_gb || return 1
+	if ! new_limit_gb=$(parse_decimal_range "$new_limit_gb" 0 "$MAX_USER_LIMIT_GB"); then
+		echo -e "${RED}Limit must be an integer between 0 and ${MAX_USER_LIMIT_GB} GB.${NC}"
 		return 1
 	fi
-	new_limit_gb=$((10#$new_limit_gb))
+
+	with_xray_quota_lock _change_xray_user_limit "$target_email" "$new_limit_gb"
+}
+
+_change_xray_user_limit() {
+	local target_email=$1 new_limit_gb=$2
+	[[ -f "xray/user_limits.db" ]] || return 1
 
 	local db_records
-	db_records=$(get_quota_db_records)
-	if [[ -z "$db_records" ]] && grep -q '^[^#[:space:]]' "$db_file" 2>/dev/null; then
-		echo -e "${RED}CRITICAL: Failed to read existing records from ${db_file}. Aborting to protect data.${NC}" >&2
-		return 1
-	fi
+	db_records=$(get_quota_db_records) || return 1
 
-	local db_lines=""
+	local db_lines="" reenable
 	local config_changed=0
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
 
-	while IFS= read -r raw_line; do
+	while IFS= read -r -u 3 raw_line; do
 		[ -z "$raw_line" ] && continue
 		if ! parse_quota_db_line "$raw_line"; then
-			echo -e "${YELLOW}Warning: Skipping malformed quota database line: ${raw_line}${NC}" >&2
-			continue
+			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
+			return 1
 		fi
 
 		if [[ "$email" = "$target_email" ]]; then
@@ -3034,27 +3079,27 @@ change_xray_user_limit() {
 				fi
 
 				if [[ "$should_reenable" -eq 1 ]]; then
-					read -p "New limit allows usage. Re-enable now? [Y/n]: " reenable
+					read -p "New limit allows usage. Re-enable now? [Y/n]: " reenable || return 1
 					if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
 						status="active"
 						config_changed=1
 					fi
 				fi
 			fi
-			echo -e "${GREEN}Updated limit for ${email} to ${limit_gb} GB.${NC}"
 		fi
 
 		if [[ -n "$db_lines" ]]; then
 			db_lines+=$'\n'
 		fi
 		db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-	done <<<"$db_records"
+	done 3<<<"$db_records"
 
-	finalize_quota_db_update "$db_lines" "$config_changed"
+	finalize_quota_db_update "$db_lines" "$config_changed" || return 1
+	echo -e "${GREEN}Updated monthly limit to ${new_limit_gb} GB.${NC}"
 }
 
 change_xray_user_billing_cycle() {
-	read -p "Do you want to change the billing cycle for ALL users? [y/N]: " change_all
+	read -p "Do you want to change the billing cycle for ALL users? [y/N]: " change_all || return 1
 	local target_email=""
 
 	if [[ "$change_all" == "y" || "$change_all" == "Y" ]]; then
@@ -3062,8 +3107,6 @@ change_xray_user_billing_cycle() {
 	else
 		target_email=$(select_quota_user) || return 0
 	fi
-
-	local db_file="xray/user_limits.db"
 
 	echo ""
 	if [[ "$target_email" = "ALL" ]]; then
@@ -3074,59 +3117,65 @@ change_xray_user_billing_cycle() {
 	echo "1) Restart cycle today (resets exactly 1 month from right now)"
 	echo "2) Set a specific day of the month (e.g., the 1st or 15th)"
 	echo "0) Cancel"
-	read -p "Enter choice [0-2]: " cycle_choice
+	read -p "Enter choice [0-2]: " cycle_choice || return 1
 
-	local new_anchor_epoch
-	local timezone
-	timezone=$(read_xray_quota_timezone)
-
-	if [[ "$cycle_choice" = "1" ]]; then
-		new_anchor_epoch=$(date +%s)
-	elif [[ "$cycle_choice" = "2" ]]; then
-		read -p "Enter the day of the month [1-31]: " cycle_day
-		if ! [[ "$cycle_day" =~ ^[0-9]+$ ]]; then
+	local clean_day="" cycle_day reset_usage
+	if [[ "$cycle_choice" = "2" ]]; then
+		read -p "Enter the day of the month [1-31]: " cycle_day || return 1
+		if ! clean_day=$(parse_decimal_range "$cycle_day" 1 31); then
 			echo -e "${RED}Invalid day. Must be between 1 and 31.${NC}"
 			return 1
 		fi
-		local clean_day=$((10#$cycle_day))
-		if [[ "$clean_day" -lt 1 ]] || [[ "$clean_day" -gt 31 ]]; then
-			echo -e "${RED}Invalid day. Must be between 1 and 31.${NC}"
-			return 1
-		fi
-		new_anchor_epoch=$(TZ="$timezone" date -d "2000-01-$(printf "%02d" "$clean_day") 00:00:00" +%s)
-	else
+	elif [[ "$cycle_choice" != "1" ]]; then
 		return 0
 	fi
 
-	read -p "Do you also want to wipe their current traffic usage back to 0 GB? [y/N]: " reset_usage
+	read -p "Do you also want to wipe their current traffic usage back to 0 GB? [y/N]: " reset_usage || return 1
+	with_xray_quota_lock _change_xray_user_billing_cycle "$target_email" "$clean_day" "$reset_usage"
+}
 
-	local stats_map_file
-	make_temp_file stats_map_file
-	collect_xray_user_stats "$stats_map_file" >/dev/null
+_change_xray_user_billing_cycle() {
+	local target_email=$1 clean_day=$2 reset_usage=$3
+	[[ -f "xray/user_limits.db" ]] || return 1
 
-	local db_records
-	db_records=$(get_quota_db_records)
-	if [[ -z "$db_records" ]] && grep -q '^[^#[:space:]]' "$db_file" 2>/dev/null; then
-		echo -e "${RED}CRITICAL: Failed to read existing records from ${db_file}. Aborting to protect data.${NC}" >&2
-		return 1
+	local now_epoch timezone new_anchor_epoch
+	now_epoch=$(date +%s) || return 1
+	timezone=$(read_xray_quota_timezone) || return 1
+	new_anchor_epoch=$now_epoch
+	if [[ -n "$clean_day" ]]; then
+		new_anchor_epoch=$(TZ="$timezone" date -d "2000-01-$(printf "%02d" "$clean_day") 00:00:00" +%s) || return 1
 	fi
 
-	local db_lines=""
+	local stats_map_file
+	if [[ "$reset_usage" == "y" || "$reset_usage" == "Y" ]]; then
+		make_temp_file stats_map_file || return 1
+		local stats_result
+		stats_result=$(collect_xray_user_stats "$stats_map_file") || return 1
+		if [[ -n "${stats_result#*|}" ]]; then
+			echo -e "${RED}Could not read traffic counters: ${stats_result#*|}${NC}" >&2
+			rm -f "$stats_map_file"
+			return 1
+		fi
+	fi
+
+	local db_records
+	db_records=$(get_quota_db_records) || return 1
+
+	local db_lines="" reenable
 	local config_changed=0
-	local now_epoch
-	now_epoch=$(date +%s)
 
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
-	while IFS= read -r raw_line; do
+	while IFS= read -r -u 3 raw_line; do
 		[ -z "$raw_line" ] && continue
 		if ! parse_quota_db_line "$raw_line"; then
-			continue
+			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
+			return 1
 		fi
 
 		if [[ "$target_email" = "ALL" ]] || [[ "$email" = "$target_email" ]]; then
 			anchor_epoch="$new_anchor_epoch"
 			local cycle_bounds
-			cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone")
+			cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone") || return 1
 			cycle_start="${cycle_bounds%%|*}"
 			cycle_end="${cycle_bounds##*|}"
 
@@ -3146,16 +3195,13 @@ change_xray_user_billing_cycle() {
 						status="active"
 						config_changed=1
 					else
-						read -p "User is suspended. Re-enable now? [Y/n]: " reenable
+						read -p "User is suspended. Re-enable now? [Y/n]: " reenable || return 1
 						if [[ "$reenable" != "n" && "$reenable" != "N" ]]; then
 							status="active"
 							config_changed=1
 						fi
 					fi
 				fi
-				echo -e "${GREEN}Billing cycle dates updated and usage reset to 0 GB for ${email}.${NC}"
-			else
-				echo -e "${GREEN}Billing cycle dates updated for ${email}.${NC}"
 			fi
 		fi
 
@@ -3163,9 +3209,11 @@ change_xray_user_billing_cycle() {
 			db_lines+=$'\n'
 		fi
 		db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-	done <<<"$db_records"
+	done 3<<<"$db_records"
 
-	finalize_quota_db_update "$db_lines" "$config_changed"
+	rm -f "${stats_map_file:-}"
+	finalize_quota_db_update "$db_lines" "$config_changed" || return 1
+	echo -e "${GREEN}Billing cycle updated.${NC}"
 }
 
 manage_xray_quotas() {
@@ -3183,7 +3231,7 @@ manage_xray_quotas() {
 		echo "7) Show automatic quota check configuration status"
 		echo "8) Change quota billing timezone"
 		echo "0) Back"
-		read -p "Enter your choice [0-8]: " quota_choice
+		read -p "Enter your choice [0-8]: " quota_choice || return 0
 
 		case $quota_choice in
 		1)
@@ -3269,13 +3317,8 @@ disable_xray_quota_cron_silent() {
 
 	if command -v crontab >/dev/null 2>&1; then
 		local current_cron
-		current_cron=$(crontab -l 2>/dev/null || true)
-		current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -v -- "--quota-check" || true)
-
-		if [[ -n "$current_cron" ]]; then
-			printf "%s\n" "$current_cron" | crontab -
-		else
-			printf '\n' | crontab -
+		if current_cron=$(crontab -l 2>/dev/null) && [[ "$current_cron" == *"$XRAY_QUOTA_CRON_MARKER"* ]]; then
+			printf '%s\n' "$current_cron" | awk -v marker="$XRAY_QUOTA_CRON_MARKER" '!index($0, marker)' | crontab - || return 1
 		fi
 	fi
 }
@@ -3396,7 +3439,7 @@ ensure_crontab_available() {
 	fi
 
 	echo -e "${YELLOW}crontab command not found. Automatic quota checks require cron.${NC}"
-	read -p "Install cron automatically now? [Y/n]: " install_cron_confirm
+	read -p "Install cron automatically now? [Y/n]: " install_cron_confirm || return 1
 	if [[ "$install_cron_confirm" == "n" || "$install_cron_confirm" == "N" ]]; then
 		return 1
 	fi
@@ -3451,7 +3494,7 @@ configure_xray_quota_auto_check_cron() {
 		echo "2) Every 2 minutes"
 		echo "3) Every 5 minutes"
 		echo "4) Disable cron auto quota check"
-		read -p "Enter your choice [1-4]: " auto_choice
+		read -p "Enter your choice [1-4]: " auto_choice || return 1
 
 		case $auto_choice in
 		1)
@@ -3481,8 +3524,9 @@ configure_xray_quota_auto_check_cron() {
 	if [[ -d "/etc/cron.d" ]]; then
 		disable_xray_quota_cron_silent
 		local cron_content="# proxy-sh:xray-quota-check\n${cron_expr} root cd $(printf '%q' "$script_dir") && /bin/bash $(printf '%q' "$script_path") --quota-check $(printf '%q' "$script_dir") >/dev/null 2>&1\n"
-		printf "%b" "$cron_content" | $SUDO tee "$cron_file" >/dev/null
-		$SUDO chmod 0644 "$cron_file"
+		printf "%b" "$cron_content" | $SUDO tee "$cron_file" >/dev/null || return 1
+		$SUDO chmod 0644 "$cron_file" || return 1
+		disable_xray_quota_systemd_silent
 		echo -e "${GREEN}System cron automatic quota check enabled:${NC} ${cron_expr}"
 		echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
 		return 0
@@ -3496,14 +3540,15 @@ configure_xray_quota_auto_check_cron() {
 	cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check $(printf '%q' "$script_dir")"
 	local current_cron
 	current_cron=$(crontab -l 2>/dev/null || true)
-	current_cron=$(printf '%s\n' "$current_cron" | grep -Fv -- "$XRAY_QUOTA_CRON_MARKER" | grep -v -- "--quota-check" || true)
+	current_cron=$(printf '%s\n' "$current_cron" | awk -v marker="$XRAY_QUOTA_CRON_MARKER" '!index($0, marker)') || return 1
 
 	local new_entry="${cron_expr} ${cron_cmd} >/dev/null 2>&1 ${XRAY_QUOTA_CRON_MARKER}"
 	if [[ -n "$current_cron" ]]; then
-		printf "%s\n%s\n" "$current_cron" "$new_entry" | crontab -
+		printf "%s\n%s\n" "$current_cron" "$new_entry" | crontab - || return 1
 	else
-		printf "%s\n" "$new_entry" | crontab -
+		printf "%s\n" "$new_entry" | crontab - || return 1
 	fi
+	disable_xray_quota_systemd_silent
 
 	echo -e "${GREEN}Cron automatic quota check enabled:${NC} ${cron_expr}"
 	echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
@@ -3511,7 +3556,7 @@ configure_xray_quota_auto_check_cron() {
 
 run_xray_quota_daemon() {
 	local interval="${1:-60}"
-	if ! [[ "$interval" =~ ^[0-9]+$ ]] || [[ "$interval" -le 0 ]]; then
+	if ! interval=$(parse_decimal_range "$interval" 1 9223372036854775807); then
 		interval=60
 	fi
 
@@ -3531,6 +3576,7 @@ run_xray_quota_daemon() {
 		current_mtime=$(stat -c %Y "$script_path" 2>/dev/null || true)
 		if [[ -n "$initial_mtime" && -n "$current_mtime" && "$current_mtime" != "$initial_mtime" ]]; then
 			echo "Script update detected on disk (${script_path}). Reloading quota daemon..."
+			cleanup_script_tmp_dir
 			exec /bin/bash "$script_path" --quota-daemon "$interval" "$PWD"
 		fi
 
@@ -3572,7 +3618,7 @@ configure_xray_quota_auto_check_systemd() {
 		echo "2) Every 2 minutes"
 		echo "3) Every 5 minutes"
 		echo "4) Disable systemd daemon auto quota check"
-		read -p "Enter your choice [1-4]: " auto_choice
+		read -p "Enter your choice [1-4]: " auto_choice || return 1
 
 		case $auto_choice in
 		1)
@@ -3607,10 +3653,10 @@ configure_xray_quota_auto_check_systemd() {
 
 	# The service runs as root, so execute a root-owned copy rather than the
 	# potentially user-writable interactive script.
-	$SUDO install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh
-	$SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner"
+	$SUDO install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh || return 1
+	$SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner" || return 1
 
-	$SUDO tee /etc/systemd/system/xray-quota-check.service >/dev/null <<EOL
+	$SUDO tee /etc/systemd/system/xray-quota-check.service >/dev/null <<EOL || return 1
 [Unit]
 Description=Xray per-user quota check daemon
 After=network-online.target docker.service
@@ -3627,9 +3673,9 @@ TimeoutStopSec=10s
 WantedBy=multi-user.target
 EOL
 
-	$SUDO systemctl daemon-reload
-	$SUDO systemctl enable --now xray-quota-check.service
-	$SUDO systemctl restart xray-quota-check.service >/dev/null 2>&1 || true
+	$SUDO systemctl daemon-reload || return 1
+	$SUDO systemctl enable xray-quota-check.service || return 1
+	$SUDO systemctl restart xray-quota-check.service || return 1
 
 	# Avoid duplicate checks from cron if systemd daemon is enabled.
 	disable_xray_quota_cron_silent
@@ -3640,57 +3686,72 @@ EOL
 }
 
 change_xray_quota_timezone() {
-	local conf_file="xray/user_limits.conf"
 	local current_tz
-	current_tz=$(read_xray_quota_timezone)
+	current_tz=$(read_xray_quota_timezone) || return 1
 	echo ""
 	echo -e "Current quota billing timezone: ${GREEN}${current_tz}${NC}"
 
 	local new_tz
-	prompt_select_timezone new_tz "$current_tz"
+	prompt_select_timezone new_tz "$current_tz" || return 1
 
 	if [[ -z "$new_tz" || "$new_tz" == "$current_tz" ]]; then
 		echo "Timezone unchanged."
 		return 0
 	fi
 
-	if [[ -f "$conf_file" ]] && grep -q '^TIMEZONE=' "$conf_file"; then
-		local tmp_conf
-		make_temp_file tmp_conf
-		sed "s|^TIMEZONE=.*|TIMEZONE=${new_tz}|" "$conf_file" >"$tmp_conf" && mv "$tmp_conf" "$conf_file"
-	else
-		echo "TIMEZONE=$new_tz" >>"$conf_file"
-	fi
-	echo -e "${GREEN}Updated quota billing timezone to: ${new_tz}${NC}"
+	with_xray_quota_lock _change_xray_quota_timezone "$new_tz"
+}
 
-	local db_file="xray/user_limits.db"
-	if [[ -f "$db_file" ]]; then
-		local db_records
-		db_records=$(get_quota_db_records)
-		if [[ -n "$db_records" ]]; then
-			local db_lines=""
-			local now_epoch
-			now_epoch=$(date +%s)
-			local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
-			while IFS= read -r raw_line; do
-				[ -z "$raw_line" ] && continue
-				if ! parse_quota_db_line "$raw_line"; then
-					continue
-				fi
-				local cycle_bounds
-				cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$new_tz")
-				cycle_start="${cycle_bounds%%|*}"
-				cycle_end="${cycle_bounds##*|}"
-
-				if [[ -n "$db_lines" ]]; then
-					db_lines+=$'\n'
-				fi
-				db_lines+="${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
-			done <<<"$db_records"
-			finalize_quota_db_update "$db_lines" 0
-			echo -e "${GREEN}Recalculated active user billing cycle bounds for ${new_tz}.${NC}"
+_change_xray_quota_timezone() {
+	local new_tz=$1
+	local conf_file="xray/user_limits.conf"
+	local db_records db_lines="" now_epoch cycle_bounds
+	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+	db_records=$(get_quota_db_records) || return 1
+	now_epoch=$(date +%s) || return 1
+	while IFS= read -r raw_line; do
+		[[ -z "$raw_line" ]] && continue
+		if ! parse_quota_db_line "$raw_line"; then
+			echo -e "${RED}Quota database contains an invalid record. Changes were cancelled.${NC}" >&2
+			return 1
 		fi
+		cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$new_tz") || return 1
+		cycle_start="${cycle_bounds%%|*}"
+		cycle_end="${cycle_bounds##*|}"
+		db_lines+="${db_lines:+$'\n'}${email}|${uuid}|${limit_gb}|${anchor_epoch}|${cycle_start}|${cycle_end}|${cycle_usage}|${last_total}|${status}"
+	done <<<"$db_records"
+
+	local tmp_conf conf_backup=""
+	make_temp_file tmp_conf "$PWD/xray/.user_limits.conf.XXXXXX" || return 1
+	if [[ -f "$conf_file" ]]; then
+		make_temp_file conf_backup || return 1
+		cp -p "$conf_file" "$conf_backup" || return 1
 	fi
+	if ! {
+		if [[ -n "$conf_backup" ]]; then
+			awk '!/^TIMEZONE=/' "$conf_backup"
+		fi && printf 'TIMEZONE=%s\n' "$new_tz"
+	} >"$tmp_conf"; then
+		rm -f "$tmp_conf"
+		return 1
+	fi
+	apply_preserved_file_metadata "$conf_file" "$tmp_conf"
+	if ! mv "$tmp_conf" "$conf_file"; then
+		rm -f "$tmp_conf"
+		return 1
+	fi
+
+	if [[ "$db_lines" != "$db_records" ]] && ! finalize_quota_db_update "$db_lines" 0; then
+		if [[ -n "$conf_backup" ]]; then
+			cp -p "$conf_backup" "$conf_file" || echo -e "${RED}Failed to restore the previous quota timezone.${NC}" >&2
+		else
+			rm -f "$conf_file"
+		fi
+		return 1
+	fi
+
+	rm -f "${conf_backup:-}"
+	echo -e "${GREEN}Updated quota billing timezone to: ${new_tz}${NC}"
 }
 
 configure_xray_quota_auto_check() {
@@ -3702,7 +3763,7 @@ configure_xray_quota_auto_check() {
 			echo "1) Systemd daemon (recommended)"
 			echo "2) Cron"
 			echo "3) Disable all automatic quota checks"
-			read -p "Enter your choice [1-3]: " scheduler_choice
+			read -p "Enter your choice [1-3]: " scheduler_choice || return 1
 
 			case $scheduler_choice in
 			1)
@@ -3818,41 +3879,40 @@ add_xray_user() {
 	done
 
 	local uuid
-	uuid=$(generate_uuid)
+	uuid=$(generate_uuid) || return 1
 
-	read -p "Set monthly data limit for ${user_id}? [Y/n]: " set_limit
+	read -p "Set monthly data limit for ${user_id}? [Y/n]: " set_limit || return 1
 	local user_limit_gb=0
 	if [[ -z "$set_limit" || "$set_limit" == "y" || "$set_limit" == "Y" ]]; then
 		while true; do
-			read -p "Enter monthly limit for ${user_id} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb
+			read -p "Enter monthly limit for ${user_id} in GB [Default: ${DEFAULT_USER_LIMIT_GB}]: " user_limit_gb || return 1
 			user_limit_gb=${user_limit_gb:-$DEFAULT_USER_LIMIT_GB}
-			if [[ "$user_limit_gb" =~ ^[0-9]+$ ]] && [[ "$((10#$user_limit_gb))" -gt 0 ]]; then
-				user_limit_gb=$((10#$user_limit_gb))
+			if user_limit_gb=$(parse_decimal_range "$user_limit_gb" 1 "$MAX_USER_LIMIT_GB"); then
 				break
 			fi
-			echo -e "${RED}Please enter a positive integer GB value.${NC}"
+			echo -e "${RED}Please enter an integer between 1 and ${MAX_USER_LIMIT_GB} GB.${NC}"
 		done
 	fi
 
 	local timezone now_epoch
-	timezone=$(read_xray_quota_timezone)
+	timezone=$(read_xray_quota_timezone) || return 1
 	now_epoch=$(date +%s)
 	local cycle_bounds
-	cycle_bounds=$(calculate_cycle_bounds "$now_epoch" "$now_epoch" "$timezone")
+	cycle_bounds=$(calculate_cycle_bounds "$now_epoch" "$now_epoch" "$timezone") || return 1
 	local cycle_start="${cycle_bounds%%|*}"
 	local cycle_end="${cycle_bounds##*|}"
 
 	apply_add_user() {
 		local db_backup config_backup
-		make_temp_file db_backup
-		make_temp_file config_backup
+		make_temp_file db_backup || return 1
+		make_temp_file config_backup || return 1
 		if ! cp -p "$db_file" "$db_backup" || ! cp -p "$config_file" "$config_backup"; then
 			echo -e "${RED}Failed to back up Xray user state. No changes were made.${NC}" >&2
 			return 1
 		fi
 
 		local existing_db
-		existing_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' || true)
+		existing_db=$(get_quota_db_records) || return 1
 		if [[ -n "$existing_db" ]]; then
 			existing_db+=$'\n'
 		fi
@@ -3875,11 +3935,12 @@ add_xray_user() {
 	fi
 
 	local server_addr remarks sni_domain xhttp_path private_key public_key
-	read -p "Enter server IP/domain for new user's links (leave empty to skip link output): " server_addr
+	read -p "Enter server IP/domain for new user's links (leave empty to skip link output): " server_addr || return 1
 
 	if [[ -n "$server_addr" ]]; then
+		require_valid_server_address "$server_addr" || return 1
 		if ensure_jq; then
-			read -p "Enter remarks prefix [Default: xray]: " remarks
+			read -p "Enter remarks prefix [Default: xray]: " remarks || return 1
 			remarks=${remarks:-xray}
 
 			sni_domain=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // empty' "$config_file" | head -n1)
@@ -3919,8 +3980,10 @@ add_xray_user() {
 					local link
 					link="vless://${uuid}@${server_uri_host}:443?security=reality&sni=${sni_url}&fp=chrome&pbk=${public_key_url}&sid=${shortid}&type=xhttp&path=${xhttp_path_url}#${fragment_url}"
 					echo "$link"
-					echo "" >>xray/vless_links.txt
-					echo "$link" >>xray/vless_links.txt
+					(
+						umask 077
+						printf '\n%s\n' "$link" >>xray/vless_links.txt
+					) || return 1
 				done
 			else
 				echo -e "${YELLOW}Added user, but could not generate a link automatically from current config.${NC}"
@@ -3945,19 +4008,20 @@ remove_xray_user() {
 	local target_email
 	target_email=$(select_quota_user) || return 0
 	local target_uuid
-	target_uuid=$(grep "^${target_email}|" "$db_file" | head -n1 | cut -d'|' -f2)
+	target_uuid=$(awk -F'|' -v email="$target_email" '$1 == email { print $2; exit }' "$db_file") || return 1
+	[[ -n "$target_uuid" ]] || return 1
 
 	apply_remove_user() {
 		local db_backup config_backup
-		make_temp_file db_backup
-		make_temp_file config_backup
+		make_temp_file db_backup || return 1
+		make_temp_file config_backup || return 1
 		if ! cp -p "$db_file" "$db_backup" || ! cp -p "$config_file" "$config_backup"; then
 			echo -e "${RED}Failed to back up Xray user state. No changes were made.${NC}" >&2
 			return 1
 		fi
 
 		local filtered_db
-		filtered_db=$(grep -v '^[[:space:]]*$' "$db_file" | grep -v '^#' | grep -v "^${target_email}|" || true)
+		filtered_db=$(get_quota_db_records | awk -F'|' -v email="$target_email" '$1 != email') || return 1
 		if save_quota_db_content "$filtered_db" &&
 			sync_xray_clients_from_quota_db &&
 			reload_xray_container; then
@@ -3975,15 +4039,32 @@ remove_xray_user() {
 		return 1
 	fi
 
-	if [[ -f "xray/vless_links.txt" ]] && [[ -n "$target_uuid" ]]; then
-		local tmp_links
-		make_temp_file tmp_links
-		grep -v -- "$target_uuid" xray/vless_links.txt >"$tmp_links" || true
-		apply_preserved_file_metadata "xray/vless_links.txt" "$tmp_links"
-		mv "$tmp_links" xray/vless_links.txt
+	if ! remove_saved_user_links "xray/vless_links.txt" "vless://${target_uuid}@"; then
+		echo -e "${YELLOW}Removed the Xray user, but could not update the saved links.${NC}" >&2
+		return 1
 	fi
 
 	echo -e "${GREEN}Removed Xray user: ${target_email}${NC}"
+}
+
+apply_shadowsocks_config() {
+	local config=$1 candidate=$2 backup
+	make_temp_file backup || return 1
+	cp -p "$config" "$backup" || return 1
+	apply_preserved_file_metadata "$config" "$candidate"
+	mv "$candidate" "$config" || return 1
+
+	if ! reload_shadowsocks_container; then
+		if cp -p "$backup" "$config" && reload_shadowsocks_container; then
+			echo -e "${YELLOW}Previous Shadowsocks configuration restored.${NC}" >&2
+		else
+			echo -e "${RED}Could not restore the previous running Shadowsocks configuration.${NC}" >&2
+		fi
+		rm -f "$backup"
+		return 1
+	fi
+
+	rm -f "$backup"
 }
 
 add_shadowsocks_user() {
@@ -4008,25 +4089,25 @@ add_shadowsocks_user() {
 	done
 
 	local user_psk
-	user_psk=$(openssl rand -base64 32)
+	user_psk=$(openssl rand -base64 32) || return 1
 
 	local tmp_ss
-	make_temp_file tmp_ss
-	jq --arg n "$user_name" --arg p "$user_psk" '.users += [{"name": $n, "password": $p}]' "$ss_config" >"$tmp_ss"
-
-	apply_preserved_file_metadata "$ss_config" "$tmp_ss"
-	mv "$tmp_ss" "$ss_config"
-
-	reload_shadowsocks_container
+	make_temp_file tmp_ss "$PWD/shadowsocks/.server.json.XXXXXX" || return 1
+	if ! jq -e --arg n "$user_name" --arg p "$user_psk" '.users += [{"name": $n, "password": $p}]' "$ss_config" >"$tmp_ss"; then
+		rm -f "$tmp_ss"
+		return 1
+	fi
+	apply_shadowsocks_config "$ss_config" "$tmp_ss" || return 1
 
 	local server_psk method ss_port server_addr remarks password base64 link
 	server_psk=$(jq -r '.password' "$ss_config")
 	method=$(jq -r '.method' "$ss_config")
 	ss_port=$(jq -r '.server_port' "$ss_config")
 
-	read -p "Enter server IP/domain for new user's SS link (leave empty to skip link output): " server_addr
+	read -p "Enter server IP/domain for new user's SS link (leave empty to skip link output): " server_addr || return 1
 	if [[ -n "$server_addr" ]]; then
-		read -p "Enter remarks prefix [Default: shadowsocks_rust]: " remarks
+		require_valid_server_address "$server_addr" || return 1
+		read -p "Enter remarks prefix [Default: shadowsocks_rust]: " remarks || return 1
 		remarks=${remarks:-shadowsocks_rust}
 		local server_uri_host fragment_url
 		server_uri_host=$(format_uri_host "$server_addr")
@@ -4036,7 +4117,10 @@ add_shadowsocks_user() {
 		link="ss://${base64}@${server_uri_host}:${ss_port}#${fragment_url}"
 		echo -e "\n${GREEN}New SS user link:${NC}"
 		echo "$link"
-		echo "$link" >>shadowsocks/ss_links.txt
+		(
+			umask 077
+			printf '%s\n' "$link" >>shadowsocks/ss_links.txt
+		) || return 1
 	fi
 
 	echo -e "${GREEN}Added Shadowsocks user: ${user_name}${NC}"
@@ -4055,36 +4139,40 @@ remove_shadowsocks_user() {
 		return 1
 	fi
 
-	local users=()
-	local idx=1
-	while IFS= read -r uname; do
-		[ -z "$uname" ] && continue
-		users+=("$uname")
-		echo "${idx}) ${uname}"
-		idx=$((idx + 1))
-	done < <(jq -r '.users[].name' "$ss_config")
-
-	if [[ ${#users[@]} -eq 0 ]]; then
-		echo -e "${RED}No Shadowsocks users found.${NC}"
+	local entries users=() idx
+	entries=$(jq -ce '.users[]?' "$ss_config") || {
+		echo -e "${RED}No Shadowsocks users found or the configuration is invalid.${NC}"
 		return 1
-	fi
+	}
+	mapfile -t users <<<"$entries"
+	for idx in "${!users[@]}"; do
+		echo "$((idx + 1))) $(jq -r '.name' <<<"${users[$idx]}")"
+	done
 
-	read -p "Select user to remove [1-${#users[@]}]: " sel
-	if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#users[@]} ]]; then
+	read -p "Select user to remove [1-${#users[@]}]: " sel || return 1
+	if ! sel=$(parse_decimal_range "$sel" 1 "${#users[@]}"); then
 		echo -e "${RED}Invalid selection.${NC}"
 		return 1
 	fi
 
-	local target_user="${users[$((sel - 1))]}"
-	local tmp_ss
-	make_temp_file tmp_ss
-	jq --arg n "$target_user" '.users |= map(select(.name != $n))' "$ss_config" >"$tmp_ss"
+	local target_user target_password server_psk method credential tmp_ss
+	target_user=$(jq -r '.name' <<<"${users[$((sel - 1))]}") || return 1
+	target_password=$(jq -r '.password' <<<"${users[$((sel - 1))]}") || return 1
+	server_psk=$(jq -r '.password' "$ss_config") || return 1
+	method=$(jq -r '.method' "$ss_config") || return 1
+	credential=$(base64url_encode "${method}:${server_psk}:${target_password}") || return 1
 
-	apply_preserved_file_metadata "$ss_config" "$tmp_ss"
-	mv "$tmp_ss" "$ss_config"
+	make_temp_file tmp_ss "$PWD/shadowsocks/.server.json.XXXXXX" || return 1
+	if ! jq -e --argjson idx "$((sel - 1))" 'del(.users[$idx])' "$ss_config" >"$tmp_ss"; then
+		rm -f "$tmp_ss"
+		return 1
+	fi
+	apply_shadowsocks_config "$ss_config" "$tmp_ss" || return 1
 
-	reload_shadowsocks_container
-
+	if ! remove_saved_user_links "shadowsocks/ss_links.txt" "ss://${credential}@"; then
+		echo -e "${YELLOW}Removed the Shadowsocks user, but could not update the saved links.${NC}" >&2
+		return 1
+	fi
 	echo -e "${GREEN}Removed Shadowsocks user: ${target_user}${NC}"
 }
 
@@ -4098,7 +4186,7 @@ manage_proxy_users() {
 		echo "3) Add Shadowsocks user"
 		echo "4) Remove Shadowsocks user"
 		echo "0) Back"
-		read -p "Enter your choice [0-4]: " user_mgmt_choice
+		read -p "Enter your choice [0-4]: " user_mgmt_choice || return 0
 
 		case $user_mgmt_choice in
 		1)
@@ -4121,6 +4209,22 @@ manage_proxy_users() {
 			;;
 		esac
 	done
+}
+
+remove_saved_user_links() {
+	local path=$1 prefix=$2 filtered
+	[[ -f "$path" ]] || return 0
+
+	make_temp_file filtered "$PWD/${path%/*}/.links.XXXXXX" || return 1
+	if ! awk -v prefix="$prefix" 'index($0, prefix) != 1' "$path" >"$filtered"; then
+		rm -f "$filtered"
+		return 1
+	fi
+	apply_preserved_file_metadata "$path" "$filtered"
+	if ! mv "$filtered" "$path"; then
+		rm -f "$filtered"
+		return 1
+	fi
 }
 
 # --- Display helpers ---
@@ -4158,10 +4262,10 @@ show_ss_links() {
 # --- Self-update subsystem ---
 
 fetch_latest_script_version() {
-	local cache_bust latest_version
+	local cache_bust script_body
 	cache_bust="?$(date +%s)"
-	latest_version=$(curl -fsSL --max-time 10 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" 2>/dev/null | grep -oE "SCRIPT_VERSION=\"[0-9.]+\"" | cut -d'"' -f2)
-	echo "$latest_version"
+	script_body=$(curl -fsSL --max-time 10 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" 2>/dev/null) || return 1
+	sed -nE 's/^SCRIPT_VERSION="([0-9]+(\.[0-9]+)+)"$/\1/p' <<<"$script_body"
 }
 
 perform_script_update() {
@@ -4179,9 +4283,11 @@ perform_script_update() {
 		echo -e "${RED}Cannot create a temporary checksum file beside ${script_path}.${NC}"
 		return 1
 	}
-	make_temp_file tmp_sig
-	make_temp_file tmp_public_key
-	printf '%s\n' "$RELEASE_PUBLIC_KEY" >"$tmp_public_key"
+	if ! make_temp_file tmp_sig || ! make_temp_file tmp_public_key ||
+		! printf '%s\n' "$RELEASE_PUBLIC_KEY" >"$tmp_public_key"; then
+		rm -f "$tmp_script" "$tmp_sha"
+		return 1
+	fi
 	echo -e "${YELLOW}Downloading update and verifying signature...${NC}"
 	if ! curl -fsSL --max-time 20 "https://raw.githubusercontent.com/Shawshank01/proxy_sh/main/proxy.sh${cache_bust}" >"$tmp_script"; then
 		rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
@@ -4237,8 +4343,7 @@ perform_script_update() {
 	fi
 
 	apply_preserved_file_metadata "$script_path" "$tmp_script"
-	chmod u+x "$tmp_script"
-	if ! mv -f "$tmp_script" "$script_path"; then
+	if ! chmod u+x "$tmp_script" || ! mv -f "$tmp_script" "$script_path"; then
 		rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
 		echo -e "${RED}Failed to replace ${script_path}; the current script was not changed.${NC}"
 		return 1
@@ -4248,20 +4353,18 @@ perform_script_update() {
 	sync_xray_quota_systemd_runner || true
 
 	echo -e "${GREEN}Script updated and signature/checksum verified successfully! Restarting...${NC}"
+	cleanup_script_tmp_dir
 	exec bash "$script_path"
 }
 
 auto_check_script_update() {
 	local latest_version
-	latest_version=$(fetch_latest_script_version)
-
-	if [[ -z "$latest_version" ]]; then
-		return
-	fi
+	latest_version=$(fetch_latest_script_version) || return 0
+	[[ -n "$latest_version" ]] || return 0
 
 	if [[ "$SCRIPT_VERSION" != "$latest_version" ]]; then
 		echo -e "${YELLOW}A new version of this script is available: $latest_version (current: $SCRIPT_VERSION).${NC}"
-		read -p "Do you want to update now? [Y/n]: " auto_update_confirm
+		read -p "Do you want to update now? [Y/n]: " auto_update_confirm || return 1
 		if [[ "$auto_update_confirm" == "n" || "$auto_update_confirm" == "N" ]]; then
 			echo -e "${YELLOW}Continuing with current version.${NC}"
 			return
@@ -4273,11 +4376,9 @@ auto_check_script_update() {
 update_script() {
 	echo -e "${YELLOW}Checking for updates...${NC}"
 	local latest_version
-	latest_version=$(fetch_latest_script_version)
-
-	if [[ -z "$latest_version" ]]; then
+	if ! latest_version=$(fetch_latest_script_version) || [[ -z "$latest_version" ]]; then
 		echo -e "${RED}Could not check for updates. Please check your internet connection or the repository URL.${NC}"
-		return
+		return 1
 	fi
 
 	if [[ "$SCRIPT_VERSION" == "$latest_version" ]]; then
@@ -4286,7 +4387,7 @@ update_script() {
 	fi
 
 	echo -e "${YELLOW}A new version of the script is available: $latest_version${NC}"
-	read -p "Do you want to update? [Y/n]: " update_confirm
+	read -p "Do you want to update? [Y/n]: " update_confirm || return 1
 	if [[ "$update_confirm" == "n" || "$update_confirm" == "N" ]]; then
 		echo -e "${RED}Update cancelled.${NC}"
 		return
@@ -4315,7 +4416,7 @@ run_main_menu() {
 		echo "10) Manage Xray per-user data quotas"
 		echo "11) Manage users (Add/Remove for Xray / Shadowsocks)"
 		echo "12) Exit"
-		read -p "Enter your choice [0-12]: " choice
+		read -p "Enter your choice [0-12]: " choice || return 0
 
 		case $choice in
 		0)
@@ -4348,14 +4449,14 @@ run_main_menu() {
 			echo "1) Update existing containers to latest"
 			echo "2) Downgrade / Change container version"
 			echo "0) Back"
-			read -p "Enter your choice [0-2]: " ver_choice
+			read -p "Enter your choice [0-2]: " ver_choice || return 1
 			case $ver_choice in
 			1)
 				echo "Which container do you want to update?"
 				echo "1) Xray"
 				echo "2) Shadowsocks"
 				echo "3) Both"
-				read -p "Enter your choice [1-3]: " update_choice
+				read -p "Enter your choice [1-3]: " update_choice || return 1
 				case $update_choice in
 				1)
 					update_xray || true
@@ -4402,7 +4503,7 @@ run_main_menu() {
 			echo "1) Xray"
 			echo "2) Shadowsocks"
 			echo "3) Both"
-			read -p "Enter your choice [1-3]: " delete_choice
+			read -p "Enter your choice [1-3]: " delete_choice || return 1
 			case $delete_choice in
 			1)
 				delete_xray || true
@@ -4504,7 +4605,7 @@ main() {
 	sync_xray_quota_systemd_runner || true
 
 	check_dependencies
-	auto_check_script_update
+	auto_check_script_update || true
 	run_main_menu
 }
 

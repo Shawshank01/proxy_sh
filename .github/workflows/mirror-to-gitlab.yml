@@ -2,19 +2,33 @@ name: Mirror to GitLab
 
 on:
   push:
+  workflow_run:
+    workflows: [Update Release Artifacts]
+    branches: [main]
+    types: [completed]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: proxy-sh-gitlab-mirror
+  cancel-in-progress: false
 
 jobs:
   mirror:
+    if: github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v7
       with:
+        ref: main
         fetch-depth: 0
 
     - name: Push to GitLab
+      env:
+        GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       run: |
-        git remote add gitlab https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/michifumi/proxy_sh.git
+        git remote add gitlab "https://oauth2:${GITLAB_TOKEN}@gitlab.com/michifumi/proxy_sh.git"
         git push gitlab --force --prune 'refs/remotes/origin/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
