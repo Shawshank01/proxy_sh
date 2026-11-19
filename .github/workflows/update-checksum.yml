@@ -66,7 +66,7 @@ jobs:
           --arg signature "$(base64 -w 0 "$signing_dir/proxy.sh.sig")" '{
             query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
             variables: { input: {
-              branch: { repositoryNameWithOwner: $repository, refName: "main" },
+              branch: { repositoryNameWithOwner: $repository, branchName: "main" },
               expectedHeadOid: $head,
               message: { headline: "chore: update proxy.sh release artifacts [skip ci]" },
               fileChanges: { additions: [
