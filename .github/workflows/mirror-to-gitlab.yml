@@ -3,9 +3,9 @@ name: Mirror to GitLab
 on:
   push:
   workflow_run:
-    workflows: [Update Release Artifacts]
-    branches: [main]
-    types: [completed]
+    workflows: [ Update Release Artifacts ]
+    branches: [ main ]
+    types: [ completed ]
 
 permissions:
   contents: read

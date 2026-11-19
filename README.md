@@ -27,35 +27,13 @@ This is an automated shell script that installs and manages Docker containers on
 
 ### Install on GNU/Linux
 
-Run the installer from your regular login account with `sudo` access. It verifies the release signature and checksum before requesting administrative privileges. It installs the script under `/opt/proxy-sh` and puts the `proxy.sh` command in `/usr/local/bin`.
+Run this command from your regular login account with `sudo` access.
 
 ```bash
-installer_url=https://raw.githubusercontent.com/Shawshank01/proxy_sh/33dc3443a54be36d6fd00455166036f9bddc6f97/install.sh
-curl -q -fsSL --proto '=https' "$installer_url" | bash
-proxy.sh
+curl -fsSL https://raw.githubusercontent.com/Shawshank01/proxy_sh/33dc3443a54be36d6fd00455166036f9bddc6f97/install.sh | bash
 ```
 
-The release workflow fills in the installer commit above. Use the published README on GitHub for the pinned URL. To review the bootstrap before executing it, set `installer_url` to the URL above, then download and open the file.
-
-```bash
-curl -q -fsSL --proto '=https' "$installer_url" -o install.sh
-less install.sh
-```
-
-Run `bash install.sh` after reviewing it. The installed command works from any directory. Use menu option **1** to set up Docker if needed, then **2** or **3** to configure your proxy. The launcher uses `sudo` for administration, and scheduled checks can run from the root-owned deployment. Re-running the installer preserves the installed version and deployment files. Use menu option **0** for a signed update.
-
-### Migrate an existing deployment
-
-1. Keep a backup and review the original Compose files, overrides, and `.env` before importing them into a root-owned deployment. For Xray quotas, note the existing schedule, disable it through menu **10 → 6**, and run a final check through **10 → 2**.
-2. Run `sudo docker compose down` from each original service directory that you are moving. This stops those proxy services during the cutover.
-3. Run `bash install.sh --migrate-from /path/to/old/deployment`. The directory you pass should contain `xray/` or `shadowsocks/`. The installer copies service files into `/opt/proxy-sh` and leaves the originals available for recovery.
-4. Run `proxy.sh` and choose menu **6** to restore the services from their new paths. Reconfigure automatic quotas through **10 → 6** if needed.
-
-### Release signing (for Fork)
-
-The installer and self-updater verify a detached OpenSSL signature. For a fork, add the PEM-encoded private key as the repository Actions secret `RELEASE_PRIVATE_KEY`. Pin the matching public key in both `install.sh` and `proxy.sh`, and update their repository URLs. The **Update Release Artifacts** workflow checks the pinned keys, commits the checksum and signature together, and publishes the installer URL at a specific commit. If `main` moves during signing, rerun the workflow on `main`.
-
-Protect `main` and review installer and workflow changes before publishing. A GitHub environment with approval requirements can restrict access to the signing key. The first downloaded bootstrap still runs on the trust you place in the pinned installer URL.
+The installer verifies the release signature and checksum before requesting `sudo`. It installs the script under `/opt/proxy-sh` and puts the `proxy.sh` command in `/usr/local/bin`. After installation, run `proxy.sh` from any directory. Use menu option **1** to set up Docker if needed, then **2** or **3** to configure your proxy. Re-running the installer preserves the installed version and deployment files. Use menu option **0** for a signed update.
 
 ## Menu Options
 

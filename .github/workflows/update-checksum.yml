@@ -10,6 +10,7 @@ on:
     - '.github/workflows/update-checksum.yml'
   workflow_dispatch:
 
+
 concurrency:
   group: proxy-sh-release-artifacts
   cancel-in-progress: false
@@ -73,8 +74,8 @@ jobs:
           [[ "$installer_commit" =~ ^[0-9a-f]{40}$ ]]
           installer_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$installer_commit/install.sh"
           awk -v url="$installer_url" '
-            /^installer_url=https:\/\/raw\.githubusercontent\.com\/.*\/install\.sh$/ {
-              $0 = "installer_url=" url
+            /^curl / {
+              sub(/https:\/\/raw\.githubusercontent\.com\/[^[:space:]]+\/install\.sh[[:space:]]/, url " ")
             }
             { print }
           ' README.md > "$signing_dir/README.md"
