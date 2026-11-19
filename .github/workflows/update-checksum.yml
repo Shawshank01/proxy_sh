@@ -6,6 +6,7 @@ on:
     - main
     paths:
     - 'proxy.sh'
+    - 'install.sh'
     - '.github/workflows/update-checksum.yml'
   workflow_dispatch:
 
@@ -26,6 +27,7 @@ jobs:
       uses: actions/checkout@v7
       with:
         ref: main
+        fetch-depth: 0
         persist-credentials: false
 
     - name: Generate checksum and detached signature
@@ -54,24 +56,53 @@ jobs:
         openssl dgst -sha256 -verify "$signing_dir/public.pem" -signature "$signing_dir/proxy.sh.sig" proxy.sh
         sha256sum proxy.sh > "$signing_dir/proxy.sh.sha256"
 
-        if cmp -s proxy.sh.sig "$signing_dir/proxy.sh.sig" && cmp -s proxy.sh.sha256 "$signing_dir/proxy.sh.sha256"; then
+        readme=""
+        if [[ -f install.sh ]]; then
+          bash -n install.sh
+          awk '
+            /^INSTALLER_RELEASE_PUBLIC_KEY=/ { sub(/^INSTALLER_RELEASE_PUBLIC_KEY=./, ""); key=1 }
+            key && /^-----END PUBLIC KEY-----/ { sub(/.$/, ""); print; exit }
+            key { print }
+          ' install.sh > "$signing_dir/installer-public.pem"
+          if ! cmp -s "$signing_dir/public.pem" "$signing_dir/installer-public.pem"; then
+            echo "install.sh and proxy.sh must pin the same release key."
+            exit 1
+          fi
+
+          installer_commit=$(git log -1 --format=%H -- install.sh)
+          [[ "$installer_commit" =~ ^[0-9a-f]{40}$ ]]
+          installer_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$installer_commit/install.sh"
+          awk -v url="$installer_url" '
+            /^installer_url=https:\/\/raw\.githubusercontent\.com\/.*\/install\.sh$/ {
+              $0 = "installer_url=" url
+            }
+            { print }
+          ' README.md > "$signing_dir/README.md"
+          if ! cmp -s README.md "$signing_dir/README.md"; then
+            readme=$(base64 -w 0 "$signing_dir/README.md")
+          fi
+        fi
+
+        if [[ -z "$readme" ]] && cmp -s proxy.sh.sig "$signing_dir/proxy.sh.sig" &&
+          cmp -s proxy.sh.sha256 "$signing_dir/proxy.sh.sha256"; then
           echo "Release artifacts are already up to date."
           exit 0
         fi
 
-        # Commit both files together, only if main still points to the revision
+        # Commit the release files together, only if main still points to the revision
         # used for signing. A concurrent push must never receive stale artifacts.
         jq -n --arg repository "$GITHUB_REPOSITORY" --arg head "$(git rev-parse HEAD)" \
           --arg checksum "$(base64 -w 0 "$signing_dir/proxy.sh.sha256")" \
+          --arg readme "$readme" \
           --arg signature "$(base64 -w 0 "$signing_dir/proxy.sh.sig")" '{
             query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
             variables: { input: {
               branch: { repositoryNameWithOwner: $repository, branchName: "main" },
               expectedHeadOid: $head,
               message: { headline: "chore: update proxy.sh release artifacts [skip ci]" },
-              fileChanges: { additions: [
+              fileChanges: { additions: ([
                 { path: "proxy.sh.sha256", contents: $checksum },
                 { path: "proxy.sh.sig", contents: $signature }
-              ] }
+              ] + (if $readme == "" then [] else [{path: "README.md", contents: $readme}] end)) }
             } }
           }' | gh api graphql --input - --jq '.data.createCommitOnBranch.commit.oid'

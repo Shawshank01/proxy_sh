@@ -159,7 +159,11 @@ generate_uuid() {
 ensure_service_dir() {
 	local dir=$1
 	if [[ ! -d "$dir" ]]; then
-		mkdir -p "$dir" 2>/dev/null || $SUDO mkdir -p "$dir" || return 1
+		if [[ "$PWD" == "/opt/proxy-sh" ]]; then
+			$SUDO mkdir -m 0700 -- "$dir" || return 1
+		else
+			mkdir -p "$dir" 2>/dev/null || $SUDO mkdir -p "$dir" || return 1
+		fi
 	fi
 	if [[ "$EUID" -ne 0 ]] && [[ -n "$SUDO" ]] && [[ -d "$dir" ]]; then
 		$SUDO chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || return 1
