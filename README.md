@@ -30,7 +30,7 @@ This is an automated shell script that installs and manages Docker containers on
 Run the installer from your regular login account with `sudo` access. It verifies the release signature and checksum before requesting administrative privileges. It installs the script under `/opt/proxy-sh` and puts the `proxy.sh` command in `/usr/local/bin`.
 
 ```bash
-installer_url=https://raw.githubusercontent.com/Shawshank01/proxy_sh/INSTALLER_COMMIT/install.sh
+installer_url=https://raw.githubusercontent.com/Shawshank01/proxy_sh/33dc3443a54be36d6fd00455166036f9bddc6f97/install.sh
 curl -q -fsSL --proto '=https' "$installer_url" | bash
 proxy.sh
 ```
