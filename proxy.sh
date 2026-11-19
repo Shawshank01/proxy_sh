@@ -80,7 +80,8 @@ SUDO=""
 if [[ "$EUID" -ne 0 ]]; then
 	if command -v sudo >/dev/null 2>&1; then
 		SUDO="sudo"
-	else
+	elif [[ "${1:-}" != --quota-scheduled-* && "${1:-}" != "--quota-scheduler-probe" &&
+		"${1:-}" != "--quota-check-status" ]]; then
 		echo -e "${RED}This script requires root privileges or sudo.${NC}" >&2
 		exit 1
 	fi
@@ -602,6 +603,12 @@ check_environment() {
 # --- Shared container lifecycle ---
 
 reload_xray_container() {
+	if [[ "${XRAY_QUOTA_SCHEDULED:-0}" -eq 1 ]]; then
+		local container_id
+		container_id=$(scheduled_xray_container) || return 1
+		docker restart "$container_id"
+		return
+	fi
 	if [[ ! -d "xray" ]] || [[ ! -f "xray/docker-compose.yml" ]]; then
 		echo -e "${RED}xray/docker-compose.yml not found.${NC}"
 		return 1
@@ -1301,8 +1308,7 @@ delete_xray() {
 	if [[ -d "xray" ]]; then
 		with_xray_quota_lock delete_container "Xray" "xray" || return 1
 	fi
-	disable_xray_quota_systemd_silent
-	disable_xray_quota_cron_silent
+	apply_quota_scheduler disabled
 }
 
 delete_shadowsocks() {
@@ -3194,6 +3200,13 @@ checkpoint_xray_quota_usage() {
 }
 
 check_and_apply_xray_quotas() {
+	if [[ "${XRAY_QUOTA_SCHEDULED:-0}" -eq 1 ]]; then
+		if [[ "$EUID" -eq 0 ]] && ! trusted_root_quota_deployment "$PWD"; then
+			echo 'Root quota checks stopped because deployment ownership or permissions changed.' >&2
+			return 1
+		fi
+		scheduled_xray_container >/dev/null || return 1
+	fi
 	with_xray_quota_lock _check_and_apply_xray_quotas_internal "$@"
 }
 
@@ -3570,7 +3583,6 @@ _change_xray_user_billing_cycle() {
 }
 
 manage_xray_quotas() {
-	sync_xray_quota_systemd_runner || true
 	local quota_choice
 	while true; do
 		echo ""
@@ -3624,26 +3636,347 @@ manage_xray_quotas() {
 # --- Scheduler subsystem ---
 
 XRAY_QUOTA_CRON_MARKER="# proxy-sh:xray-quota-check"
+XRAY_QUOTA_RUNNER="/usr/local/lib/proxy-sh/quota-check.sh"
+XRAY_QUOTA_CRON_STATE="/etc/proxy-sh/quota-cron.conf"
+XRAY_QUOTA_CRON_FILE="/etc/cron.d/xray-quota-check"
+XRAY_QUOTA_SERVICE_FILE="/etc/systemd/system/xray-quota-check.service"
+XRAY_QUOTA_TIMER_FILE="/etc/systemd/system/xray-quota-check.timer"
+XRAY_QUOTA_SCHEDULER_MARKER="# proxy-sh:managed-quota-scheduler"
+XRAY_QUOTA_SCHEDULER_LOCK="/run/proxy-sh-quota-scheduler.lock"
+XRAY_QUOTA_JOB_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 systemd_available() {
 	command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
 }
 
-parse_systemd_timespan_sec() {
-	local val="${1:-60}"
-	val=$(echo "$val" | tr -d '[:space:]"')
+root_owned_quota_path() {
+	local path=$1 owner mode
+	[[ ! -L "$path" ]] || return 1
+	read -r owner mode < <(stat -c '%u %a' -- "$path") || return 1
+	[[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] && (((8#$mode & 022) == 0))
+}
 
-	if [[ "$val" =~ ^([0-9]+)(min|m)$ ]]; then
-		echo $((${BASH_REMATCH[1]} * 60))
-	elif [[ "$val" =~ ^([0-9]+)h$ ]]; then
-		echo $((${BASH_REMATCH[1]} * 3600))
-	elif [[ "$val" =~ ^([0-9]+)d$ ]]; then
-		echo $((${BASH_REMATCH[1]} * 86400))
-	elif [[ "$val" =~ ^([0-9]+)s?$ ]]; then
-		echo "${BASH_REMATCH[1]}"
-	else
-		echo "60"
+trusted_root_quota_directory() {
+	local directory=$1
+	[[ "$directory" == /* && "$(realpath -e -- "$directory")" == "$directory" ]] || return 1
+	while [[ "$directory" != / ]]; do
+		[[ -d "$directory" ]] && root_owned_quota_path "$directory" || return 1
+		directory=$(dirname -- "$directory")
+	done
+	root_owned_quota_path /
+}
+
+trusted_root_quota_deployment() {
+	local deployment=$1 item
+	trusted_root_quota_directory "$deployment" || return 1
+	[[ -d "$deployment/xray" ]] && root_owned_quota_path "$deployment/xray" || return 1
+	for item in server.jsonc user_limits.db user_limits.conf; do
+		[[ -f "$deployment/xray/$item" ]] && root_owned_quota_path "$deployment/xray/$item" || return 1
+	done
+	for item in .user_limits.lock .user_limits.lock.d; do
+		if [[ -e "$deployment/xray/$item" || -L "$deployment/xray/$item" ]]; then
+			root_owned_quota_path "$deployment/xray/$item" || return 1
+		fi
+	done
+}
+
+scheduled_xray_container() {
+	# Restart only the existing container bound to this deployment's config.
+	# This avoids loading a Compose file in an unattended privileged job.
+	local inspected container_id source
+	inspected=$(timeout 10s docker inspect --type container -f \
+		'{{.Id}}{{printf "\n"}}{{range .Mounts}}{{if and (eq .Type "bind") (eq .Destination "/etc/xray/config.json")}}{{println .Source}}{{end}}{{end}}' \
+		xray_server) || return 1
+	container_id=${inspected%%$'\n'*}
+	source=${inspected#*$'\n'}
+	if ! [[ "$container_id" =~ ^[0-9a-f]{64}$ && "$source" == "$PWD/xray/server.jsonc" ]]; then
+		echo "The Docker container xray_server is not bound to the configuration in $PWD/xray." >&2
+		return 1
 	fi
+	printf '%s\n' "$container_id"
+}
+
+prepare_scheduled_quota_check() {
+	SUDO=""
+	XRAY_QUOTA_SCHEDULED=1
+	cd -P -- "$1" || return 1
+	if [[ "$EUID" -eq 0 ]] && ! trusted_root_quota_deployment "$PWD"; then
+		echo 'Root quota jobs require a root-owned deployment with no group or world write access.' >&2
+		return 1
+	fi
+	if ! [[ -w xray && -r xray/server.jsonc && -r xray/user_limits.db && -r xray/user_limits.conf ]]; then
+		echo "The scheduler account needs access to the Xray configuration and quota files in $PWD/xray." >&2
+		return 1
+	fi
+	if ! command -v docker >/dev/null || ! command -v jq >/dev/null; then
+		echo 'Scheduled quota checks require Docker and jq.' >&2
+		return 1
+	fi
+
+	# Use the same Docker endpoint for setup verification and unattended runs.
+	unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
+	if [[ "$EUID" -ne 0 && -S "/run/user/$EUID/docker.sock" ]]; then
+		export XDG_RUNTIME_DIR="/run/user/$EUID"
+		export DOCKER_HOST="unix:///run/user/$EUID/docker.sock"
+	fi
+	scheduled_xray_container >/dev/null
+}
+
+read_quota_cron_state() {
+	local -a lines=()
+	[[ -f "$XRAY_QUOTA_CRON_STATE" ]] &&
+		trusted_root_quota_directory "${XRAY_QUOTA_CRON_STATE%/*}" &&
+		root_owned_quota_path "$XRAY_QUOTA_CRON_STATE" || return 1
+	mapfile -t lines <"$XRAY_QUOTA_CRON_STATE" || return 1
+	[[ ${#lines[@]} -eq 3 ]] || return 1
+	[[ "${lines[0]}" == system || "${lines[0]}" == personal ]] || return 1
+	[[ "${lines[1]}" =~ ^[A-Za-z0-9_.-]+[$]?$ && "${lines[2]}" == /* ]] || return 1
+	cron_scope=${lines[0]} cron_account=${lines[1]} cron_deployment=${lines[2]}
+}
+
+quota_scheduler_account() {
+	local deployment=$1 uid
+	if trusted_root_quota_deployment "$deployment"; then
+		echo root
+		return
+	fi
+	uid=$(stat -c %u -- "$deployment") || return 1
+	if [[ "$uid" == 0 ]]; then
+		uid=$(stat -c %u -- "$deployment/xray") || return 1
+	fi
+	if [[ "$uid" == 0 ]]; then
+		echo 'This deployment needs an admin-controlled path for a root job, or a non-root deployment owner with Docker access.' >&2
+		return 1
+	fi
+	id -nu "$uid"
+}
+
+render_quota_service() {
+	local deployment=$1 account=$2 interval=$3
+	# WorkingDirectory expands systemd specifiers. A final /. also preserves
+	# literal trailing spaces or backslashes before systemd simplifies the path.
+	local directory="${deployment//%/%%}/."
+	cat <<EOL
+$XRAY_QUOTA_SCHEDULER_MARKER
+[Unit]
+Description=Xray per-user quota check daemon
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$account
+Environment=PATH=$XRAY_QUOTA_JOB_PATH
+WorkingDirectory=$directory
+ExecStartPre=/bin/bash $XRAY_QUOTA_RUNNER --quota-scheduler-probe
+ExecStart=/bin/bash $XRAY_QUOTA_RUNNER --quota-scheduled-daemon $interval
+Restart=always
+RestartSec=5s
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target
+EOL
+}
+
+render_quota_cron_job() {
+	local schedule=$1 account=${2:-}
+	printf '%s %sPATH=%s /bin/bash %s --quota-scheduled-cron >> /dev/null 2>&1 %s\n' \
+		"$schedule" "${account:+$account }" "$XRAY_QUOTA_JOB_PATH" "$XRAY_QUOTA_RUNNER" "$XRAY_QUOTA_CRON_MARKER"
+}
+
+ensure_quota_scheduler_directory() {
+	local directory=$1
+	if [[ ! -e "$directory" && ! -L "$directory" ]]; then
+		trusted_root_quota_directory "${directory%/*}" || return 1
+		$SUDO install -d -o root -g root -m 0755 "$directory" || return 1
+	fi
+	trusted_root_quota_directory "$directory"
+}
+
+install_quota_scheduler_file() {
+	local source=$1 destination=$2 mode=$3 temporary
+	temporary=$($SUDO mktemp "${destination%/*}/.proxy-sh.XXXXXX") || return 1
+	if ! $SUDO install -o root -g root -m "$mode" -- "$source" "$temporary" ||
+		! $SUDO mv -fT -- "$temporary" "$destination"; then
+		$SUDO rm -f -- "$temporary"
+		return 1
+	fi
+}
+
+snapshot_quota_scheduler_file() {
+	local source=$1 backup=$2
+	[[ ! -e "$source" && ! -L "$source" ]] || cp -- "$source" "$backup"
+}
+
+restore_quota_scheduler_file() {
+	local backup=$1 target=$2 mode=$3
+	if [[ -f "$backup" ]]; then
+		install_quota_scheduler_file "$backup" "$target" "$mode"
+	else
+		$SUDO rm -f -- "$target"
+	fi
+}
+
+quota_scheduler_probe_as() {
+	local account=$1 deployment=$2
+	if [[ "$account" == "$(id -un)" ]]; then
+		(cd -- "$deployment" && env PATH="$XRAY_QUOTA_JOB_PATH" /bin/bash "$XRAY_QUOTA_RUNNER" --quota-scheduler-probe)
+	else
+		$SUDO runuser -u "$account" -- env PATH="$XRAY_QUOTA_JOB_PATH" /bin/bash -c \
+			'cd -- "$1" && exec /bin/bash "$2" --quota-scheduler-probe' \
+			proxy-sh "$deployment" "$XRAY_QUOTA_RUNNER"
+	fi
+}
+
+refresh_verified_quota_runner() (
+	local verified_script=$1
+	if ! grep -Fxq "$XRAY_QUOTA_SCHEDULER_MARKER" "$XRAY_QUOTA_SERVICE_FILE" 2>/dev/null &&
+		[[ ! -f "$XRAY_QUOTA_CRON_STATE" ]]; then
+		return 0
+	fi
+	$SUDO mkdir -- "$XRAY_QUOTA_SCHEDULER_LOCK" || return 1
+	trap '$SUDO rmdir -- "$XRAY_QUOTA_SCHEDULER_LOCK"' EXIT
+	if cmp -s "$verified_script" "$XRAY_QUOTA_RUNNER"; then
+		return 0
+	fi
+	trusted_root_quota_directory "${XRAY_QUOTA_RUNNER%/*}" &&
+		install_quota_scheduler_file "$verified_script" "$XRAY_QUOTA_RUNNER" 0755
+)
+
+parse_systemd_timespan_sec() {
+	local val=$1 scale=1 amount
+	val=${val//[[:space:]\" ]/}
+	case "$val" in
+	*min)
+		scale=60
+		val=${val%min}
+		;;
+	*m)
+		scale=60
+		val=${val%m}
+		;;
+	*h)
+		scale=3600
+		val=${val%h}
+		;;
+	*d)
+		scale=86400
+		val=${val%d}
+		;;
+	*s) val=${val%s} ;;
+	esac
+	amount=$(parse_decimal_range "$val" 1 "$((9223372036854775807 / scale))") || return 1
+	printf '%s\n' "$((amount * scale))"
+}
+
+systemd_quota_interval() {
+	local unit
+	unit=$(cat "$XRAY_QUOTA_SERVICE_FILE" 2>/dev/null) || unit=""
+	if [[ "$unit" =~ --quota-(scheduled-)?daemon[[:space:]]+([0-9]+) ]]; then
+		parse_systemd_timespan_sec "${BASH_REMATCH[2]}"
+	else
+		legacy_quota_timer_interval
+	fi
+}
+
+legacy_quota_timer_interval() {
+	local interval
+	[[ -f "$XRAY_QUOTA_TIMER_FILE" ]] || return 1
+	interval=$(awk -F= '/^OnUnitActiveSec=/{print $2; exit}' "$XRAY_QUOTA_TIMER_FILE") || return 1
+	parse_systemd_timespan_sec "$interval"
+}
+
+cron_quota_running() {
+	if systemd_available && { systemctl is-active --quiet cron.service || systemctl is-active --quiet crond.service; }; then
+		return 0
+	fi
+	pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1
+}
+
+ensure_quota_cron_running() {
+	cron_quota_running && return 0
+	ensure_crontab_available || return 1
+	if systemd_available; then
+		$SUDO systemctl enable --now cron.service 2>/dev/null ||
+			$SUDO systemctl enable --now crond.service 2>/dev/null || return 1
+	else
+		$SUDO service cron start 2>/dev/null || $SUDO service crond start 2>/dev/null || return 1
+	fi
+	cron_quota_running
+}
+
+read_quota_personal_crontab() {
+	local account=$1 output
+	shift
+	local -a options=(-u "$account")
+	if [[ $# -eq 0 && "$account" == "$(id -un)" ]]; then options=(); fi
+	if output=$("$@" env LC_ALL=C crontab "${options[@]}" -l 2>&1); then
+		printf '%s\n' "$output"
+	elif [[ "$output" != *"no crontab for "* ]]; then
+		printf '%s\n' "$output" >&2
+		return 1
+	fi
+}
+
+read_visible_quota_crontab() {
+	local user=$1
+	if [[ "$EUID" -eq 0 || "$user" == "$(id -un)" ]]; then
+		read_quota_personal_crontab "$user"
+	elif [[ -n "$SUDO" ]]; then
+		read_quota_personal_crontab "$user" $SUDO -n
+	else
+		return 1
+	fi
+}
+
+write_quota_personal_crontab() {
+	$SUDO crontab -u "$1" "$2"
+}
+
+strip_quota_cron_jobs() {
+	awk -v marker="$XRAY_QUOTA_CRON_MARKER" '
+        { line = $0; sub(/[[:space:]]+$/, "", line) }
+        substr(line, length(line) - length(marker) + 1) != marker
+    '
+}
+
+valid_quota_cron_schedule() {
+	# Only the time fields can be carried over from a legacy cron job.
+	[[ "$1" =~ ^[0-9*/,-]+(\ [0-9*/,-]+){4}$ ]]
+}
+
+cron_quota_schedules() {
+	awk -v marker="$XRAY_QUOTA_CRON_MARKER" -v scope="$1" '
+        { line = $0; sub(/[[:space:]]+$/, "", line) }
+        NF >= 6 && $1 !~ /^#/ && (scope == "system" || substr(line, length(line) - length(marker) + 1) == marker) {
+            print $1 " " $2 " " $3 " " $4 " " $5
+        }
+    '
+}
+
+quota_cron_interval() {
+	local schedule=$1 minutes
+	case "$schedule" in
+	"* * * * *") echo 60 ;;
+	"0 * * * *") echo 3600 ;;
+	*)
+		[[ "$schedule" =~ ^\*/([0-9]+)\ \*\ \*\ \*\ \*$ ]] || return 1
+		minutes=$(parse_decimal_range "${BASH_REMATCH[1]}" 1 59) || return 1
+		((60 % minutes == 0)) || return 1
+		echo "$((minutes * 60))"
+		;;
+	esac
+}
+
+quota_interval_cron() {
+	local interval=$1
+	((interval >= 60 && interval <= 3600 && interval % 60 == 0 && 3600 % interval == 0)) || return 1
+	case "$interval" in
+	60) echo '* * * * *' ;;
+	3600) echo '0 * * * *' ;;
+	*) printf '*/%s * * * *\n' "$((interval / 60))" ;;
+	esac
 }
 
 format_seconds_label() {
@@ -3659,130 +3992,6 @@ format_seconds_label() {
 		if [[ "$mins" -eq 1 ]]; then echo "1 minute"; else echo "$mins minutes"; fi
 	else
 		echo "${sec} seconds"
-	fi
-}
-
-disable_xray_quota_cron_silent() {
-	local cron_file="/etc/cron.d/xray-quota-check"
-	if [[ -f "$cron_file" ]]; then
-		$SUDO rm -f "$cron_file" >/dev/null 2>&1 || true
-	fi
-
-	if command -v crontab >/dev/null 2>&1; then
-		local current_cron
-		if current_cron=$(crontab -l 2>/dev/null) && [[ "$current_cron" == *"$XRAY_QUOTA_CRON_MARKER"* ]]; then
-			printf '%s\n' "$current_cron" | awk -v marker="$XRAY_QUOTA_CRON_MARKER" '!index($0, marker)' | crontab - || return 1
-		fi
-	fi
-}
-
-disable_xray_quota_systemd_silent() {
-	if ! systemd_available; then
-		return 0
-	fi
-
-	$SUDO systemctl disable --now xray-quota-check.service >/dev/null 2>&1 || true
-	$SUDO systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
-	$SUDO rm -f /etc/systemd/system/xray-quota-check.timer /etc/systemd/system/xray-quota-check.service >/dev/null 2>&1 || true
-	$SUDO rm -f /usr/local/lib/proxy-sh/quota-check.sh >/dev/null 2>&1 || true
-	$SUDO systemctl daemon-reload >/dev/null 2>&1 || true
-}
-
-sync_xray_quota_systemd_runner() {
-	if ! systemd_available; then
-		return 0
-	fi
-
-	local quota_runner="/usr/local/lib/proxy-sh/quota-check.sh"
-	local service_file="/etc/systemd/system/xray-quota-check.service"
-	local timer_file="/etc/systemd/system/xray-quota-check.timer"
-
-	# Only sync if the systemd runner or units already exist
-	if [[ ! -f "$quota_runner" && ! -f "$service_file" && ! -f "$timer_file" ]]; then
-		return 0
-	fi
-
-	local script_path
-	if ! script_path=$(resolve_script_path) || [[ ! -f "$script_path" ]]; then
-		return 0
-	fi
-
-	# Do not sync onto itself if running as quota_runner
-	if [[ "$script_path" == "$quota_runner" ]]; then
-		return 0
-	fi
-
-	local script_dir
-	script_dir=$(dirname "$script_path")
-	if [[ "$script_dir" == "/usr/local/lib/proxy-sh" ]]; then
-		if [[ -d "xray" ]]; then
-			script_dir="$PWD"
-		else
-			return 0
-		fi
-	fi
-
-	# If script_dir points into xray subdirectory, normalise to parent
-	if [[ "$(basename "$script_dir")" == "xray" && -f "${script_dir}/../proxy.sh" ]]; then
-		script_dir="$(cd "${script_dir}/.." && pwd -P)"
-	fi
-
-	local updated_runner=0
-	# Ensure quota-check.sh is up-to-date
-	if [[ ! -f "$quota_runner" ]] || ! cmp -s "$script_path" "$quota_runner" 2>/dev/null; then
-		$SUDO install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh >/dev/null 2>&1 || true
-		if $SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner" >/dev/null 2>&1; then
-			updated_runner=1
-		fi
-	fi
-
-	# Detect legacy timer migration or outdated service file
-	local needs_service_update=0
-	local interval_sec="60"
-
-	# If legacy timer exists, migrate from timer to continuous daemon
-	if [[ -f "$timer_file" ]]; then
-		local old_interval
-		old_interval=$(grep "^OnUnitActiveSec=" "$timer_file" 2>/dev/null | cut -d'=' -f2 || true)
-		interval_sec=$(parse_systemd_timespan_sec "$old_interval")
-
-		$SUDO systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
-		$SUDO rm -f "$timer_file" >/dev/null 2>&1 || true
-		needs_service_update=1
-	elif [[ -f "$service_file" ]]; then
-		if grep -q "Type=oneshot" "$service_file" 2>/dev/null || ! grep -q -- "--quota-daemon" "$service_file" 2>/dev/null; then
-			needs_service_update=1
-		fi
-	fi
-
-	if [[ "$needs_service_update" -eq 1 && (-f "$service_file" || -f "$quota_runner") ]]; then
-		local escaped_dir
-		printf -v escaped_dir '%q' "$script_dir"
-
-		$SUDO tee "$service_file" >/dev/null <<EOL
-[Unit]
-Description=Xray per-user quota check daemon
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-daemon $interval_sec $escaped_dir"
-Restart=always
-RestartSec=5s
-TimeoutStopSec=10s
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-		$SUDO systemctl daemon-reload >/dev/null 2>&1 || true
-		$SUDO systemctl enable --now xray-quota-check.service >/dev/null 2>&1 || true
-		$SUDO systemctl restart xray-quota-check.service >/dev/null 2>&1 || true
-	elif [[ "$updated_runner" -eq 1 ]]; then
-		if systemctl is-active xray-quota-check.service >/dev/null 2>&1 || systemctl is-enabled xray-quota-check.service >/dev/null 2>&1; then
-			$SUDO systemctl restart xray-quota-check.service >/dev/null 2>&1 || true
-		fi
 	fi
 }
 
@@ -3828,85 +4037,6 @@ ensure_crontab_available() {
 	return 1
 }
 
-configure_xray_quota_auto_check_cron() {
-	local script_path
-	if ! script_path=$(resolve_script_path) || [[ ! -f "$script_path" ]]; then
-		echo -e "${RED}Cannot determine script path for cron setup.${NC}"
-		return 1
-	fi
-
-	local script_dir cron_cmd cron_expr cron_file
-	script_dir=$(dirname "$script_path")
-	cron_file="/etc/cron.d/xray-quota-check"
-
-	local auto_choice
-	while true; do
-		echo ""
-		echo "Set automatic quota check interval (cron):"
-		echo "1) Every 1 minute"
-		echo "2) Every 2 minutes"
-		echo "3) Every 5 minutes"
-		echo "4) Disable cron auto quota check"
-		read -p "Enter your choice [1-4]: " auto_choice || return 1
-
-		case $auto_choice in
-		1)
-			cron_expr="* * * * *"
-			break
-			;;
-		2)
-			cron_expr="*/2 * * * *"
-			break
-			;;
-		3)
-			cron_expr="*/5 * * * *"
-			break
-			;;
-		4)
-			disable_xray_quota_cron_silent
-			echo -e "${GREEN}Cron automatic quota check disabled.${NC}"
-			return 0
-			;;
-		*)
-			echo -e "${RED}Invalid choice. Please enter a valid number [1-4].${NC}"
-			;;
-		esac
-	done
-
-	# Prefer system /etc/cron.d/ to run cleanly as root without sudo password prompts
-	if [[ -d "/etc/cron.d" ]]; then
-		disable_xray_quota_cron_silent
-		local cron_content="# proxy-sh:xray-quota-check\n${cron_expr} root cd $(printf '%q' "$script_dir") && /bin/bash $(printf '%q' "$script_path") --quota-check $(printf '%q' "$script_dir") >/dev/null 2>&1\n"
-		printf "%b" "$cron_content" | $SUDO tee "$cron_file" >/dev/null || return 1
-		$SUDO chmod 0644 "$cron_file" || return 1
-		disable_xray_quota_systemd_silent
-		echo -e "${GREEN}System cron automatic quota check enabled:${NC} ${cron_expr}"
-		echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
-		return 0
-	fi
-
-	if ! ensure_crontab_available; then
-		echo -e "${RED}Cannot configure automatic checks without crontab or /etc/cron.d.${NC}"
-		return 1
-	fi
-
-	cron_cmd="cd $(printf '%q' "$script_dir") && bash $(printf '%q' "$script_path") --quota-check $(printf '%q' "$script_dir")"
-	local current_cron
-	current_cron=$(crontab -l 2>/dev/null || true)
-	current_cron=$(printf '%s\n' "$current_cron" | awk -v marker="$XRAY_QUOTA_CRON_MARKER" '!index($0, marker)') || return 1
-
-	local new_entry="${cron_expr} ${cron_cmd} >/dev/null 2>&1 ${XRAY_QUOTA_CRON_MARKER}"
-	if [[ -n "$current_cron" ]]; then
-		printf "%s\n%s\n" "$current_cron" "$new_entry" | crontab - || return 1
-	else
-		printf "%s\n" "$new_entry" | crontab - || return 1
-	fi
-	disable_xray_quota_systemd_silent
-
-	echo -e "${GREEN}Cron automatic quota check enabled:${NC} ${cron_expr}"
-	echo -e "${YELLOW}When a user exceeds quota, they will be suspended on the next check interval.${NC}"
-}
-
 quota_daemon_sleep_seconds() {
 	local interval=$1 now_epoch=$2
 	awk -F'|' -v now="$now_epoch" -v interval="$interval" '
@@ -3928,8 +4058,8 @@ run_xray_quota_daemon() {
 
 	local script_path
 	script_path=$(resolve_script_path) || script_path="${BASH_SOURCE[0]:-$0}"
-	local initial_mtime
-	initial_mtime=$(stat -c %Y "$script_path" 2>/dev/null || true)
+	local initial_script_stamp
+	initial_script_stamp=$(stat -c '%d:%i:%y' "$script_path" 2>/dev/null || true)
 
 	local running=1
 	trap 'running=0; exit 0' SIGTERM SIGINT
@@ -3938,11 +4068,14 @@ run_xray_quota_daemon() {
 
 	while [[ "$running" -eq 1 ]]; do
 		# Self-detection: reload if the script file on disk has been updated
-		local current_mtime
-		current_mtime=$(stat -c %Y "$script_path" 2>/dev/null || true)
-		if [[ -n "$initial_mtime" && -n "$current_mtime" && "$current_mtime" != "$initial_mtime" ]]; then
+		local current_script_stamp
+		current_script_stamp=$(stat -c '%d:%i:%y' "$script_path" 2>/dev/null || true)
+		if [[ -n "$initial_script_stamp" && -n "$current_script_stamp" && "$current_script_stamp" != "$initial_script_stamp" ]]; then
 			echo "Script update detected on disk (${script_path}). Reloading quota daemon..."
 			cleanup_script_tmp_dir
+			if [[ "${XRAY_QUOTA_SCHEDULED:-0}" -eq 1 ]]; then
+				exec /bin/bash "$script_path" --quota-scheduled-daemon "$interval"
+			fi
 			exec /bin/bash "$script_path" --quota-daemon "$interval" "$PWD"
 		fi
 
@@ -3955,104 +4088,6 @@ run_xray_quota_daemon() {
 		sleep "$sleep_seconds" &
 		wait $! 2>/dev/null || true
 	done
-}
-
-configure_xray_quota_auto_check_systemd() {
-	if ! systemd_available; then
-		echo -e "${RED}Systemd is not available on this host.${NC}"
-		return 1
-	fi
-
-	local script_path script_dir unit_interval_sec unit_interval_label escaped_dir
-	local quota_runner="/usr/local/lib/proxy-sh/quota-check.sh"
-	if ! script_path=$(resolve_script_path) || [[ ! -f "$script_path" ]]; then
-		echo -e "${RED}Cannot determine script path for systemd daemon setup.${NC}"
-		return 1
-	fi
-	script_dir=$(dirname "$script_path")
-	if [[ "$script_dir" == "/usr/local/lib/proxy-sh" ]]; then
-		if [[ -d "xray" ]]; then
-			script_dir="$PWD"
-		fi
-	fi
-	if [[ "$(basename "$script_dir")" == "xray" && -f "${script_dir}/../proxy.sh" ]]; then
-		script_dir="$(cd "${script_dir}/.." && pwd -P)"
-	fi
-	printf -v escaped_dir '%q' "$script_dir"
-
-	local auto_choice
-	while true; do
-		echo ""
-		echo "Set automatic quota check interval (systemd daemon):"
-		echo "1) Every 1 minute"
-		echo "2) Every 2 minutes"
-		echo "3) Every 5 minutes"
-		echo "4) Disable systemd daemon auto quota check"
-		read -p "Enter your choice [1-4]: " auto_choice || return 1
-
-		case $auto_choice in
-		1)
-			unit_interval_sec="60"
-			unit_interval_label="1 minute"
-			break
-			;;
-		2)
-			unit_interval_sec="120"
-			unit_interval_label="2 minutes"
-			break
-			;;
-		3)
-			unit_interval_sec="300"
-			unit_interval_label="5 minutes"
-			break
-			;;
-		4)
-			disable_xray_quota_systemd_silent
-			echo -e "${GREEN}Systemd daemon automatic quota check disabled.${NC}"
-			return 0
-			;;
-		*)
-			echo -e "${RED}Invalid choice. Please enter a valid number [1-4].${NC}"
-			;;
-		esac
-	done
-
-	# Remove legacy timer if present
-	$SUDO systemctl disable --now xray-quota-check.timer >/dev/null 2>&1 || true
-	$SUDO rm -f /etc/systemd/system/xray-quota-check.timer >/dev/null 2>&1 || true
-
-	# The service runs as root, so execute a root-owned copy rather than the
-	# potentially user-writable interactive script.
-	$SUDO install -d -o root -g root -m 0755 /usr/local/lib/proxy-sh || return 1
-	$SUDO install -o root -g root -m 0755 "$script_path" "$quota_runner" || return 1
-
-	$SUDO tee /etc/systemd/system/xray-quota-check.service >/dev/null <<EOL || return 1
-[Unit]
-Description=Xray per-user quota check daemon
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash -lc "cd $escaped_dir && exec /bin/bash $quota_runner --quota-daemon $unit_interval_sec $escaped_dir"
-Restart=always
-RestartSec=5s
-TimeoutStopSec=10s
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-	$SUDO systemctl daemon-reload || return 1
-	$SUDO systemctl enable xray-quota-check.service || return 1
-	$SUDO systemctl restart xray-quota-check.service || return 1
-
-	# Avoid duplicate checks from cron if systemd daemon is enabled.
-	disable_xray_quota_cron_silent
-
-	echo -e "${GREEN}Systemd daemon automatic quota check enabled:${NC} every $unit_interval_label"
-	echo -e "${YELLOW}Check status: sudo systemctl status xray-quota-check.service${NC}"
-	echo -e "${YELLOW}Logs: sudo journalctl -u xray-quota-check.service -n 50 --no-pager${NC}"
 }
 
 change_xray_quota_timezone() {
@@ -4125,108 +4160,399 @@ _change_xray_quota_timezone() {
 	echo -e "${GREEN}Updated quota billing timezone to: ${new_tz}${NC}"
 }
 
-configure_xray_quota_auto_check() {
-	local scheduler_choice
-	if systemd_available; then
-		while true; do
-			echo ""
-			echo "Choose scheduler for automatic quota checks:"
-			echo "1) Systemd daemon (recommended)"
-			echo "2) Cron"
-			echo "3) Disable all automatic quota checks"
-			read -p "Enter your choice [1-3]: " scheduler_choice || return 1
+quota_systemd_unit_state() {
+	local unit=$1 enabled active=0
+	enabled=$(systemctl is-enabled "$unit" 2>/dev/null) || true
+	if systemctl is-active --quiet "$unit"; then active=1; fi
+	printf '%s|%s\n' "${enabled:-unknown}" "$active"
+}
 
-			case $scheduler_choice in
-			1)
-				if configure_xray_quota_auto_check_systemd; then
-					break
-				fi
-				;;
-			2)
-				if configure_xray_quota_auto_check_cron; then
-					break
-				fi
-				;;
-			3)
-				disable_xray_quota_systemd_silent
-				disable_xray_quota_cron_silent
-				echo -e "${GREEN}Disabled all automatic quota checks.${NC}"
-				break
-				;;
-			*)
-				echo -e "${RED}Invalid choice. Please enter a valid number [1-3].${NC}"
-				;;
-			esac
-		done
-	else
-		echo -e "${YELLOW}Systemd not detected. Falling back to cron configuration.${NC}"
-		configure_xray_quota_auto_check_cron
+remove_quota_systemd_unit() {
+	local path=$1 old_state=$2 unit=${1##*/}
+	if [[ -f "$path" || "${old_state#*|}" == 1 || "${old_state%%|*}" == enabled* ]]; then
+		if systemd_available; then
+			$SUDO systemctl disable --now "$unit" || return 1
+		fi
+		$SUDO rm -f -- "$path" || return 1
 	fi
 }
 
-show_xray_quota_auto_check_status() {
-	sync_xray_quota_systemd_runner || true
-	local systemd_enabled=0
-	local systemd_interval=""
-	local cron_enabled=0
-	local cron_schedule=""
+restore_quota_systemd_state() {
+	local unit=$1 old_state=$2
+	case "${old_state%%|*}" in
+	enabled) $SUDO systemctl enable "$unit" || return 1 ;;
+	enabled-runtime) $SUDO systemctl enable --runtime "$unit" || return 1 ;;
+	esac
+	if [[ "${old_state#*|}" == 1 ]]; then
+		$SUDO systemctl start "$unit"
+	fi
+}
 
-	# Check systemd daemon service
-	if systemd_available; then
-		if [[ -f "/etc/systemd/system/xray-quota-check.service" ]]; then
-			if systemctl is-active xray-quota-check.service >/dev/null 2>&1 || systemctl is-enabled xray-quota-check.service >/dev/null 2>&1; then
-				systemd_enabled=1
-				local exec_start
-				exec_start=$(grep "^ExecStart=" "/etc/systemd/system/xray-quota-check.service" 2>/dev/null || true)
-				if [[ "$exec_start" =~ --quota-daemon[[:space:]]+([0-9]+) ]]; then
-					local sec="${BASH_REMATCH[1]}"
-					systemd_interval=$(format_seconds_label "$sec")
-				elif [[ -f "/etc/systemd/system/xray-quota-check.timer" ]]; then
-					local old_timer_interval
-					old_timer_interval=$(grep "^OnUnitActiveSec=" "/etc/systemd/system/xray-quota-check.timer" | cut -d'=' -f2 || true)
-					local parsed_sec
-					parsed_sec=$(parse_systemd_timespan_sec "$old_timer_interval")
-					systemd_interval=$(format_seconds_label "$parsed_sec")
-				fi
+finish_quota_scheduler_change() {
+	# The transaction's EXIT trap shares these local variables.
+	local rc=$1 restored=1 user
+	if [[ "$committed" -eq 0 && "$backup_ready" -eq 1 ]]; then
+		if systemd_available; then
+			if [[ "$service_touched" -eq 1 ]]; then
+				$SUDO systemctl disable --now xray-quota-check.service >/dev/null 2>&1 || true
+				$SUDO systemctl stop xray-quota-check.service >/dev/null 2>&1 || true
+			fi
+			if [[ "$timer_touched" -eq 1 ]]; then
+				$SUDO systemctl stop xray-quota-check.timer >/dev/null 2>&1 || true
+			fi
+		fi
+		if [[ "$runner_touched" -eq 1 ]]; then
+			restore_quota_scheduler_file "$backup_dir/runner" "$XRAY_QUOTA_RUNNER" 0755 || restored=0
+		fi
+		if [[ "$cron_state_touched" -eq 1 ]]; then
+			restore_quota_scheduler_file "$backup_dir/cron-state" "$XRAY_QUOTA_CRON_STATE" 0644 || restored=0
+		fi
+		if [[ "$cron_file_touched" -eq 1 ]]; then
+			restore_quota_scheduler_file "$backup_dir/cron" "$XRAY_QUOTA_CRON_FILE" 0644 || restored=0
+		fi
+		for user in "${!personal_touched[@]}"; do
+			write_quota_personal_crontab "$user" "$backup_dir/crontab.$user" || restored=0
+		done
+		if [[ "$service_touched" -eq 1 ]]; then
+			restore_quota_scheduler_file "$backup_dir/service" "$XRAY_QUOTA_SERVICE_FILE" 0644 || restored=0
+		fi
+		if [[ "$timer_touched" -eq 1 ]]; then
+			restore_quota_scheduler_file "$backup_dir/timer" "$XRAY_QUOTA_TIMER_FILE" 0644 || restored=0
+		fi
+		if systemd_available && [[ "$service_touched" -eq 1 || "$timer_touched" -eq 1 ]]; then
+			$SUDO systemctl daemon-reload || restored=0
+			if [[ "$service_touched" -eq 1 ]]; then
+				restore_quota_systemd_state xray-quota-check.service "$old_service" || restored=0
+			fi
+			if [[ "$timer_touched" -eq 1 ]]; then
+				restore_quota_systemd_state xray-quota-check.timer "$old_timer" || restored=0
+			fi
+		fi
+	fi
+	$SUDO rmdir -- "$XRAY_QUOTA_SCHEDULER_LOCK" || restored=0
+	if [[ "$restored" -eq 0 ]]; then
+		echo -e "${RED}Scheduler rollback was incomplete. Backups are in $backup_dir.${NC}" >&2
+		return 1
+	fi
+	rm -rf -- "$backup_dir"
+	return "$rc"
+}
+
+apply_quota_scheduler() (
+	local method=$1 timing=${2:-} deployment=${3:-}
+	local source_script="" account="" new_scope="" user
+	case "$method" in
+	systemd) timing=$(parse_decimal_range "$timing" 1 9223372036854775807) || return 1 ;;
+	cron)
+		if ! valid_quota_cron_schedule "$timing"; then
+			echo 'This cron interval needs five standard numeric time fields.' >&2
+			return 1
+		fi
+		;;
+	disabled) ;;
+	*) return 1 ;;
+	esac
+	if [[ "$method" != disabled ]]; then
+		if [[ "$deployment" != /* || "$deployment" == *[$'\r\n']* ]]; then
+			echo 'Choose an absolute deployment path on a single line for the scheduler.' >&2
+			return 1
+		fi
+		account=$(quota_scheduler_account "$deployment") || return 1
+		[[ "$account" =~ ^[A-Za-z0-9_.-]+[$]?$ ]] || return 1
+		source_script=$(resolve_script_path) && bash -n "$source_script" || return 1
+		if [[ "$method" == cron ]]; then
+			ensure_quota_cron_running || return 1
+			if [[ -d "${XRAY_QUOTA_CRON_FILE%/*}" ]]; then
+				new_scope=system
+			else
+				ensure_crontab_available || return 1
+				new_scope=personal
 			fi
 		fi
 	fi
 
-	# Check cron job
-	if [[ -f "/etc/cron.d/xray-quota-check" ]]; then
-		local cron_line
-		cron_line=$(grep -v '^#' "/etc/cron.d/xray-quota-check" 2>/dev/null | head -n 1 || true)
-		if [[ -n "$cron_line" ]]; then
-			cron_enabled=1
-			cron_schedule=$(echo "$cron_line" | awk '{print $1" "$2" "$3" "$4" "$5}')
-		fi
-	elif command -v crontab >/dev/null 2>&1; then
-		local cron_line
-		cron_line=$(crontab -l 2>/dev/null | grep -F -- "$XRAY_QUOTA_CRON_MARKER" | head -n 1 || true)
-		if [[ -n "$cron_line" ]]; then
-			cron_enabled=1
-			cron_schedule=$(echo "$cron_line" | awk '{print $1" "$2" "$3" "$4" "$5}')
+	if ! $SUDO mkdir -- "$XRAY_QUOTA_SCHEDULER_LOCK"; then
+		echo -e "${RED}Could not lock quota scheduler configuration.${NC}" >&2
+		return 1
+	fi
+	local backup_dir
+	backup_dir=$(mktemp -d "${TMPDIR:-/tmp}/proxy-sh-scheduler.XXXXXX") || {
+		$SUDO rmdir -- "$XRAY_QUOTA_SCHEDULER_LOCK"
+		return 1
+	}
+	local committed=0 backup_ready=0 runner_touched=0 service_touched=0 timer_touched=0
+	local cron_state_touched=0 cron_file_touched=0
+	local old_service='unknown|0' old_timer='unknown|0'
+	local cron_scope="" cron_account="" cron_deployment=""
+	local -A personal_backed_up=() personal_touched=()
+	trap 'finish_quota_scheduler_change "$?"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+
+	if systemd_available; then
+		old_service=$(quota_systemd_unit_state xray-quota-check.service) || return 1
+		old_timer=$(quota_systemd_unit_state xray-quota-check.timer) || return 1
+	fi
+	snapshot_quota_scheduler_file "$XRAY_QUOTA_RUNNER" "$backup_dir/runner" &&
+		snapshot_quota_scheduler_file "$XRAY_QUOTA_SERVICE_FILE" "$backup_dir/service" &&
+		snapshot_quota_scheduler_file "$XRAY_QUOTA_TIMER_FILE" "$backup_dir/timer" &&
+		snapshot_quota_scheduler_file "$XRAY_QUOTA_CRON_FILE" "$backup_dir/cron" &&
+		snapshot_quota_scheduler_file "$XRAY_QUOTA_CRON_STATE" "$backup_dir/cron-state" || return 1
+
+	if [[ -f "$XRAY_QUOTA_CRON_STATE" ]]; then
+		read_quota_cron_state || {
+			echo 'Could not read the existing cron quota registration.' >&2
+			return 1
+		}
+	fi
+	if command -v crontab >/dev/null; then
+		for user in "$(id -un)" "${SUDO_USER:-}" root "$cron_account" "$account"; do
+			[[ "$user" =~ ^[A-Za-z0-9_.-]+[$]?$ ]] || continue
+			[[ -z "${personal_backed_up[$user]+set}" ]] || continue
+			id -u "$user" >/dev/null 2>&1 || continue
+			read_quota_personal_crontab "$user" $SUDO >"$backup_dir/crontab.$user" || return 1
+			personal_backed_up["$user"]=1
+		done
+	fi
+	backup_ready=1
+
+	if [[ "$method" != disabled ]]; then
+		ensure_quota_scheduler_directory "${XRAY_QUOTA_RUNNER%/*}" || return 1
+		runner_touched=1
+		install_quota_scheduler_file "$source_script" "$XRAY_QUOTA_RUNNER" 0755 || return 1
+		if ! quota_scheduler_probe_as "$account" "$deployment"; then
+			echo "The scheduler account '$account' could not access this deployment and Docker without sudo." >&2
+			return 1
 		fi
 	fi
 
-	echo ""
-	echo -e "${YELLOW}--- Automatic Quota Check Configuration Status ---${NC}"
-	if [[ "$systemd_enabled" -eq 1 ]]; then
-		echo -e "${GREEN}Status:${NC} Enabled"
-		echo -e "${GREEN}Method:${NC} Systemd Daemon Service"
-		echo -e "${GREEN}Time Period:${NC} Every ${systemd_interval:-1 minute}"
-	elif [[ "$cron_enabled" -eq 1 ]]; then
-		echo -e "${GREEN}Status:${NC} Enabled"
-		echo -e "${GREEN}Method:${NC} Cron Job"
-		case "$cron_schedule" in
-		"* * * * *") echo -e "${GREEN}Time Period:${NC} Every 1 minute" ;;
-		"*/2 * * * *") echo -e "${GREEN}Time Period:${NC} Every 2 minutes" ;;
-		"*/5 * * * *") echo -e "${GREEN}Time Period:${NC} Every 5 minutes" ;;
-		*) echo -e "${GREEN}Time Period:${NC} Custom schedule (${cron_schedule})" ;;
-		esac
+	case "$method" in
+	systemd)
+		render_quota_service "$deployment" "$account" "$timing" >"$backup_dir/new-service" || return 1
+		service_touched=1
+		install_quota_scheduler_file "$backup_dir/new-service" "$XRAY_QUOTA_SERVICE_FILE" 0644 &&
+			$SUDO systemctl daemon-reload &&
+			$SUDO systemctl enable xray-quota-check.service &&
+			$SUDO systemctl restart xray-quota-check.service &&
+			systemctl is-enabled --quiet xray-quota-check.service &&
+			systemctl is-active --quiet xray-quota-check.service || return 1
+		;;
+	cron)
+		ensure_quota_scheduler_directory "${XRAY_QUOTA_CRON_STATE%/*}" || return 1
+		printf '%s\n' "$new_scope" "$account" "$deployment" >"$backup_dir/new-cron-state" || return 1
+		cron_state_touched=1
+		install_quota_scheduler_file "$backup_dir/new-cron-state" "$XRAY_QUOTA_CRON_STATE" 0644 || return 1
+		if [[ "$new_scope" == system ]]; then
+			render_quota_cron_job "$timing" "$account" >"$backup_dir/new-cron" || return 1
+			cron_file_touched=1
+			install_quota_scheduler_file "$backup_dir/new-cron" "$XRAY_QUOTA_CRON_FILE" 0644 &&
+				cmp -s "$backup_dir/new-cron" "$XRAY_QUOTA_CRON_FILE" || return 1
+		else
+			[[ -n "${personal_backed_up[$account]+set}" ]] || return 1
+			strip_quota_cron_jobs <"$backup_dir/crontab.$account" >"$backup_dir/new-cron" &&
+				render_quota_cron_job "$timing" >>"$backup_dir/new-cron" || return 1
+			personal_touched["$account"]=1
+			write_quota_personal_crontab "$account" "$backup_dir/new-cron" &&
+				read_quota_personal_crontab "$account" $SUDO >"$backup_dir/installed-cron" &&
+				cmp -s "$backup_dir/new-cron" "$backup_dir/installed-cron" || return 1
+		fi
+		read_quota_cron_state &&
+			[[ "$cron_scope" == "$new_scope" && "$cron_account" == "$account" && "$cron_deployment" == "$deployment" ]] &&
+			cron_quota_running || return 1
+		;;
+	esac
+
+	# Keep previous jobs in place until the replacement passes its checks.
+	for user in "${!personal_backed_up[@]}"; do
+		if [[ "$new_scope" == personal && "$user" == "$account" ]]; then
+			continue
+		fi
+		strip_quota_cron_jobs <"$backup_dir/crontab.$user" >"$backup_dir/filtered-cron" || return 1
+		if ! cmp -s "$backup_dir/crontab.$user" "$backup_dir/filtered-cron"; then
+			personal_touched["$user"]=1
+			write_quota_personal_crontab "$user" "$backup_dir/filtered-cron" || return 1
+		fi
+	done
+	if [[ "$new_scope" != system && -f "$XRAY_QUOTA_CRON_FILE" ]]; then
+		cron_file_touched=1
+		$SUDO rm -f -- "$XRAY_QUOTA_CRON_FILE" || return 1
+	fi
+	if [[ "$method" != cron && -f "$XRAY_QUOTA_CRON_STATE" ]]; then
+		cron_state_touched=1
+		$SUDO rm -f -- "$XRAY_QUOTA_CRON_STATE" || return 1
+	fi
+	if [[ -f "$XRAY_QUOTA_TIMER_FILE" || "$old_timer" == enabled* || "$old_timer" == *'|1' ]]; then
+		timer_touched=1
+		remove_quota_systemd_unit "$XRAY_QUOTA_TIMER_FILE" "$old_timer" || return 1
+	fi
+	if [[ "$method" != systemd && (-f "$XRAY_QUOTA_SERVICE_FILE" || "$old_service" == enabled* || "$old_service" == *'|1') ]]; then
+		service_touched=1
+		remove_quota_systemd_unit "$XRAY_QUOTA_SERVICE_FILE" "$old_service" || return 1
+	fi
+	if systemd_available && [[ "$service_touched" -eq 1 || "$timer_touched" -eq 1 ]]; then
+		$SUDO systemctl daemon-reload || return 1
+	fi
+	committed=1
+	if [[ "$method" == disabled ]]; then
+		echo 'Automatic quota checks disabled.'
 	else
-		echo -e "${RED}Status:${NC} Disabled"
-		echo -e "Automatic quota checks are not scheduled."
+		echo "Verified $method quota scheduler for $account in $deployment."
+	fi
+)
+
+first_quota_cron_schedule() {
+	local user cron_scope="" cron_account="" cron_deployment="" schedules="" personal
+	local -A checked=()
+	if [[ -f "$XRAY_QUOTA_CRON_FILE" ]]; then
+		schedules=$(cron_quota_schedules system <"$XRAY_QUOTA_CRON_FILE") || return 1
+	fi
+	if [[ -z "$schedules" ]] && command -v crontab >/dev/null; then
+		read_quota_cron_state || true
+		for user in "$cron_account" "$(id -un)" "${SUDO_USER:-}" root; do
+			[[ -n "$user" && -z "${checked[$user]+set}" ]] || continue
+			checked["$user"]=1
+			personal=$(read_visible_quota_crontab "$user" 2>/dev/null) || continue
+			schedules=$(cron_quota_schedules personal <<<"$personal") || return 1
+			[[ -z "$schedules" ]] || break
+		done
+	fi
+	local schedule="${schedules%%$'\n'*}"
+	valid_quota_cron_schedule "$schedule" || return 1
+	printf '%s\n' "$schedule"
+}
+
+configure_xray_quota_auto_check() {
+	local choice method=cron existing="" schedule="" interval deployment
+	if systemd_available; then
+		echo "1) Systemd daemon"
+		echo "2) Cron"
+		echo "3) Disable automatic quota checks"
+		echo "0) Cancel"
+		read -r -p "Choose a quota scheduler [0-3]: " choice || return 1
+		case "$choice" in
+		1) method=systemd ;;
+		2) method=cron ;;
+		3)
+			apply_quota_scheduler disabled
+			return
+			;;
+		0) return 0 ;;
+		*)
+			echo 'Invalid scheduler choice.' >&2
+			return 1
+			;;
+		esac
+	fi
+	if [[ "$method" == systemd ]]; then
+		existing=$(systemd_quota_interval) || {
+			schedule=$(first_quota_cron_schedule) || schedule=""
+			existing=$(quota_cron_interval "$schedule") || existing=""
+		}
+	else
+		existing=$(first_quota_cron_schedule) || {
+			interval=$(systemd_quota_interval) || interval=""
+			existing=""
+			if [[ -n "$interval" ]]; then existing=$(quota_interval_cron "$interval") || true; fi
+		}
+	fi
+
+	echo "1) Every 1 minute"
+	echo "2) Every 2 minutes"
+	echo "3) Every 5 minutes"
+	echo "4) Disable automatic quota checks"
+	if [[ -n "$existing" ]]; then
+		local displayed=$existing
+		if [[ "$method" == systemd ]]; then displayed=$(format_seconds_label "$existing"); fi
+		echo "Press Enter to keep the current interval ($displayed)."
+	fi
+	read -r -p "Select the quota check interval [1-4]: " choice || return 1
+	case "$choice" in
+	1) interval=60 ;;
+	2) interval=120 ;;
+	3) interval=300 ;;
+	4)
+		apply_quota_scheduler disabled
+		return
+		;;
+	"") interval="" ;;
+	*)
+		echo 'Invalid interval choice.' >&2
+		return 1
+		;;
+	esac
+	if [[ -z "$interval" && -z "$existing" ]]; then
+		interval=60
+	fi
+	if [[ "$method" == cron && -n "$interval" ]]; then
+		existing=$(quota_interval_cron "$interval") || return 1
+	fi
+	if [[ "$method" == systemd && -n "$interval" ]]; then existing=$interval; fi
+
+	deployment=$(pwd -P) || return 1
+	if [[ "${deployment##*/}" == xray && -f "$deployment/user_limits.db" ]]; then
+		deployment=${deployment%/*}
+	fi
+	if ! apply_quota_scheduler "$method" "$existing" "$deployment"; then
+		echo 'Could not configure the quota scheduler. See the diagnostics above.' >&2
+		return 1
+	fi
+}
+
+show_xray_quota_auto_check_status() {
+	local service='unknown|0' timer='unknown|0' schedules="" count=0 interval
+	local cron_scope="" cron_account="" cron_deployment="" user personal daemon="stopped"
+	local -A accounts=()
+	echo 'Automatic Xray quota check status'
+	if systemd_available; then
+		service=$(quota_systemd_unit_state xray-quota-check.service) || return 1
+		timer=$(quota_systemd_unit_state xray-quota-check.timer) || return 1
+	fi
+	if [[ -f "$XRAY_QUOTA_SERVICE_FILE" ]]; then
+		interval=$(systemd_quota_interval) || interval=""
+		if [[ -n "$interval" ]]; then interval=$(format_seconds_label "$interval"); fi
+		if [[ "$service" == enabled* || "$service" == *'|1' ]]; then
+			if [[ ! -f "$XRAY_QUOTA_TIMER_FILE" ]] || grep -q -- '--quota-\(scheduled-\)\?daemon' "$XRAY_QUOTA_SERVICE_FILE"; then
+				count=$((count + 1))
+			fi
+		fi
+		printf '  Systemd service installed, enablement %s, running %s%s\n' \
+			"${service%%|*}" "$([[ "${service#*|}" == 1 ]] && echo yes || echo no)" "${interval:+, every $interval}"
+	fi
+	if [[ -f "$XRAY_QUOTA_TIMER_FILE" ]]; then
+		if [[ "$timer" == enabled* || "$timer" == *'|1' ]]; then count=$((count + 1)); fi
+		interval=$(legacy_quota_timer_interval) || interval=""
+		if [[ -n "$interval" ]]; then interval=$(format_seconds_label "$interval"); fi
+		printf '  Legacy systemd timer installed, enablement %s, active %s%s\n' \
+			"${timer%%|*}" "$([[ "${timer#*|}" == 1 ]] && echo yes || echo no)" "${interval:+, every $interval}"
+	fi
+	if cron_quota_running; then daemon=running; fi
+	if [[ -f "$XRAY_QUOTA_CRON_FILE" ]]; then
+		schedules=$(cron_quota_schedules system <"$XRAY_QUOTA_CRON_FILE") || return 1
+		while IFS= read -r interval; do
+			[[ -n "$interval" ]] || continue
+			printf '  System cron enabled, daemon %s, schedule %s\n' "$daemon" "$interval"
+			count=$((count + 1))
+		done <<<"$schedules"
+	fi
+	read_quota_cron_state || true
+	if command -v crontab >/dev/null; then
+		for user in "$(id -un)" "${SUDO_USER:-}" root "$cron_account"; do
+			[[ "$user" =~ ^[A-Za-z0-9_.-]+[$]?$ ]] || continue
+			[[ -z "${accounts[$user]+set}" ]] || continue
+			accounts["$user"]=1
+			personal=$(read_visible_quota_crontab "$user" 2>/dev/null) || continue
+			schedules=$(cron_quota_schedules personal <<<"$personal") || return 1
+			while IFS= read -r interval; do
+				[[ -n "$interval" ]] || continue
+				printf '  Personal cron for %s enabled, daemon %s, schedule %s\n' "$user" "$daemon" "$interval"
+				count=$((count + 1))
+			done <<<"$schedules"
+		done
+	fi
+	if [[ "$count" -eq 0 ]]; then
+		echo '  No enabled quota jobs found in the accessible scheduler configuration.'
+	elif [[ "$count" -gt 1 ]]; then
+		echo '  Multiple quota jobs are enabled. Use the quota configuration menu to select one.'
 	fi
 }
 
@@ -4674,6 +5000,17 @@ perform_script_update() {
 		return 1
 	fi
 
+	local verified_runner_source=""
+	if [[ -f "$XRAY_QUOTA_CRON_STATE" ]] ||
+		grep -Fxq "$XRAY_QUOTA_SCHEDULER_MARKER" "$XRAY_QUOTA_SERVICE_FILE" 2>/dev/null; then
+		if ! make_temp_file verified_runner_source ||
+			! cp "$tmp_script" "$verified_runner_source" ||
+			! openssl dgst -sha256 -verify "$tmp_public_key" -signature "$tmp_sig" "$verified_runner_source" >/dev/null 2>&1; then
+			echo 'Could not stage the signed scheduler runner. Reconfigure it through the quota menu to refresh it.' >&2
+			verified_runner_source=""
+		fi
+	fi
+
 	apply_preserved_file_metadata "$script_path" "$tmp_script"
 	if ! chmod u+x "$tmp_script" || ! mv -f "$tmp_script" "$script_path"; then
 		rm -f "$tmp_script" "$tmp_sha" "$tmp_sig"
@@ -4682,7 +5019,9 @@ perform_script_update() {
 	fi
 	rm -f "$tmp_sha" "$tmp_sig"
 
-	sync_xray_quota_systemd_runner || true
+	if [[ -n "$verified_runner_source" ]] && ! refresh_verified_quota_runner "$verified_runner_source"; then
+		echo 'The script updated, but the scheduler runner could not be refreshed.' >&2
+	fi
 
 	echo -e "${GREEN}Script updated and signature/checksum verified successfully! Restarting...${NC}"
 	cleanup_script_tmp_dir
@@ -4878,6 +5217,26 @@ run_main_menu() {
 }
 
 main() {
+	case "${1:-}" in
+	--quota-scheduler-probe)
+		prepare_scheduled_quota_check "$PWD"
+		return
+		;;
+	--quota-scheduled-daemon)
+		prepare_scheduled_quota_check "$PWD" || return 1
+		run_xray_quota_daemon "${2:-60}"
+		return
+		;;
+	--quota-scheduled-cron)
+		local cron_scope cron_account cron_deployment
+		read_quota_cron_state || return 1
+		[[ "$(id -un)" == "$cron_account" ]] || return 1
+		prepare_scheduled_quota_check "$cron_deployment" || return 1
+		check_and_apply_xray_quotas quiet
+		return
+		;;
+	esac
+
 	local target_dir=""
 	local daemon_interval="60"
 	case "${1:-}" in
@@ -4933,8 +5292,6 @@ main() {
 		return
 		;;
 	esac
-
-	sync_xray_quota_systemd_runner || true
 
 	check_dependencies
 	auto_check_script_update || true

@@ -71,7 +71,7 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
   - Reset one user's current-cycle usage
   - Change one user's monthly limit
   - Change one user's billing cycle dates
-  - Configure automatic quota checks via systemd daemon (recommended for mainstream distributions, auto-restarts on script update) or cron fallback (1/2/5-minute intervals)
+  - Configure automatic quota checks via the systemd daemon or cron (1/2/5-minute intervals)
   - Show automatic quota check configuration status (method and interval/schedule)
   - Change quota billing timezone
 - **11) Manage users (Add/Remove for Xray / Shadowsocks)**:
@@ -108,6 +108,9 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 - The quota daemon wakes at the next billing cutoff if it falls before the regular poll. Cron checks use their configured cadence. If a counter sample spans a cutoff, its unsplittable delta is counted in the closing cycle, which appears in the quota status.
 - Quota timezones use installed IANA timezone names or whole-hour UTC offsets. If a billing time falls in a daylight-saving gap, it shifts forward by the size of the gap. If the time occurs twice, the first occurrence is used.
 - Quota checks run when you execute menu option `10 -> 2` (recommended to automate with a systemd daemon on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `10 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
+- Scheduler status is read-only. To migrate a legacy timer or cron job, choose the scheduler through menu option `10 -> 6`. Press Enter at the interval prompt to keep the existing interval when the selected scheduler can represent it.
+- Both schedulers run the root-owned copy at `/usr/local/lib/proxy-sh/quota-check.sh`. An admin-controlled deployment can run quota checks as root. For a user-owned deployment, the scheduler uses its owner, who needs access to the quota files and Docker without an interactive sudo prompt. Setup checks that `xray_server` uses the deployment's configuration before enabling the job.
+- Explicit scheduler setup and verified script updates refresh the installed runner. Legacy jobs keep their existing configuration until you reconfigure them from the quota menu.
 - All configuration files are created in a new `xray` directory relative to the script's location.
 
 >[!CAUTION]
