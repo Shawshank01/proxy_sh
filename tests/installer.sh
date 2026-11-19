@@ -35,10 +35,17 @@ awk -v key="$fixture/public.pem" -v application="$application" -v launcher="$lau
     }
     omit && /^-----END PUBLIC KEY-----/ {omit=0; next}
     omit {next}
-    {sub(/ \/opt\/proxy-sh \/usr\/local\/bin\/proxy\.sh$/, " " application " " launcher); print}
+    {sub(/application=\/opt\/proxy-sh launcher=\/usr\/local\/bin\/proxy\.sh$/, "application=" application " launcher=" launcher); print}
 ' "$repo/install.sh" >"$fixture/install.sh"
 
-printf '%s\n' '#!/bin/bash' 'printf "%s|%s|%s\n" "$EUID" "$PWD" "$*"' >"$fixture/bundle/proxy.sh"
+cat >"$fixture/bundle/proxy.sh" <<'EOF'
+#!/bin/bash
+if [[ -t 0 ]]; then
+	read -r choice || exit 1
+	set -- "$choice"
+fi
+printf '%s|%s|%s\n' "$EUID" "$PWD" "$*"
+EOF
 (
 	cd "$fixture/bundle"
 	sha256sum proxy.sh >proxy.sh.sha256
@@ -51,6 +58,10 @@ url=${*: -1}
 printf '%s\n' "$url" >>"$PROXY_INSTALLER_FIXTURE/requests"
 if [[ "$url" == */commits/main ]]; then
 	printf '0123456789012345678901234567890123456789\n'
+	exit
+fi
+if [[ "$url" == */install.sh ]]; then
+	cat "$PROXY_INSTALLER_FIXTURE/install.sh"
 	exit
 fi
 while [[ "$1" != -o ]]; do shift; done
@@ -74,13 +85,14 @@ EOF
 chmod -R a+rX "$fixture/bin" "$fixture/bundle" "$fixture/install.sh"
 chmod +x "$fixture/bin/"*
 
+installer_user=()
+if [[ -n "${PROXY_INSTALLER_TEST_USER:-}" ]]; then
+	installer_user=(runuser -u "$PROXY_INSTALLER_TEST_USER" --)
+fi
+installer_command=("${installer_user[@]}" env PATH="$fixture/bin:$PATH" PROXY_INSTALLER_FIXTURE="$fixture")
+
 run_installer() {
-	if [[ -n "${PROXY_INSTALLER_TEST_USER:-}" ]]; then
-		runuser -u "$PROXY_INSTALLER_TEST_USER" -- env PATH="$fixture/bin:$PATH" \
-			PROXY_INSTALLER_FIXTURE="$fixture" bash -s -- "$@" <"$fixture/install.sh"
-	else
-		PATH="$fixture/bin:$PATH" bash -s -- "$@" <"$fixture/install.sh"
-	fi
+	setsid --wait "${installer_command[@]}" bash -s -- "$@" <"$fixture/install.sh"
 }
 
 cp "$fixture/bundle/proxy.sh" "$fixture/original"
@@ -90,7 +102,10 @@ if run_installer --release-commit "$revision"; then fail 'Installed tampered rel
 cp "$fixture/original" "$fixture/bundle/proxy.sh"
 
 : >"$fixture/requests"
-run_installer
+installer_url="https://raw.githubusercontent.com/Shawshank01/proxy_sh/$revision/install.sh"
+output=$(printf '12\n' | "${installer_command[@]}" SHELL=/bin/bash timeout 20s script -q -e \
+	-c "set -o pipefail; curl -fsSL $installer_url | bash" /dev/null | tr -d '\r')
+grep -Fxq "0|$application|12" <<<"$output" || fail 'The piped installer did not open the menu on the terminal'
 [[ -f "$application/proxy.sh" && -x "$launcher" ]]
 [[ "$(stat -c '%u:%a' "$application/proxy.sh")" == 0:755 ]]
 [[ "$(stat -c '%u:%a' "$launcher")" == 0:755 ]]
@@ -101,12 +116,15 @@ if [[ -n "${PROXY_INSTALLER_TEST_USER:-}" ]]; then
 	[[ "$(runuser -u "$PROXY_INSTALLER_TEST_USER" -- env PATH="${launcher%/*}:$PATH" proxy.sh)" == "0|$application|" ]]
 fi
 [[ "$(cat "$fixture/requests")" == "$(printf '%s\n' \
+	"$installer_url" \
 	'https://api.github.com/repos/Shawshank01/proxy_sh/commits/main' \
 	"https://raw.githubusercontent.com/Shawshank01/proxy_sh/$revision/"{proxy.sh,proxy.sh.sha256,proxy.sh.sig})" ]]
 
 # A repeat install keeps a working, already-installed script and its files.
 printf '\n# locally installed version\n' >>"$application/proxy.sh"
-run_installer --release-commit "$revision"
+output=$(run_installer --release-commit "$revision")
+grep -Fxq 'Run proxy.sh to manage your deployment.' <<<"$output"
+! grep -Fq "0|$application|" <<<"$output" || fail 'The installer opened the menu without a terminal'
 grep -Fxq '# locally installed version' "$application/proxy.sh"
 
 old="$fixture/old deployment"

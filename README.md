@@ -33,7 +33,7 @@ Run this command from your regular login account with `sudo` access.
 curl -fsSL https://raw.githubusercontent.com/Shawshank01/proxy_sh/33dc3443a54be36d6fd00455166036f9bddc6f97/install.sh | bash
 ```
 
-The installer verifies the release signature and checksum before requesting `sudo`. It installs the script under `/opt/proxy-sh` and puts the `proxy.sh` command in `/usr/local/bin`. After installation, run `proxy.sh` from any directory. Use menu option **1** to set up Docker if needed, then **2** or **3** to configure your proxy. Re-running the installer preserves the installed version and deployment files. Use menu option **0** for a signed update.
+The installer verifies the release signature and checksum before requesting `sudo`. It installs the script under `/opt/proxy-sh` and opens the menu when run from a terminal. To open it again, run `proxy.sh` from any directory.
 
 ## Menu Options
 

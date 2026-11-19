@@ -267,14 +267,15 @@ bootstrap_install_as_root() (
 				return 1
 			fi
 		done
-		printf 'Imported the deployment. Open proxy.sh and choose 6 to restore it, then configure quota checks if needed.\n'
+		printf 'Imported the deployment. Choose 6 in proxy.sh to restore it, then configure quota checks if needed.\n'
 	else
-		printf 'Installed the proxy.sh command. Open it to manage your deployment.\n'
+		printf 'Installed the proxy.sh command.\n'
 	fi
 )
 
-bootstrap_main() (
-	local revision="" migration_source="" calling_directory tool
+bootstrap_main() {
+	local revision="" migration_source="" tool
+	local application=/opt/proxy-sh launcher=/usr/local/bin/proxy.sh
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 		--help | -h)
@@ -318,6 +319,18 @@ bootstrap_main() (
 			return 1
 		}
 	done
+
+	bootstrap_install_release "$revision" "$migration_source" "$application" "$launcher" || return 1
+	# The bootstrap may be piped into Bash. Read menu choices from the terminal.
+	if { : </dev/tty; } 2>/dev/null; then
+		"$launcher" </dev/tty
+	else
+		printf 'Run proxy.sh to manage your deployment.\n'
+	fi
+}
+
+bootstrap_install_release() (
+	local revision=$1 migration_source=$2 application=$3 launcher=$4 calling_directory
 	local -a admin=()
 	if [[ "$EUID" -ne 0 ]]; then
 		command -v sudo >/dev/null || {
@@ -357,7 +370,7 @@ bootstrap_main() (
 			bootstrap_ensure_directory bootstrap_install_file bootstrap_has_deployment bootstrap_check_offline \
 			bootstrap_stage_deployment bootstrap_write_launcher bootstrap_install_as_root
 		printf '\nbootstrap_install_as_root "$@"\n'
-	} | "${admin[@]}" /bin/bash -s -- "$downloaded" "$migration_source" "$calling_directory" /opt/proxy-sh /usr/local/bin/proxy.sh
+	} | "${admin[@]}" /bin/bash -s -- "$downloaded" "$migration_source" "$calling_directory" "$application" "$launcher"
 )
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
