@@ -115,7 +115,15 @@ init_script_tmp_dir() {
 }
 init_script_tmp_dir
 
+release_xray_quota_directory_lock() {
+	if [[ "${_XRAY_QUOTA_MKDIR_OWNER:-}" == "$BASHPID" ]]; then
+		rmdir -- "$_XRAY_QUOTA_MKDIR_LOCK/held" "$_XRAY_QUOTA_MKDIR_LOCK" 2>/dev/null || true
+		unset _XRAY_QUOTA_MKDIR_OWNER _XRAY_QUOTA_MKDIR_LOCK
+	fi
+}
+
 cleanup_script_tmp_dir() {
+	release_xray_quota_directory_lock
 	if [[ -n "${SCRIPT_TMP_DIR:-}" && -d "$SCRIPT_TMP_DIR" ]]; then
 		rm -rf "$SCRIPT_TMP_DIR" 2>/dev/null || true
 	fi
@@ -753,19 +761,20 @@ update_container() {
 	return 0
 }
 
-migrate_xray_config_for_finalrules() {
-	local config_file="xray/server.jsonc"
-	if [[ ! -f "$config_file" ]] || ! command -v jq >/dev/null 2>&1; then
-		return 0
+# Preserve the original file when no migration is needed.
+prepare_xray_config_for_finalrules() {
+	local config_file=$1 candidate=$2 original_json
+	if ! original_json=$(jq -c . "$config_file" 2>/dev/null); then
+		# Legacy deployments may use JSONC comments. Let Xray validate the
+		# original file with its native parser.
+		cp -p "$config_file" "$candidate"
+		return
 	fi
 
-	local tmp_config
-	make_temp_file tmp_config || return 1
-
-	if jq '
+	jq '
         ((.routing.rules // []) | any(.ip? // [] | index("geoip:cn"))) as $has_china_rules |
-        (.inbounds[] | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings) |= (.minClientVer //= "") |
-        (.outbounds[] | select(.tag == "direct" and .protocol == "freedom")) |= (
+        (.inbounds[]? | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings) |= (.minClientVer //= "") |
+        (.outbounds[]? | select(.tag == "direct" and .protocol == "freedom")) |= (
             .settings //= {} |
             .settings.domainStrategy //= "AsIs" |
             if .settings.finalRules == null then
@@ -775,27 +784,233 @@ migrate_xray_config_for_finalrules() {
                 )
             else . end
         ) |
-        (.outbounds[] | select(.tag == "api" and .protocol == "freedom")) |= (
+        (.outbounds[]? | select(.tag == "api" and .protocol == "freedom")) |= (
             .settings //= {} |
             if .settings.finalRules == null then
                 .settings.finalRules = [{"action": "allow"}]
             else . end
         )
-    ' "$config_file" >"$tmp_config" && jq -e . "$tmp_config" >/dev/null 2>&1; then
-		if cmp -s "$config_file" "$tmp_config"; then
-			rm -f "$tmp_config"
-		else
-			apply_preserved_file_metadata "$config_file" "$tmp_config"
-			mv "$tmp_config" "$config_file" || return 1
-		fi
-	else
-		rm -f "$tmp_config"
+	' "$config_file" >"$candidate" || return 1
+
+	local candidate_json
+	candidate_json=$(jq -c . "$candidate") || return 1
+	if [[ "$candidate_json" == "$original_json" ]]; then
+		cp -p "$config_file" "$candidate"
 	fi
 }
 
+stage_xray_compose_image() {
+	# Edit only the image key of the managed xray service.
+	awk -v image="$1" '
+        /^[^[:space:]#]/ { services = /^services:[[:space:]]*(#.*)?$/; xray = 0 }
+        services && /^[[:space:]]+xray:[[:space:]]*(#.*)?$/ {
+            match($0, /^[[:space:]]*/); service_indent = RLENGTH
+            property_indent = 0; xray = 1; print; next
+        }
+        xray && /^[[:space:]]*[^[:space:]#]/ {
+            match($0, /^[[:space:]]*/)
+            if (RLENGTH <= service_indent) xray = 0
+            else {
+                if (!property_indent || RLENGTH < property_indent) property_indent = RLENGTH
+                if (RLENGTH == property_indent && $0 ~ /^[[:space:]]+image:[[:space:]]/) {
+                    old_image = $2
+                    gsub(/["\047]/, "", old_image)
+                    # An implicit latest and an explicit latest are equivalent.
+                    if (old_image != image && old_image ":latest" != image)
+                        sub(/image:[[:space:]]*[^[:space:]]+/, "image: " image)
+                    changed++
+                }
+            }
+        }
+        { print }
+        END { if (changed != 1) exit 1 }
+	' "$2" >"$3"
+}
+
+start_xray_image() {
+	local image_id=$1 mode=$2
+	shift 2
+	local -a pull_options=()
+	if $SUDO "${DOCKER_COMPOSE_CMD[@]}" up --help | awk '/--pull / { supported = 1 } END { exit !supported }'; then
+		pull_options=(--pull never)
+	fi
+
+	# A transient override pins this invocation without changing the saved tag.
+	{
+		# Compose v1 requires compatible version headers in merged files.
+		awk '/^version:/ { print; exit }' docker-compose.yml
+		printf 'services:\n  xray:\n    image: "%s"\n' "$image_id"
+	} | $SUDO "${DOCKER_COMPOSE_CMD[@]}" "$@" -f - up "$mode" --no-deps --no-build --force-recreate "${pull_options[@]}" xray
+}
+
+wait_for_xray_image() {
+	local expected_image=$1 config_file=$2
+	local state image status restart_count previous_restart_count="" health
+	local deadline=$((SECONDS + 30))
+	local stats_api=0
+	if jq -e '
+        (.api.services // [] | index("StatsService") != null) and
+        any(.inbounds[]?; .tag == "api" and .listen == "127.0.0.1" and .port == 10085)
+	' "$config_file" >/dev/null 2>&1; then
+		stats_api=1
+	fi
+
+	while ((SECONDS < deadline)); do
+		if ! state=$(timeout 3s $SUDO docker inspect --type container -f \
+			'{{.Image}} {{.State.Status}} {{.RestartCount}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+			xray_server 2>/dev/null); then
+			# The daemon may still be replacing the named container.
+			previous_restart_count=""
+			sleep 1
+			continue
+		fi
+		read -r image status restart_count health <<<"$state"
+		if [[ "$image" == "$expected_image" && ("$status" == "exited" || "$status" == "dead") ]]; then
+			return 1
+		fi
+
+		if [[ "$image" == "$expected_image" && "$status" == "running" && ("$health" == "healthy" || "$health" == "none") ]] &&
+			{ [[ "$stats_api" -eq 0 ]] || timeout 3s $SUDO docker exec xray_server xray api statsquery \
+				--server=127.0.0.1:10085 -pattern "user>>>" >/dev/null 2>&1; }; then
+			if [[ "$restart_count" == "$previous_restart_count" ]]; then
+				return 0
+			fi
+			previous_restart_count=$restart_count
+		else
+			previous_restart_count=""
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+finish_xray_image_change() {
+	# The EXIT trap runs inside apply_xray_image_change and holds its quota lock.
+	local rc=$1 restored=1
+	if [[ "$rollback_needed" -eq 1 ]]; then
+		echo -e "${YELLOW}Restoring the previous Xray deployment...${NC}" >&2
+		if [[ "$compose_changed" -eq 1 ]]; then
+			cp -p "$work_dir/docker-compose.yml" "$work_dir/restore-compose.yml" &&
+				mv -f "$work_dir/restore-compose.yml" docker-compose.yml || restored=0
+		fi
+		if [[ "$config_changed" -eq 1 ]]; then
+			cp -p "$work_dir/server.jsonc" "$work_dir/restore-server.jsonc" &&
+				mv -f "$work_dir/restore-server.jsonc" server.jsonc || restored=0
+		fi
+
+		if [[ "$restored" -eq 1 && "$launch_attempted" -eq 1 ]]; then
+			if [[ -z "$old_image" ]]; then
+				$SUDO "${DOCKER_COMPOSE_CMD[@]}" "${compose_files[@]}" rm --stop --force xray || restored=0
+			elif [[ "$old_running" == "true" ]]; then
+				start_xray_image "$old_image" -d "${compose_files[@]}" &&
+					wait_for_xray_image "$old_image" server.jsonc || restored=0
+			else
+				start_xray_image "$old_image" --no-start "${compose_files[@]}" &&
+					[[ "$($SUDO docker inspect --type container -f '{{.Image}} {{.State.Running}}' xray_server)" == "$old_image false" ]] || restored=0
+			fi
+		fi
+
+		if [[ "$restored" -ne 1 ]]; then
+			echo -e "${RED}Xray rollback failed. Recovery details are in $work_dir.${NC}" >&2
+			return 1
+		fi
+		echo -e "${YELLOW}Previous Xray configuration and container state restored.${NC}" >&2
+	fi
+
+	rm -rf -- "$work_dir"
+	return "$rc"
+}
+
+apply_xray_image_change() (
+	local target_image=$1 require_existing=$2
+	local container_id old_state old_image="" old_running="" target_id work_dir
+	local rollback_needed=0 launch_attempted=0 compose_changed=0 config_changed=0 override
+	local -a compose_files=(-f docker-compose.yml)
+	cd xray || return 1
+	if [[ ! -f docker-compose.yml || ! -f server.jsonc ]]; then
+		echo -e "${RED}Xray requires both docker-compose.yml and server.jsonc.${NC}" >&2
+		return 1
+	fi
+
+	container_id=$($SUDO docker ps -a -q -f 'name=^/xray_server$') || return 1
+	if [[ -n "$container_id" ]]; then
+		old_state=$($SUDO docker inspect --type container -f '{{.Image}} {{.State.Running}}' "$container_id") || return 1
+		read -r old_image old_running <<<"$old_state"
+	elif [[ "$require_existing" -eq 1 ]]; then
+		echo -e "${RED}Container 'xray_server' not found. Cannot update.${NC}" >&2
+		return 1
+	fi
+
+	for override in docker-compose.override.yml docker-compose.override.yaml compose.override.yml compose.override.yaml; do
+		if [[ -f "$override" ]]; then
+			compose_files+=(-f "$override")
+			break
+		fi
+	done
+
+	echo "Pulling $target_image..."
+	$SUDO docker pull "$target_image" || return 1
+	target_id=$($SUDO docker image inspect -f '{{.Id}}' "$target_image") || return 1
+
+	# Same-filesystem staging keeps each replacement atomic and allows recovery
+	# files to survive a failed rollback or loss of power.
+	work_dir=$(mktemp -d "$PWD/.update.XXXXXX") || return 1
+	trap 'finish_xray_image_change "$?"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+
+	printf '%s\n' "${old_image:-none}" >"$work_dir/previous-image" || return 1
+	cp -p docker-compose.yml "$work_dir/docker-compose.yml" || return 1
+	cp -p server.jsonc "$work_dir/server.jsonc" || return 1
+	if ! stage_xray_compose_image "$target_image" "$work_dir/docker-compose.yml" "$work_dir/next-compose.yml"; then
+		echo -e "${RED}Could not find exactly one image key for the xray service.${NC}" >&2
+		return 1
+	fi
+	prepare_xray_config_for_finalrules "$work_dir/server.jsonc" "$work_dir/next-server.jsonc" || return 1
+	apply_preserved_file_metadata docker-compose.yml "$work_dir/next-compose.yml"
+	apply_preserved_file_metadata server.jsonc "$work_dir/next-server.jsonc"
+
+	# The managed Compose service reads the bind mount as root. Match it
+	# here so validation also works with owner-only configuration files.
+	if ! $SUDO docker run --rm --network none --user 0:0 --entrypoint xray \
+		-v "$work_dir/next-server.jsonc:/etc/xray/config.json:ro" "$target_id" \
+		run -test -c /etc/xray/config.json; then
+		echo -e "${RED}The target Xray image rejected the configuration.${NC}" >&2
+		return 1
+	fi
+
+	cmp -s docker-compose.yml "$work_dir/next-compose.yml" || compose_changed=1
+	cmp -s server.jsonc "$work_dir/next-server.jsonc" || config_changed=1
+	if [[ "$old_image" == "$target_id" && "$old_running" == "true" && "$compose_changed" -eq 0 && "$config_changed" -eq 0 ]] &&
+		wait_for_xray_image "$target_id" server.jsonc; then
+		echo -e "${GREEN}Xray is already running the requested image and configuration.${NC}"
+		return 0
+	fi
+
+	rollback_needed=1
+	if [[ "$compose_changed" -eq 1 ]]; then
+		mv -f "$work_dir/next-compose.yml" docker-compose.yml || return 1
+	fi
+	if [[ "$config_changed" -eq 1 ]]; then
+		mv -f "$work_dir/next-server.jsonc" server.jsonc || return 1
+	fi
+	launch_attempted=1
+	if ! start_xray_image "$target_id" -d "${compose_files[@]}" || ! wait_for_xray_image "$target_id" server.jsonc; then
+		echo -e "${RED}The updated Xray container failed to start or become ready.${NC}" >&2
+		return 1
+	fi
+
+	rollback_needed=0
+	echo -e "${GREEN}Xray is ready on $target_image.${NC}"
+)
+
+change_xray_image() {
+	ensure_docker_compose && ensure_jq || return 1
+	with_xray_quota_lock apply_xray_image_change "$@"
+}
+
 update_xray() {
-	migrate_xray_config_for_finalrules || true
-	update_container "xray_server" "xray" "${XRAY_DOCKER_IMAGE%%:*}" "latest"
+	change_xray_image "$XRAY_DOCKER_IMAGE" 1
 }
 
 update_shadowsocks() {
@@ -862,6 +1077,11 @@ change_container_version() {
 		return 1
 	fi
 
+	if [[ "$dir" == "xray" ]]; then
+		change_xray_image "${base_image}:${target_version}" 0
+		return
+	fi
+
 	local new_image="$base_image"
 	if [[ "$target_version" != "latest" ]]; then
 		new_image="${base_image}:${target_version}"
@@ -885,10 +1105,6 @@ change_container_version() {
 	fi
 	apply_preserved_file_metadata "$dir/docker-compose.yml" "$tmp_file"
 	mv "$tmp_file" "$dir/docker-compose.yml" || return 1
-
-	if [[ "$dir" == "xray" ]]; then
-		migrate_xray_config_for_finalrules || true
-	fi
 
 	echo "Pulling new image version..."
 	if (cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d); then
@@ -2477,10 +2693,18 @@ with_xray_quota_lock() {
 				return 1
 			fi
 		done
+		# A live holder may spend longer than the legacy stale-lock threshold
+		# pulling an image. An occupied directory cannot be reclaimed by rmdir.
+		if ! mkdir "$lock_dir/held"; then
+			rmdir "$lock_dir" 2>/dev/null || true
+			return 1
+		fi
+		_XRAY_QUOTA_MKDIR_LOCK="$PWD/$lock_dir"
+		_XRAY_QUOTA_MKDIR_OWNER=$BASHPID
 		local ret=0
 		_XRAY_QUOTA_LOCK_HELD=1
 		"$@" || ret=$?
-		rmdir "$lock_dir" 2>/dev/null || true
+		release_xray_quota_directory_lock
 		_XRAY_QUOTA_LOCK_HELD=0
 		return $ret
 	fi

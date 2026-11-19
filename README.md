@@ -59,7 +59,7 @@ Using Actions to automate the signing process means you fully trust GitHub hosti
   - Ask for the number of users and the listening port.
   - Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
   - Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
-- **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Version locks are released automatically when updating to latest, and Xray configuration files (`server.jsonc`) are automatically migrated for modern core compatibility (`finalRules`, `minClientVer`).
+- **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Updating to latest releases any version lock. For Xray, the target image validates the configuration, including any staged `finalRules` or `minClientVer` changes, before deployment. If startup or the readiness check fails, the script restores both configuration files and the previous container image.
 - **5) Change Xray Reality target domain**: Re-runs the Reality target checks, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. On legacy configs, this also adds the loopback Tunnel. Failed restarts automatically roll back the previous configuration.
 - **6) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
 - **7) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
