@@ -102,6 +102,7 @@ Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
 - Xray per-user quota enforcement uses Xray user traffic stats (`StatsService`) and stores state in:
   - `xray/user_limits.conf` (timezone)
   - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
+- Quota sync manages VLESS clients by UUID and preserves manual clients. When it suspends a managed client, it saves the full client entry in the quota database for reactivation. Quota counters use the database email. Configure user traffic stats for the managed client's Xray policy level and give each client a distinct email label.
 - A user's monthly cycle can begin at account creation or on a configured calendar day. The billing date is clamped to the last day of shorter months.
 - Usage is checkpointed before Xray restarts managed by this script. Each counter sample records the container and its start time, so a restart starts a fresh counter baseline. Traffic the old process never reported before an unexpected stop cannot be recovered.
 - The quota daemon wakes at the next billing cutoff if it falls before the regular poll. Cron checks use their configured cadence. If a counter sample spans a cutoff, its unsplittable delta is counted in the closing cycle, which appears in the quota status.

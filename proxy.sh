@@ -2780,27 +2780,35 @@ parse_quota_db_line() {
 }
 
 get_quota_accounting_metadata() {
-	local db_file="xray/user_limits.db"
+	local db_file=${1:-xray/user_limits.db}
 	if [[ -f "$db_file" ]]; then
 		awk '/^# quota-(sample|closed)\|/' "$db_file"
 	fi
 }
 
+write_quota_db_file() {
+	local destination=$1 content=$2 metadata=$3 profiles=$4
+	{
+		printf '%s\n' '# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status' &&
+			{ [[ -z "$metadata" ]] || printf '%s\n' "$metadata"; } &&
+			{ [[ -z "$profiles" ]] || printf '%s\n' "$profiles"; } &&
+			{ [[ -z "$content" ]] || printf '%s\n' "$content"; }
+	} >"$destination"
+}
+
 save_quota_db_content() {
-	local content="$1"
-	local db_file="xray/user_limits.db"
-	local tmp_db metadata
+	local content=$1 db_file="xray/user_limits.db"
+	local tmp_db metadata profiles=""
 	if [[ $# -ge 2 ]]; then
 		metadata=$2
 	else
 		metadata=$(get_quota_accounting_metadata) || return 1
 	fi
+	if [[ -f "$db_file" ]]; then
+		profiles=$(awk '/^# vless-client /' "$db_file") || return 1
+	fi
 	make_temp_file tmp_db "$PWD/xray/.user_limits.db.XXXXXX" || return 1
-	if ! {
-		printf '%s\n' '# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status' &&
-			{ [[ -z "$metadata" ]] || printf '%s\n' "$metadata"; } &&
-			{ [[ -z "$content" ]] || printf '%s\n' "$content"; }
-	} >"$tmp_db"; then
+	if ! write_quota_db_file "$tmp_db" "$content" "$metadata" "$profiles"; then
 		rm -f "$tmp_db"
 		return 1
 	fi
@@ -2811,141 +2819,178 @@ save_quota_db_content() {
 	fi
 }
 
-sync_xray_clients_from_quota_db() {
-	local db_file="xray/user_limits.db"
-	local config_file="xray/server.jsonc"
+stage_xray_client_sync() {
+	local current_db=$1 next_db=$2 current_config=$3
+	# Match UUIDs without changing the spelling in the original entries.
+	# Custom client IDs use exact-string matching.
+	jq -es --rawfile current_db "$current_db" --rawfile next_db "$next_db" '
+        def client_key:
+            if type == "string" and test("^[0-9a-fA-F]{8}(-?[0-9a-fA-F]{4}){3}-?[0-9a-fA-F]{12}$")
+            then ascii_downcase | gsub("-"; "") else . end;
 
-	if [[ ! -f "$db_file" ]] || [[ ! -f "$config_file" ]]; then
-		echo -e "${RED}Quota database or Xray config not found.${NC}"
+        def quota_rows($db):
+            [$db | split("\n")[] | select(test("^[[:space:]]*(#|$)") | not) | split("|") |
+             if length == 9 and .[0] != "" and .[1] != "" and (.[8] == "active" or .[8] == "suspended")
+             then {email: .[0], id: .[1], status: .[8]}
+             else error("invalid Xray quota user record") end];
+
+        def keyed($entries; $label):
+            reduce $entries[] as $entry ({};
+                ($entry.id | client_key) as $id |
+                if ($id | type) != "string" or $id == "" then error("invalid ID in " + $label)
+                elif has($id) then error("duplicate client ID in " + $label)
+                else .[$id] = $entry end);
+
+        if length != 1 or (.[0] | type) != "object" then error("expected one Xray configuration object") else .[0] end |
+        . as $config |
+        [(.inbounds // []) | to_entries[] |
+         select(.value.protocol == "vless" and ((.value.settings.clients? | type) == "array")) | .key] as $targets |
+        if ($targets | length) != 1 then error("expected exactly one VLESS inbound with a clients array") else . end |
+        $targets[0] as $target |
+        $config.inbounds[$target].settings.clients as $live |
+        quota_rows($current_db) as $previous_rows |
+        quota_rows($next_db) as $next_rows |
+        keyed($previous_rows; "the previous quota database") as $previous |
+        keyed($next_rows; "the updated quota database") as $next |
+        ($previous + $next) as $managed |
+        keyed(
+            [$current_db | split("\n")[] | select(startswith("# vless-client ")) |
+             ltrimstr("# vless-client ") | fromjson];
+            "saved VLESS client profiles"
+        ) as $saved |
+        keyed(
+            [$live[] | select(type == "object") |
+             select((.id | client_key) as $id | ($id | type) == "string" and ($managed | has($id)))];
+            "the managed VLESS clients"
+        ) as $live_managed |
+        if any($next_rows[]; (.id | client_key) as $id | ($previous | has($id) | not) and ($live_managed | has($id)))
+        then error("a new quota UUID already belongs to an existing VLESS client")
+        else . end |
+        (
+            [$live[] | select(
+                if type != "object" or (.id | type) != "string" then true
+                else (.id | client_key) as $id |
+                     ($managed | has($id) | not) or ($next[$id].status == "active")
+                end
+            )]
+            + [$next_rows[] | select(.status == "active") |
+               (.id | client_key) as $id |
+               select($live_managed | has($id) | not) |
+               $saved[$id] // {id, email, flow: ""}]
+        ) as $clients |
+        {
+            changed: ($clients != $live),
+            config: ($config | .inbounds[$target].settings.clients = $clients),
+            profiles: [
+                $next_rows[] | select(.status == "suspended") |
+                (.id | client_key) as $id |
+                ($live_managed[$id] // $saved[$id] // empty)
+            ]
+        }
+    ' "$current_config"
+}
+
+finish_xray_quota_client_update() {
+	# The EXIT trap runs inside apply_xray_quota_client_update under the quota lock.
+	local rc=$1 restored=1
+	if [[ "$rollback_needed" -eq 1 ]]; then
+		cp -p "$work_dir/previous.db" "$work_dir/restore.db" &&
+			mv -f "$work_dir/restore.db" "$db_file" || restored=0
+		if [[ "$config_replaced" -eq 1 ]]; then
+			cp -p "$work_dir/previous.jsonc" "$work_dir/restore.jsonc" &&
+				mv -f "$work_dir/restore.jsonc" "$config_file" || restored=0
+			if [[ "$restored" -eq 1 && "$reload_attempted" -eq 1 ]]; then
+				reload_xray_container || restored=0
+			fi
+		fi
+		if [[ "$restored" -ne 1 ]]; then
+			echo -e "${RED}Xray quota rollback failed. Recovery files are in $work_dir.${NC}" >&2
+			return 1
+		fi
+		echo -e "${YELLOW}Previous Xray quota database and configuration restored.${NC}" >&2
+	fi
+	rm -rf -- "$work_dir"
+	return "$rc"
+}
+
+apply_xray_quota_client_update() (
+	local db_lines=$1
+	local db_file="xray/user_limits.db" config_file="xray/server.jsonc"
+	if [[ ! -f "$db_file" || ! -f "$config_file" ]]; then
+		echo -e "${RED}Cannot update Xray clients: database or configuration file missing.${NC}" >&2
 		return 1
 	fi
 	if ! command -v jq >/dev/null 2>&1; then
-		echo -e "${RED}Cannot safely update Xray clients because 'jq' is not installed.${NC}" >&2
+		echo -e "${RED}Cannot safely update Xray clients because jq is unavailable.${NC}" >&2
 		return 1
 	fi
 
-	local clients_json
-	if ! clients_json=$(jq -Rn '
-        [
-            inputs
-            | select(length > 0)
-            | select(startswith("#") | not)
-            | split("|")
-            | select(length >= 9 and .[8] == "active")
-            | {id: .[1], flow: "", email: .[0]}
-        ]
-    ' <"$db_file"); then
-		echo -e "${RED}Failed to build the Xray client list from the quota database.${NC}" >&2
-		return 1
+	local work_dir metadata changed rollback_needed=0 config_replaced=0 reload_attempted=0
+	work_dir=$(mktemp -d "$PWD/xray/.quota-update.XXXXXX") || return 1
+	trap 'finish_xray_quota_client_update "$?"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+
+	cp -p "$db_file" "$work_dir/previous.db" || return 1
+	cp -p "$config_file" "$work_dir/previous.jsonc" || return 1
+	if [[ $# -ge 2 ]]; then
+		metadata=$2
+	else
+		metadata=$(get_quota_accounting_metadata "$work_dir/previous.db") || return 1
 	fi
 
-	local target_count
-	if ! target_count=$(jq -er '
-        [
-            .inbounds[]?
-            | select(
-                .protocol == "vless"
-                and ((.settings.clients? | type) == "array")
-            )
-        ]
-        | length
-    ' "$config_file" 2>/dev/null); then
-		echo -e "${RED}Xray config must be valid JSON before clients can be synchronized.${NC}" >&2
+	write_quota_db_file "$work_dir/next.db" "$db_lines" "$metadata" "" || return 1
+	if ! stage_xray_client_sync "$work_dir/previous.db" "$work_dir/next.db" "$work_dir/previous.jsonc" >"$work_dir/sync.json"; then
+		echo -e "${RED}Could not prepare the VLESS client update.${NC}" >&2
 		return 1
 	fi
+	jq -r '.profiles[] | "# vless-client " + tojson' "$work_dir/sync.json" >>"$work_dir/next.db" || return 1
+	changed=$(jq -r '.changed' "$work_dir/sync.json") || return 1
+	if [[ "$changed" == "true" ]]; then
+		jq '.config' "$work_dir/sync.json" >"$work_dir/next.jsonc" || return 1
+		apply_preserved_file_metadata "$config_file" "$work_dir/next.jsonc"
+	fi
+	apply_preserved_file_metadata "$db_file" "$work_dir/next.db"
 
-	if [[ "$target_count" -ne 1 ]]; then
-		echo -e "${RED}Expected exactly one VLESS inbound with a clients array; found ${target_count}. No changes were made.${NC}" >&2
+	if ! cmp -s "$db_file" "$work_dir/previous.db" || ! cmp -s "$config_file" "$work_dir/previous.jsonc"; then
+		echo -e "${RED}The Xray database or configuration changed during staging. Retry the update.${NC}" >&2
 		return 1
 	fi
-
-	local tmp_file
-	make_temp_file tmp_file "$PWD/xray/.server.jsonc.XXXXXX" || return 1
-	if ! jq --argjson clients "$clients_json" '
-        (
-            .inbounds[]
-            | select(
-                .protocol == "vless"
-                and ((.settings.clients? | type) == "array")
-            )
-            | .settings.clients
-        ) = $clients
-    ' "$config_file" >"$tmp_file"; then
-		echo -e "${RED}Failed to update the VLESS clients array. No changes were made.${NC}" >&2
-		rm -f "$tmp_file"
-		return 1
+	rollback_needed=1
+	mv -f "$work_dir/next.db" "$db_file" || return 1
+	if [[ "$changed" == "true" ]]; then
+		# Restore both files if this replacement or the subsequent reload fails.
+		config_replaced=1
+		mv -f "$work_dir/next.jsonc" "$config_file" || return 1
+		reload_attempted=1
+		if ! reload_xray_container; then
+			echo -e "${RED}Xray reload failed after updating clients.${NC}" >&2
+			return 1
+		fi
 	fi
-
-	if ! jq empty "$tmp_file" >/dev/null 2>&1; then
-		echo -e "${RED}Generated Xray config failed JSON validation. No changes were made.${NC}" >&2
-		rm -f "$tmp_file"
-		return 1
-	fi
-
-	apply_preserved_file_metadata "$config_file" "$tmp_file"
-	if ! mv "$tmp_file" "$config_file"; then
-		rm -f "$tmp_file"
-		return 1
-	fi
-	echo -e "${GREEN}Updated the VLESS clients list from the quota database.${NC}"
-}
+	rollback_needed=0
+)
 
 finalize_quota_db_update() {
 	with_xray_quota_lock _finalize_quota_db_update_internal "$@"
 }
 
 _finalize_quota_db_update_internal() {
-	local db_lines="$1"
-	local config_changed="$2"
-	local db_file="xray/user_limits.db"
-	local config_file="xray/server.jsonc"
+	local db_lines=$1 config_changed=$2
 
-	# Safety Guard: Prevent overwriting populated DB with empty content
+	# Only the explicit remove-user operation can empty a populated database.
 	local existing_records
 	existing_records=$(get_quota_db_records) || return 1
-	if [[ -z "$db_lines" ]] && [[ -n "$existing_records" ]]; then
-		echo -e "${RED}CRITICAL: Quota update produced empty database while records exist on disk. Aborting update to protect data.${NC}" >&2
+	if [[ -z "$db_lines" && -n "$existing_records" ]]; then
+		echo -e "${RED}Quota update produced an empty database. Changes were cancelled.${NC}" >&2
 		return 1
 	fi
 
-	if [[ "$config_changed" -ne 1 ]]; then
+	if [[ "$config_changed" -eq 1 ]]; then
+		apply_xray_quota_client_update "$db_lines" "${@:3}"
+	else
 		save_quota_db_content "$db_lines" "${@:3}"
-		return
 	fi
-
-	if [[ ! -f "$db_file" ]] || [[ ! -f "$config_file" ]]; then
-		echo -e "${RED}Cannot apply quota changes: database or Xray config not found.${NC}" >&2
-		return 1
-	fi
-
-	local db_backup config_backup
-	make_temp_file db_backup || return 1
-	make_temp_file config_backup || return 1
-	if ! cp -p "$db_file" "$db_backup" || ! cp -p "$config_file" "$config_backup"; then
-		rm -f "$db_backup" "$config_backup"
-		echo -e "${RED}Could not back up quota state. No changes were made.${NC}" >&2
-		return 1
-	fi
-
-	if ! save_quota_db_content "$db_lines" "${@:3}" || ! sync_xray_clients_from_quota_db; then
-		echo -e "${RED}Failed to prepare quota enforcement. Restoring previous state.${NC}" >&2
-		cp -p "$db_backup" "$db_file"
-		cp -p "$config_backup" "$config_file"
-		return 1
-	fi
-
-	if ! reload_xray_container; then
-		echo -e "${RED}Quota reload failed. Restoring previous database and config.${NC}" >&2
-		cp -p "$db_backup" "$db_file"
-		cp -p "$config_backup" "$config_file"
-		if ! reload_xray_container; then
-			echo -e "${RED}Failed to reload the restored Xray configuration; manual recovery is required.${NC}" >&2
-		fi
-		return 1
-	fi
-
-	rm -f "$db_backup" "$config_backup"
-	return 0
 }
 
 collect_xray_user_stats() {
@@ -4230,32 +4275,10 @@ add_xray_user() {
 
 	apply_add_user() {
 		checkpoint_xray_quota_usage
-		local db_backup config_backup
-		make_temp_file db_backup || return 1
-		make_temp_file config_backup || return 1
-		if ! cp -p "$db_file" "$db_backup" || ! cp -p "$config_file" "$config_backup"; then
-			echo -e "${RED}Failed to back up Xray user state. No changes were made.${NC}" >&2
-			return 1
-		fi
-
 		local existing_db
 		existing_db=$(get_quota_db_records) || return 1
-		if [[ -n "$existing_db" ]]; then
-			existing_db+=$'\n'
-		fi
-		existing_db+="${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${cycle_start}|${cycle_end}|0|0|active"
-		if save_quota_db_content "$existing_db" &&
-			sync_xray_clients_from_quota_db &&
-			reload_xray_container; then
-			rm -f "$db_backup" "$config_backup"
-			return 0
-		fi
-
-		echo -e "${RED}Failed to add Xray user. Restoring previous database and config.${NC}" >&2
-		cp -p "$db_backup" "$db_file"
-		cp -p "$config_backup" "$config_file"
-		reload_xray_container || true
-		return 1
+		existing_db+="${existing_db:+$'\n'}${user_id}|${uuid}|${user_limit_gb}|${now_epoch}|${cycle_start}|${cycle_end}|0|0|active"
+		apply_xray_quota_client_update "$existing_db"
 	}
 	if ! with_xray_quota_lock apply_add_user; then
 		return 1
@@ -4325,7 +4348,6 @@ add_xray_user() {
 
 remove_xray_user() {
 	local db_file="xray/user_limits.db"
-	local config_file="xray/server.jsonc"
 
 	if [[ ! -f "$db_file" ]]; then
 		echo -e "${RED}Xray quota database not found.${NC}"
@@ -4335,34 +4357,15 @@ remove_xray_user() {
 	local target_email
 	target_email=$(select_quota_user) || return 0
 	local target_uuid
-	target_uuid=$(awk -F'|' -v email="$target_email" '$1 == email { print $2; exit }' "$db_file") || return 1
-	[[ -n "$target_uuid" ]] || return 1
-
 	apply_remove_user() {
 		checkpoint_xray_quota_usage
-		local db_backup config_backup
-		make_temp_file db_backup || return 1
-		make_temp_file config_backup || return 1
-		if ! cp -p "$db_file" "$db_backup" || ! cp -p "$config_file" "$config_backup"; then
-			echo -e "${RED}Failed to back up Xray user state. No changes were made.${NC}" >&2
-			return 1
-		fi
-
-		local filtered_db filtered_metadata
-		filtered_db=$(get_quota_db_records | awk -F'|' -v email="$target_email" '$1 != email') || return 1
+		local records filtered_db filtered_metadata
+		records=$(get_quota_db_records) || return 1
+		target_uuid=$(awk -F'|' -v email="$target_email" '$1 == email { print $2; exit }' <<<"$records") || return 1
+		[[ -n "$target_uuid" ]] || return 1
+		filtered_db=$(awk -F'|' -v uuid="$target_uuid" 'NF && $2 != uuid' <<<"$records") || return 1
 		filtered_metadata=$(get_quota_accounting_metadata | awk -F'|' -v uuid="$target_uuid" '$1 != "# quota-closed" || $3 != uuid') || return 1
-		if save_quota_db_content "$filtered_db" "$filtered_metadata" &&
-			sync_xray_clients_from_quota_db &&
-			reload_xray_container; then
-			rm -f "$db_backup" "$config_backup"
-			return 0
-		fi
-
-		echo -e "${RED}Failed to remove Xray user. Restoring previous database and config.${NC}" >&2
-		cp -p "$db_backup" "$db_file"
-		cp -p "$config_backup" "$config_file"
-		reload_xray_container || true
-		return 1
+		apply_xray_quota_client_update "$filtered_db" "$filtered_metadata"
 	}
 	if ! with_xray_quota_lock apply_remove_user; then
 		return 1

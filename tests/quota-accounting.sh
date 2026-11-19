@@ -65,7 +65,10 @@ reload_xray_container() {
 
 seed() {
 	printf 'TIMEZONE=UTC\n' >xray/user_limits.conf
-	printf '%s\n' '{"inbounds":[{"protocol":"vless","settings":{"clients":[]}}]}' >xray/server.jsonc
+	jq -n --arg status "$4" '
+        {inbounds:[{protocol:"vless", settings:{clients:
+            (if $status == "active" then [{id:"uuid",email:"user",flow:""}] else [] end)}}]}
+	' >xray/server.jsonc
 	save_quota_db_content "user|uuid|$1|$jan|$jan|$feb|$2|$3|$4" "${5:-}"
 }
 
