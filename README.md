@@ -30,7 +30,7 @@ This shell script installs and manages Docker containers for Xray (VLESS-XHTTP-R
 Run this command from your regular login account with `sudo` access.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Shawshank01/proxy_sh/89efeee1cb3eca937e3813f1ae10863a0f45c29e/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Shawshank01/proxy_sh/0f1686d391cdc64184925641f5b69d111f0ef353/install.sh | bash
 ```
 
 The installer verifies the release signature and checksum before requesting `sudo`. It installs the script under `/opt/proxy-sh` and opens the menu when run from a terminal. To open it again, run `proxy.sh` from any directory.
