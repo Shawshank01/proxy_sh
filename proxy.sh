@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.0.0"
+SCRIPT_VERSION="7.0.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1263,7 +1263,7 @@ restore_deployment() {
 		echo "1) Xray (VLESS-XHTTP-Reality)"
 	fi
 	if [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
-		echo "2) Shadowsocks (ssserver-rust)"
+		echo "2) Shadowsocks (ss-2022)"
 	fi
 	if [[ "$HYSTERIA_CONFIG_EXISTS" -eq 1 ]]; then
 		echo "3) Hysteria 2"
@@ -2354,7 +2354,7 @@ install_shadowsocks() (
 	local ss_users_args USER_PSKS USER_LABELS i user_psk default_label user_label ss_users_json
 	local SERVER_ADDR REMARKS start_confirm LINKS server_uri_host fragment_url PASSWORD BASE64 link
 
-	echo -e "${YELLOW}Starting Shadowsocks (ssserver-rust) installation...${NC}"
+	echo -e "${YELLOW}Starting Shadowsocks (ss-2022) installation...${NC}"
 
 	ensure_service_dir "shadowsocks" || return 1
 	cd shadowsocks || return 1
@@ -2498,6 +2498,31 @@ EOL
 
 # --- Hysteria 2 installation ---
 
+is_hysteria_ip_address() {
+	local address=$1 octet='([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])'
+	local group='[[:xdigit:]]{1,4}' left right
+	local -a left_groups=() right_groups=()
+
+	if [[ "$address" != *:* ]]; then
+		[[ "$address" =~ ^$octet(\.$octet){3}$ ]]
+		return
+	fi
+	if [[ "$address" == *.* ]]; then
+		[[ "${address##*:}" =~ ^$octet(\.$octet){3}$ ]] || return 1
+		address="${address%:*}:0:0"
+	fi
+	if [[ "$address" != *::* ]]; then
+		[[ "$address" =~ ^$group(:$group){7}$ ]]
+		return
+	fi
+	left=${address%%::*}
+	right=${address#*::}
+	[[ "$left" =~ ^($group(:$group){0,6})?$ && "$right" =~ ^($group(:$group){0,6})?$ ]] || return 1
+	IFS=: read -r -a left_groups <<<"$left"
+	IFS=: read -r -a right_groups <<<"$right"
+	((${#left_groups[@]} + ${#right_groups[@]} < 8))
+}
+
 is_hysteria_dns_name() {
 	local name=$1 label
 	local dns_label='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
@@ -2615,7 +2640,7 @@ wait_for_hysteria() {
 }
 
 install_hysteria() (
-	local address host port mode cert_path key_path san
+	local address_choice address host port mode cert_path key_path san
 	local challenge_port fingerprint staging start_confirm acme_mount=""
 	local enable_ech ech_public_name="" ech_config link_query=""
 	local obfs_choice obfs_type="" obfs_password
@@ -2641,21 +2666,43 @@ install_hysteria() (
 	fi
 
 	while true; do
-		read -r -p "Public server IP address or DNS name: " address || return 1
-		address=${address#\[}
-		address=${address%\]}
-		require_valid_server_address "$address" || continue
-		if [[ "$address" =~ ^[[:xdigit:].]*:[[:xdigit:].:]+$ || "$address" =~ ^[0-9.]+$ ]]; then
+		echo "How should clients connect to this Hysteria 2 server?"
+		echo "1) Public VPS IP address (no domain required, uses a pinned or existing IP certificate)"
+		echo "2) Domain name (point DNS to your VPS to use the Let's Encrypt option)"
+		echo "0) Back"
+		read -r -p "Choose a connection address [1]: " address_choice || return 1
+		case ${address_choice:-1} in
+		1)
+			while true; do
+				read -r -p "Enter your VPS's public IPv4 or IPv6 address [0 to go back]: " address || return 1
+				[[ "$address" != 0 ]] || break
+				if [[ "$address" == \[*\] ]]; then
+					address=${address:1:-1}
+				fi
+				if is_hysteria_ip_address "$address"; then break; fi
+				echo "Enter an IP address by itself. The UDP port is selected separately."
+			done
+			[[ "$address" != 0 ]] || continue
 			san="IP:$address"
 			identity_check=(-verify_ip "$address")
 			break
-		fi
-		if is_hysteria_dns_name "$address"; then
+			;;
+		2)
+			while true; do
+				read -r -p "Enter the hostname that points to your VPS (e.g. proxy.example.com) [0 to go back]: " address || return 1
+				[[ "$address" != 0 ]] || break
+				address=${address%.}
+				if is_hysteria_dns_name "$address" && [[ "$address" == *.* ]]; then break; fi
+				echo "Enter a hostname such as proxy.example.com."
+			done
+			[[ "$address" != 0 ]] || continue
 			san="DNS:$address"
 			identity_check=(-verify_hostname "$address")
 			break
-		fi
-		echo "Enter an IPv4 address, IPv6 address, or DNS name."
+			;;
+		0) return 0 ;;
+		*) echo "Choose 1, 2 or 0." ;;
+		esac
 	done
 	host=$(format_uri_host "$address")
 
@@ -2671,16 +2718,18 @@ install_hysteria() (
 	done
 
 	while true; do
-		echo "1) Generate a pinned, self-signed certificate (works with an IP address)"
-		echo "2) Use an existing PEM certificate and private key"
-		echo "3) Request a Let's Encrypt certificate for a domain using ACME"
+		echo "1) Generate a self-signed certificate and add its pin to the client links"
+		echo "2) Use a PEM certificate and private key that cover $address"
+		if [[ "$san" == DNS:* ]]; then
+			echo "3) Request a Let's Encrypt certificate using ACME"
+		fi
 		read -r -p "Certificate option [1]: " mode || return 1
 		case ${mode:-1} in
 		1) mode=1; break ;;
 		2) break ;;
 		3)
-			if [[ "$san" != DNS:* || "$address" != *.* ]]; then
-				echo "Built-in ACME requires a public DNS name for this setup."
+			if [[ "$san" != DNS:* ]]; then
+				echo "Choose 1 or 2 for an IP address."
 				continue
 			fi
 			echo "Point DNS to this server and allow inbound TCP on the challenge port."
@@ -2697,7 +2746,7 @@ install_hysteria() (
 			acme_mount='      - ./acme:/acme'
 			break
 			;;
-		*) echo "Choose 1, 2 or 3." ;;
+		*) echo "Choose one of the certificate options shown." ;;
 		esac
 	done
 
@@ -5996,7 +6045,7 @@ run_main_menu() {
 			echo "Install Proxy Server"
 			echo "1) Xray (VLESS-XHTTP-Reality)"
 			echo "2) Hysteria 2"
-			echo "3) Shadowsocks (ssserver-rust)"
+			echo "3) Shadowsocks (ss-2022)"
 			echo "0) Back"
 			read -r -p "Enter your choice [0-3]: " install_choice || return 0
 			case $install_choice in
