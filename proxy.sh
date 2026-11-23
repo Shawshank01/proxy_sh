@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="6.0.0"
+SCRIPT_VERSION="7.0.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -91,6 +91,8 @@ fi
 DOCKER_COMPOSE_CMD=()
 XRAY_DOCKER_IMAGE="ghcr.io/xtls/xray-core:latest"
 SS_DOCKER_IMAGE="ghcr.io/shadowsocks/ssserver-rust:latest"
+HYSTERIA_DOCKER_IMAGE="tobyxdd/hysteria:latest"
+HYSTERIA_STATS_PORT=10087
 XRAY_REALITY_FALLBACK_PORT=10086
 RELEASE_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
 MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAnawkCaPdD130GQ0E6AAr
@@ -708,7 +710,10 @@ release_version_lock_if_needed() {
 		mv "$tmp_file" "$dir/docker-compose.yml" || return 1
 
 		echo "Recreating container with latest image..."
-		if (cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d); then
+		if (cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull) &&
+			{ [[ "$dir" != hysteria ]] || checkpoint_hysteria_traffic; } &&
+			(cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d) &&
+			{ [[ "$dir" != hysteria ]] || wait_for_hysteria; }; then
 			rm -f "$backup_file"
 			echo -e "${GREEN}Reset to latest version successfully.${NC}"
 			return 2
@@ -756,7 +761,11 @@ update_container() {
 		return 1
 	fi
 
-	if ! (cd "$compose_dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d); then
+	if [[ "$compose_dir" == hysteria ]]; then
+		checkpoint_hysteria_traffic
+	fi
+	if ! (cd "$compose_dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d) ||
+		{ [[ "$compose_dir" == hysteria ]] && ! wait_for_hysteria; }; then
 		echo -e "${RED}Failed to update ${container_name}.${NC}"
 		return 1
 	fi
@@ -1029,13 +1038,19 @@ update_shadowsocks() {
 	update_container "ssserver" "shadowsocks" "${SS_DOCKER_IMAGE%%:*}" "latest"
 }
 
+update_hysteria() {
+	update_container "hysteria" "hysteria" "${HYSTERIA_DOCKER_IMAGE%%:*}" "latest"
+}
+
 change_container_version() {
+	local container_choice
 	echo ""
 	echo -e "${YELLOW}--- Change Container Version (Downgrade/Upgrade) ---${NC}"
 	echo "1) Xray"
-	echo "2) Shadowsocks"
+	echo "2) Hysteria 2"
+	echo "3) Shadowsocks"
 	echo "0) Back"
-	read -p "Select the container [0-2]: " container_choice || return 1
+	read -r -p "Select the container [0-3]: " container_choice || return 1
 
 	local dir=""
 	local container_name=""
@@ -1048,6 +1063,11 @@ change_container_version() {
 		base_image="${XRAY_DOCKER_IMAGE%%:*}"
 		;;
 	2)
+		dir="hysteria"
+		container_name="hysteria"
+		base_image="${HYSTERIA_DOCKER_IMAGE%%:*}"
+		;;
+	3)
 		dir="shadowsocks"
 		container_name="ssserver"
 		base_image="${SS_DOCKER_IMAGE%%:*}"
@@ -1119,7 +1139,10 @@ change_container_version() {
 	mv "$tmp_file" "$dir/docker-compose.yml" || return 1
 
 	echo "Pulling new image version..."
-	if (cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d); then
+	if (cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull) &&
+		{ [[ "$dir" != hysteria ]] || checkpoint_hysteria_traffic; } &&
+		(cd "$dir" && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d) &&
+		{ [[ "$dir" != hysteria ]] || wait_for_hysteria; }; then
 		rm -f "$backup_file"
 		echo -e "${GREEN}Successfully changed version to: ${target_version}${NC}"
 		return 0
@@ -1184,12 +1207,19 @@ restore_shadowsocks() {
 	restore_container "Shadowsocks" "ssserver" "shadowsocks" "ss_links.txt" "SS"
 }
 
+restore_hysteria() {
+	checkpoint_hysteria_traffic
+	(cd hysteria && $SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d) &&
+		wait_for_hysteria && show_hysteria_links
+}
+
 restore_deployment() {
 	echo -e "${YELLOW}Restore Deployment - Re-deploy containers from existing config files${NC}"
 	echo -e "${YELLOW}Use this when Docker was reinstalled or containers were accidentally deleted.${NC}\n"
 
 	local XRAY_CONFIG_EXISTS=0
 	local SS_CONFIG_EXISTS=0
+	local HYSTERIA_CONFIG_EXISTS=0
 	local restore_choice
 
 	if [[ -d "xray" ]] && [[ -f "xray/docker-compose.yml" ]] && [[ -f "xray/server.jsonc" ]]; then
@@ -1216,10 +1246,15 @@ restore_deployment() {
 		echo -e "${RED}✗ Shadowsocks configuration not found${NC}"
 	fi
 
+	if [[ -f "hysteria/docker-compose.yml" && -f "hysteria/config/hysteria.yaml" ]]; then
+		HYSTERIA_CONFIG_EXISTS=1
+		echo -e "${GREEN}✓ Hysteria 2 configuration found${NC}"
+	fi
+
 	echo ""
 
-	if [[ "$XRAY_CONFIG_EXISTS" -eq 0 ]] && [[ "$SS_CONFIG_EXISTS" -eq 0 ]]; then
-		echo -e "${RED}No existing configurations found. Please install using options 2 or 3.${NC}"
+	if ((XRAY_CONFIG_EXISTS + SS_CONFIG_EXISTS + HYSTERIA_CONFIG_EXISTS == 0)); then
+		echo -e "${RED}No existing configurations found. Choose Install Proxy Server first.${NC}"
 		return 1
 	fi
 
@@ -1230,8 +1265,8 @@ restore_deployment() {
 	if [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
 		echo "2) Shadowsocks (ssserver-rust)"
 	fi
-	if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]] && [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
-		echo "3) Both"
+	if [[ "$HYSTERIA_CONFIG_EXISTS" -eq 1 ]]; then
+		echo "3) Hysteria 2"
 	fi
 	echo "0) Cancel"
 	read -p "Enter your choice: " restore_choice || return 1
@@ -1252,13 +1287,10 @@ restore_deployment() {
 		fi
 		;;
 	3)
-		if [[ "$XRAY_CONFIG_EXISTS" -eq 1 ]] && [[ "$SS_CONFIG_EXISTS" -eq 1 ]]; then
-			local restore_status=0
-			restore_xray || restore_status=1
-			restore_shadowsocks || restore_status=1
-			return "$restore_status"
+		if [[ "$HYSTERIA_CONFIG_EXISTS" -eq 1 ]]; then
+			restore_hysteria
 		else
-			echo -e "${RED}Both configurations are not available.${NC}"
+			echo -e "${RED}Hysteria 2 configuration not available.${NC}"
 		fi
 		;;
 	0)
@@ -1312,7 +1344,12 @@ delete_xray() {
 	if [[ -d "xray" ]]; then
 		with_xray_quota_lock delete_container "Xray" "xray" || return 1
 	fi
-	apply_quota_scheduler disabled
+	[[ -f hysteria/config/user_limits.db ]] || apply_quota_scheduler disabled
+}
+
+delete_hysteria() {
+	delete_container "Hysteria 2" "hysteria" || return 1
+	[[ -f xray/user_limits.db ]] || apply_quota_scheduler disabled
 }
 
 delete_shadowsocks() {
@@ -2459,6 +2496,446 @@ EOL
 	fi
 )
 
+# --- Hysteria 2 installation ---
+
+is_hysteria_dns_name() {
+	local name=$1 label
+	local dns_label='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
+	local -a labels
+
+	[[ ${#name} -le 253 && "$name" =~ ^[a-zA-Z0-9.-]+$ && "$name" != *. && ! "$name" =~ ^[0-9.]+$ ]] || return 1
+	IFS=. read -r -a labels <<<"$name"
+	for label in "${labels[@]}"; do
+		[[ "$label" =~ $dns_label ]] || return 1
+	done
+}
+
+generate_hysteria_ech() {
+	local config_dir=$1 public_name=$2 config_list
+	if ! $SUDO docker run --rm --pull=always --network none --user "$(id -u):$(id -g)" \
+		-v "$config_dir:/etc/proxy-hysteria" "$HYSTERIA_DOCKER_IMAGE" \
+		ech --public-name "$public_name" --output /etc/proxy-hysteria/ech.pem >/dev/null; then
+		echo "Could not generate ECH keys with the Hysteria Docker image." >&2
+		return 1
+	fi
+
+	chmod 600 "$config_dir/ech.pem" || return 1
+	config_list=$(awk '
+		/^-----BEGIN ECH CONFIGS-----$/ { configs = 1; next }
+		/^-----END ECH CONFIGS-----$/ { exit }
+		configs { printf "%s", $0 }
+	' "$config_dir/ech.pem") || return 1
+	if [[ ! "$config_list" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+		echo "The Hysteria Docker image did not produce a valid public ECH config." >&2
+		return 1
+	fi
+	url_encode_component "$config_list"
+}
+
+prompt_hysteria_bandwidth_mbps() {
+	local direction=$1 rate
+	while true; do
+		read -r -p "Server $direction bandwidth in Mbps: " rate || return 1
+		# Whole Mbps must fit in an unsigned 64-bit bits-per-second value.
+		if parse_decimal_range "$rate" 1 18446744073709; then
+			return 0
+		fi
+		echo "Enter a positive whole number in Mbps." >&2
+	done
+}
+
+write_hysteria_quota_auth() {
+	local directory=$1
+	cat >"$directory/quota-auth.sh" <<'AUTH' || return 1
+#!/bin/sh
+set -eu
+auth=$2
+case "$auth" in
+	*:*) username=${auth%%:*}; password=${auth#*:} ;;
+	*) username=user; password=$auth ;;
+esac
+username=$(printf '%s' "$username" | tr '[:upper:]' '[:lower:]')
+case "$username" in
+	''|*[!a-z0-9_-]*) exit 1 ;;
+esac
+case "$password" in
+	''|*[!a-f0-9]*) exit 1 ;;
+esac
+[ "${#password}" -eq 64 ] || exit 1
+directory=/etc/proxy-hysteria
+awk -F '|' -v user="$username" -v pass="$password" '
+	$1 == user && "x" $2 == "x" pass { found = 1 }
+	END { exit !found }
+' "$directory/auth-users" || exit 1
+awk -F '|' -v user="$username" '
+	$1 == user && $9 == "active" { found = 1 }
+	END { exit !found }
+' "$directory/user_limits.db" || exit 1
+printf '%s\n' "$username"
+AUTH
+	chmod 0700 "$directory/quota-auth.sh"
+}
+
+initialize_hysteria_quota_files() {
+	local directory=$1 totals_file=$2 now bounds username password limit last_total
+	local rows="" timezone=$DEFAULT_QUOTA_TIMEZONE
+	now=$(date +%s) || return 1
+	bounds=$(calculate_cycle_bounds "$now" "$now" "$timezone") || return 1
+	while IFS='|' read -r username password limit; do
+		last_total=0
+		if [[ -f "$totals_file" ]]; then
+			last_total=$(jq -er --arg username "$username" '.users[$username] | (.upload // 0) + (.download // 0)' "$totals_file") || return 1
+		fi
+		rows+="${rows:+$'\n'}$username|$username|${limit:-0}|$now|${bounds%%|*}|${bounds##*|}|0|$last_total|active"
+	done <"$directory/auth-users"
+	[[ -n "$rows" ]] || return 1
+	printf 'TIMEZONE=%s\n' "$timezone" >"$directory/user_limits.conf" &&
+		write_quota_db_file "$directory/user_limits.db" "$rows" "# quota-sample|hysteria-total|$now" "" &&
+		write_hysteria_quota_auth "$directory"
+}
+
+wait_for_hysteria() {
+	local attempt attempts=15 status started logs
+	# A deployment with geo rules can download both databases at startup.
+	[[ ! -d hysteria/geo ]] || attempts=60
+	for ((attempt = 0; attempt < attempts; attempt++)); do
+		read -r status started < <($SUDO docker inspect --type container \
+			-f '{{.State.Status}} {{.State.StartedAt}}' hysteria) || break
+		if [[ "$status" == running ]]; then
+			logs=$($SUDO docker logs --since "$started" hysteria 2>&1) || break
+			if [[ "$logs" == *'server up and running'* ]]; then
+				return 0
+			fi
+		fi
+		sleep 1
+	done
+	$SUDO docker logs --tail 15 hysteria >&2
+	echo -e "${RED}Hysteria 2 did not report startup. Check the container logs above.${NC}" >&2
+	return 1
+}
+
+install_hysteria() (
+	local address host port mode cert_path key_path san
+	local challenge_port fingerprint staging start_confirm acme_mount=""
+	local enable_ech ech_public_name="" ech_config link_query=""
+	local obfs_choice obfs_type="" obfs_password
+	local bandwidth_up bandwidth_down
+	local user_count user_number
+	local set_limits limit
+	local china_rules_choice geo_workdir="" geo_mount=""
+	local stats_port=$HYSTERIA_STATS_PORT stats_secret
+	local -a identity_check user_passwords=()
+
+	if [[ -e hysteria || -L hysteria ]]; then
+		echo "A Hysteria 2 deployment already exists. Choose Restore deployment from existing config."
+		return 1
+	fi
+	if command -v ss >/dev/null; then
+		while [[ -n "$(ss -H -ltn "sport = :$stats_port")" ]]; do
+			if ((stats_port == 65535)); then
+				echo "No available TCP port for the Hysteria traffic API." >&2
+				return 1
+			fi
+			stats_port=$((stats_port + 1))
+		done
+	fi
+
+	while true; do
+		read -r -p "Public server IP address or DNS name: " address || return 1
+		address=${address#\[}
+		address=${address%\]}
+		require_valid_server_address "$address" || continue
+		if [[ "$address" =~ ^[[:xdigit:].]*:[[:xdigit:].:]+$ || "$address" =~ ^[0-9.]+$ ]]; then
+			san="IP:$address"
+			identity_check=(-verify_ip "$address")
+			break
+		fi
+		if is_hysteria_dns_name "$address"; then
+			san="DNS:$address"
+			identity_check=(-verify_hostname "$address")
+			break
+		fi
+		echo "Enter an IPv4 address, IPv6 address, or DNS name."
+	done
+	host=$(format_uri_host "$address")
+
+	while true; do
+		read -r -p "UDP port for Hysteria 2 [443]: " port || return 1
+		if ! port=$(parse_decimal_range "${port:-443}" 1 65535); then
+			echo "Enter a port between 1 and 65535."
+		elif command -v ss >/dev/null && [[ -n "$(ss -H -lun "sport = :$port")" ]]; then
+			echo "UDP port $port is already in use. Choose a different UDP port."
+		else
+			break
+		fi
+	done
+
+	while true; do
+		echo "1) Generate a pinned, self-signed certificate (works with an IP address)"
+		echo "2) Use an existing PEM certificate and private key"
+		echo "3) Request a Let's Encrypt certificate for a domain using ACME"
+		read -r -p "Certificate option [1]: " mode || return 1
+		case ${mode:-1} in
+		1) mode=1; break ;;
+		2) break ;;
+		3)
+			if [[ "$san" != DNS:* || "$address" != *.* ]]; then
+				echo "Built-in ACME requires a public DNS name for this setup."
+				continue
+			fi
+			echo "Point DNS to this server and allow inbound TCP on the challenge port."
+			read -r -p "ACME challenge [1 = HTTP on TCP 80, 2 = TLS-ALPN on TCP 443, default 1]: " challenge_port || return 1
+			case ${challenge_port:-1} in
+			1) challenge_port=80 ;;
+			2) challenge_port=443 ;;
+			*) echo "Choose 1 or 2."; continue ;;
+			esac
+			if command -v ss >/dev/null && [[ -n "$(ss -H -ltn "sport = :$challenge_port")" ]]; then
+				echo "TCP port $challenge_port is already in use. Choose another challenge or use certificate files."
+				continue
+			fi
+			acme_mount='      - ./acme:/acme'
+			break
+			;;
+		*) echo "Choose 1, 2 or 3." ;;
+		esac
+	done
+
+	umask 077
+	staging=$(mktemp -d ./.hysteria.XXXXXX) || return 1
+	trap 'if [[ -n "$staging" ]]; then rm -rf -- "$staging"; fi' EXIT
+	mkdir -- "$staging/config" || return 1
+	cert_path="$staging/config/server.crt"
+	key_path="$staging/config/server.key"
+
+	if [[ "$mode" == 1 ]]; then
+		openssl req -new -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -sha256 -days 365 \
+			-subj "/CN=Hysteria 2" -addext "subjectAltName=$san" \
+			-addext 'basicConstraints=critical,CA:FALSE' -addext extendedKeyUsage=serverAuth \
+			-keyout "$key_path" -out "$cert_path" || return 1
+	elif [[ "$mode" == 2 ]]; then
+		local input_cert input_key
+		read -r -p "Path to the PEM certificate (full chain): " input_cert || return 1
+		read -r -p "Path to the unencrypted PEM private key: " input_key || return 1
+		[[ -f "$input_cert" && -f "$input_key" ]] || {
+			echo "Both paths must point to regular files." >&2
+			return 1
+		}
+		$SUDO cat -- "$input_cert" >"$cert_path" && $SUDO cat -- "$input_key" >"$key_path" || return 1
+		local cert_pub key_pub
+		cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout) &&
+			key_pub=$(openssl pkey -passin pass: -in "$key_path" -pubout) &&
+			[[ "$cert_pub" == "$key_pub" ]] || {
+			echo "The certificate and unencrypted private key must match." >&2
+			return 1
+		}
+	fi
+
+	if [[ "$mode" != 3 ]]; then
+		if [[ "$san" == DNS:* ]] && ! openssl x509 -in "$cert_path" -noout -ext subjectAltName | grep -Fq 'DNS:'; then
+			echo "The certificate needs a DNS Subject Alternative Name for $address." >&2
+			return 1
+		fi
+		openssl verify -partial_chain -trusted "$cert_path" -purpose sslserver \
+			"${identity_check[@]}" "$cert_path" >/dev/null || return 1
+		if [[ "$mode" == 1 ]]; then
+			fingerprint=$(openssl x509 -in "$cert_path" -noout -fingerprint -sha256) || return 1
+			fingerprint=${fingerprint#*=}
+			link_query="insecure=1&pinSHA256=${fingerprint//:/}"
+		fi
+	fi
+
+	while true; do
+		read -r -p "Enable Encrypted Client Hello (ECH)? [y/N]: " enable_ech || return 1
+		case ${enable_ech:-n} in
+		y|Y)
+			while true; do
+				read -r -p "ECH public DNS name (visible to the network): " ech_public_name || return 1
+				if is_hysteria_dns_name "$ech_public_name" && [[ "$ech_public_name" == *.* &&
+					"${ech_public_name,,}" != "${address,,}" ]]; then
+					break
+				fi
+				echo "Enter a DNS name different from the server address."
+			done
+			break
+			;;
+		n|N) break ;;
+		*) echo "Choose y or n." ;;
+		esac
+	done
+
+	echo "0) No obfuscation (default HTTP/3 behavior)"
+	echo "1) Salamander"
+	echo "2) Gecko (experimental)"
+	while true; do
+		read -r -p "Hysteria 2 obfuscation [0]: " obfs_choice || return 1
+		case ${obfs_choice:-0} in
+		0) break ;;
+		1) obfs_type=salamander; break ;;
+		2) obfs_type=gecko; break ;;
+		*) echo "Choose 0, 1 or 2." ;;
+		esac
+	done
+
+	echo "Set the server bandwidth limits for Brutal."
+	bandwidth_up=$(prompt_hysteria_bandwidth_mbps upload) || return 1
+	bandwidth_down=$(prompt_hysteria_bandwidth_mbps download) || return 1
+
+	while true; do
+		read -r -p "Block outbound connections to mainland China domains and IPs? [Y/n]: " china_rules_choice || return 1
+		case ${china_rules_choice:-y} in
+		y|Y)
+			mkdir -- "$staging/geo" || return 1
+			geo_workdir='    working_dir: /var/lib/hysteria'
+			geo_mount='      - ./geo:/var/lib/hysteria'
+			break
+			;;
+		n|N) break ;;
+		*) echo "Choose y or n." ;;
+		esac
+	done
+
+	while true; do
+		read -r -p "How many Hysteria 2 users? [1]: " user_count || return 1
+		if user_count=$(parse_decimal_range "${user_count:-1}" 1 9223372036854775806); then
+			break
+		fi
+		echo "Enter a positive whole number of users."
+	done
+
+	read -r -p "Set monthly limits for Hysteria 2 users now? [y/N]: " set_limits || return 1
+
+	cat >"$staging/config/hysteria.yaml" <<EOF || return 1
+listen: ":$port"
+auth:
+  type: command
+  command: /etc/proxy-hysteria/quota-auth.sh
+EOF
+	for ((user_number = 1; user_number <= user_count; user_number++)); do
+		user_passwords[user_number]=$(openssl rand -hex 32) || return 1
+		limit=0
+		if [[ "$set_limits" == [yY] ]]; then
+			while true; do
+				read -r -p "Monthly limit for user$user_number in GB [0 = unlimited]: " limit || return 1
+				if limit=$(parse_decimal_range "${limit:-0}" 0 "$MAX_USER_LIMIT_GB"); then break; fi
+				echo "Enter a whole number from 0 to $MAX_USER_LIMIT_GB."
+			done
+		fi
+		printf 'user%s|%s|%s\n' "$user_number" "${user_passwords[user_number]}" "$limit" || return 1
+	done >"$staging/config/auth-users" || return 1
+	initialize_hysteria_quota_files "$staging/config" /dev/null || return 1
+	stats_secret=$(openssl rand -hex 32) || return 1
+	cat >>"$staging/config/hysteria.yaml" <<EOF || return 1
+bandwidth:
+  up: "$bandwidth_up mbps"
+  down: "$bandwidth_down mbps"
+trafficStats:
+  listen: "127.0.0.1:$stats_port"
+  secret: "$stats_secret"
+EOF
+	if [[ -n "$geo_mount" ]]; then
+		cat >>"$staging/config/hysteria.yaml" <<'EOF' || return 1
+sniff:
+  enable: true
+  rewriteDomain: false
+  tcpPorts: "80,443"
+  udpPorts: "443"
+acl:
+  inline:
+    - reject(geosite:cn)
+    - reject(geoip:cn)
+EOF
+	fi
+	if [[ -n "$obfs_type" ]]; then
+		obfs_password=$(openssl rand -hex 32) || return 1
+		cat >>"$staging/config/hysteria.yaml" <<EOF || return 1
+obfs:
+  type: $obfs_type
+  $obfs_type:
+    password: "$obfs_password"
+EOF
+		link_query="${link_query:+$link_query&}obfs=$obfs_type&obfs-password=$obfs_password"
+	fi
+	if [[ "$mode" == 3 ]]; then
+		local challenge=http
+		[[ "$challenge_port" == 443 ]] && challenge=tls
+		mkdir -- "$staging/acme" || return 1
+		cat >>"$staging/config/hysteria.yaml" <<EOF || return 1
+acme:
+  domains:
+    - "$address"
+  ca: letsencrypt
+  dir: /acme
+  type: $challenge
+EOF
+	else
+		cat >>"$staging/config/hysteria.yaml" <<'EOF' || return 1
+tls:
+  cert: /etc/proxy-hysteria/server.crt
+  key: /etc/proxy-hysteria/server.key
+EOF
+	fi
+
+	cat >"$staging/docker-compose.yml" <<EOF || return 1
+services:
+  hysteria:
+    image: $HYSTERIA_DOCKER_IMAGE
+    container_name: hysteria
+    restart: unless-stopped
+    network_mode: host
+$geo_workdir
+    volumes:
+      - ./config:/etc/proxy-hysteria:ro
+$acme_mount
+$geo_mount
+    command: ["server", "-c", "/etc/proxy-hysteria/hysteria.yaml"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOF
+	read -r -p "Save the deployment and start Hysteria 2 on UDP $port? [Y/n]: " start_confirm || return 1
+	case ${start_confirm:-y} in
+	y|Y) ;;
+	*) return 0 ;;
+	esac
+
+	if [[ -n "$ech_public_name" ]]; then
+		ech_config=$(generate_hysteria_ech "$PWD/${staging#./}/config" "$ech_public_name") || return 1
+		cat >>"$staging/config/hysteria.yaml" <<'EOF' || return 1
+ech:
+  keyPath: /etc/proxy-hysteria/ech.pem
+EOF
+		link_query="${link_query:+$link_query&}ech=$ech_config"
+	fi
+	for ((user_number = 1; user_number <= user_count; user_number++)); do
+		printf 'hysteria2://user%s:%s@%s:%s/%s#Hysteria%%202-user%s\n' \
+			"$user_number" "${user_passwords[user_number]}" "$host" "$port" "${link_query:+?$link_query}" "$user_number" ||
+			return 1
+	done >"$staging/hysteria_links.txt" || return 1
+
+	mv -nT -- "$staging" hysteria || return 1
+	if [[ -d "$staging" ]]; then
+		echo "A Hysteria 2 deployment was created in another session." >&2
+		return 1
+	fi
+	staging=""
+	if [[ -n "$geo_mount" ]]; then
+		echo "Hysteria 2 will download its GeoIP and GeoSite databases if needed."
+	fi
+	if ! (cd hysteria && { [[ -n "$ech_public_name" ]] || $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull; } &&
+		$SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d) || ! wait_for_hysteria; then
+		echo "Hysteria 2 settings were saved. After fixing startup, choose Restore deployment from existing config." >&2
+		return 1
+	fi
+	echo "Hysteria 2 is running. Allow inbound UDP $port in your firewall."
+	show_hysteria_links
+	printf '\nThe link carries connection settings. Set bandwidth in your client to use Brutal.\n'
+	printf 'Use these client values if your connection can sustain them:\n'
+	printf 'bandwidth:\n  up: "%s mbps"\n  down: "%s mbps"\n' "$bandwidth_down" "$bandwidth_up"
+)
+
 # --- Quota subsystem ---
 
 days_in_month() {
@@ -2674,7 +3151,7 @@ prompt_select_timezone() {
 }
 
 read_xray_quota_timezone() {
-	local conf_file="xray/user_limits.conf"
+	local conf_file="${quota_data_dir:-xray}/user_limits.conf"
 	local tz="$DEFAULT_QUOTA_TIMEZONE"
 
 	if [[ -f "$conf_file" ]]; then
@@ -2762,11 +3239,32 @@ with_xray_quota_lock() {
 }
 
 get_quota_db_records() {
-	local db_file="xray/user_limits.db"
+	local db_file="${quota_data_dir:-xray}/user_limits.db"
 	if [[ -f "$db_file" ]]; then
 		awk 'NF && $0 !~ /^[[:space:]]*#/' "$db_file"
 	fi
 }
+
+with_proxy_quota_lock() {
+	if [[ "${quota_data_dir:-xray}" == xray ]]; then
+		with_xray_quota_lock "$@"
+	else
+		with_hysteria_quota_lock "$@"
+	fi
+}
+
+with_hysteria_quota_lock() (
+	if [[ ${hysteria_quota_locked:-0} != 1 ]]; then
+		local lock_fd
+		exec {lock_fd}<hysteria || return 1
+		flock -x -w 10 "$lock_fd" || {
+			echo "Could not lock Hysteria 2 quota accounting." >&2
+			return 1
+		}
+	fi
+	local hysteria_quota_locked=1
+	"$@"
+)
 
 parse_quota_db_line() {
 	local line=$1
@@ -2790,7 +3288,7 @@ parse_quota_db_line() {
 }
 
 get_quota_accounting_metadata() {
-	local db_file=${1:-xray/user_limits.db}
+	local db_file=${1:-${quota_data_dir:-xray}/user_limits.db}
 	if [[ -f "$db_file" ]]; then
 		awk '/^# quota-(sample|closed)\|/' "$db_file"
 	fi
@@ -2807,7 +3305,7 @@ write_quota_db_file() {
 }
 
 save_quota_db_content() {
-	local content=$1 db_file="xray/user_limits.db"
+	local content=$1 db_file="${quota_data_dir:-xray}/user_limits.db"
 	local tmp_db metadata profiles=""
 	if [[ $# -ge 2 ]]; then
 		metadata=$2
@@ -2817,7 +3315,7 @@ save_quota_db_content() {
 	if [[ -f "$db_file" ]]; then
 		profiles=$(awk '/^# vless-client /' "$db_file") || return 1
 	fi
-	make_temp_file tmp_db "$PWD/xray/.user_limits.db.XXXXXX" || return 1
+	make_temp_file tmp_db "$PWD/${quota_data_dir:-xray}/.user_limits.db.XXXXXX" || return 1
 	if ! write_quota_db_file "$tmp_db" "$content" "$metadata" "$profiles"; then
 		rm -f "$tmp_db"
 		return 1
@@ -2982,7 +3480,7 @@ apply_xray_quota_client_update() (
 )
 
 finalize_quota_db_update() {
-	with_xray_quota_lock _finalize_quota_db_update_internal "$@"
+	with_proxy_quota_lock _finalize_quota_db_update_internal "$@"
 }
 
 _finalize_quota_db_update_internal() {
@@ -2996,7 +3494,12 @@ _finalize_quota_db_update_internal() {
 		return 1
 	fi
 
-	if [[ "$config_changed" -eq 1 ]]; then
+	if [[ "${quota_data_dir:-xray}" == hysteria/config ]]; then
+		save_quota_db_content "$db_lines" "${@:3}" || return 1
+		if [[ "$config_changed" -eq 1 ]]; then
+			disconnect_suspended_hysteria_users
+		fi
+	elif [[ "$config_changed" -eq 1 ]]; then
 		apply_xray_quota_client_update "$db_lines" "${@:3}"
 	else
 		save_quota_db_content "$db_lines" "${@:3}"
@@ -3099,13 +3602,15 @@ refresh_xray_quota_accounting() {
 	done <<<"$metadata"
 
 	make_temp_file stats_map_file || return 1
-	if ! result=$(collect_xray_user_stats "$stats_map_file"); then
+	local collector=collect_xray_user_stats
+	[[ "${quota_data_dir:-xray}" != hysteria/config ]] || collector=collect_hysteria_quota_stats
+	if ! result=$("$collector" "$stats_map_file"); then
 		rm -f "$stats_map_file"
 		return 1
 	fi
 	IFS='|' read -r generation sample_epoch started_epoch stats_error <<<"$result"
 	if [[ -n "$stats_error" ]]; then
-		echo -e "${YELLOW}Could not sample Xray traffic: ${stats_error}${NC}" >&2
+		echo -e "${YELLOW}Could not sample traffic: ${stats_error}${NC}" >&2
 		if [[ "$mode" == "strict" ]]; then
 			rm -f "$stats_map_file"
 			return 1
@@ -3196,8 +3701,298 @@ refresh_xray_quota_accounting() {
 	fi
 }
 
+# --- Hysteria traffic accounting ---
+
+hysteria_traffic_api_settings() {
+	awk '
+		/^trafficStats:[[:space:]]*$/ { in_stats = 1; next }
+		in_stats && /^[^[:space:]#]/ { exit }
+		in_stats && /^[[:space:]]+listen:/ { address = $2 }
+		in_stats && /^[[:space:]]+secret:/ { secret = $2 }
+		END {
+			gsub(/"/, "", address)
+			gsub(/"/, "", secret)
+			if (address != "" && secret != "") print address, secret
+		}
+	' hysteria/config/hysteria.yaml
+}
+
+read_hysteria_traffic_endpoint() {
+	local endpoint token
+	read -r endpoint token < <(hysteria_traffic_api_settings) || return 1
+	[[ "$endpoint" =~ ^127\.0\.0\.1:[0-9]+$ && "$token" =~ ^[a-fA-F0-9]{64}$ ]] &&
+		parse_decimal_range "${endpoint##*:}" 1 65535 >/dev/null || return 1
+	printf '%s %s\n' "$endpoint" "$token"
+}
+
+hysteria_traffic_request() {
+	local address=$1 secret=$2 path=$3
+	shift 3
+	printf 'Authorization: %s\n' "$secret" |
+		curl -q -fsS --noproxy '*' --connect-timeout 2 --max-time 5 --header @- \
+			"$@" "http://$address/$path"
+}
+
+sample_hysteria_traffic() (
+	local address=$1 secret=$2
+	local database=hysteria/traffic-usage.json previous=/dev/null staged="" lock_fd
+	local config_dir identity before after generation stats usernames
+	identity='{{.Id}}|{{.State.StartedAt}}|{{.State.Running}}|{{json .Mounts}}'
+
+	if ! command -v flock >/dev/null; then
+		echo "Hysteria 2 traffic snapshots require flock from util-linux." >&2
+		return 1
+	fi
+	if [[ ${hysteria_quota_locked:-0} != 1 ]]; then
+		exec {lock_fd}<hysteria || return 1
+		flock -x -w 10 "$lock_fd" || return 1
+	fi
+	config_dir=$(cd -P hysteria/config && pwd) || return 1
+	before=$(timeout 5s $SUDO docker inspect --type container -f "$identity" hysteria 2>/dev/null) || return 1
+	generation=${before%%|true|*}
+	[[ "$before" != "$generation" ]] || return 1
+	jq -e --arg source "$config_dir" 'any(.[]; .Source == $source and .Destination == "/etc/proxy-hysteria")' \
+		<<<"${before#*|true|}" >/dev/null || return 1
+
+	# Read cumulative counters. Clearing them before the snapshot is committed can lose traffic.
+	stats=$(hysteria_traffic_request "$address" "$secret" traffic) || return 1
+	after=$(timeout 5s $SUDO docker inspect --type container -f "$identity" hysteria 2>/dev/null) || return 1
+	[[ "$after" == "$before" ]] || return 1
+
+	usernames=$(sed -nE '
+		s#^hysteria2://(user[0-9]+):[[:xdigit:]]+@.*#\1#p
+		s#^hysteria2://[[:xdigit:]]+@.*#user#p
+	' hysteria/hysteria_links.txt 2>/dev/null) || usernames=""
+	[[ ! -e "$database" ]] || previous=$database
+	staged=$(mktemp hysteria/.traffic.XXXXXX) || return 1
+	trap 'rm -f -- "$staged"' EXIT
+	jq -es --arg generation "$generation" --arg usernames "$usernames" --slurpfile stored "$previous" '
+		def zero: {tx: 0, rx: 0, upload: 0, download: 0};
+		def counter: type == "number" and . >= 0 and . <= 9007199254740991 and . == floor;
+		def delta($last): if . >= $last then . - $last else . end;
+		if length != 1 then error("expected one traffic snapshot") else .[0] end |
+		if type != "object" or any(.[]; (.tx | counter | not) or (.rx | counter | not))
+		then error("invalid Hysteria Traffic Stats API response") else . end |
+		. as $sample |
+		($stored[0] // {generation: "", users: {}}) |
+		if .generation != $generation then
+			.generation = $generation | .users[] |= (.tx = 0 | .rx = 0)
+		else . end |
+		reduce ($usernames | split("\n")[] | select(length > 0)) as $user
+			(. ; .users[$user] //= zero) |
+		reduce ($sample | to_entries[]) as $entry
+			(. ; .users[$entry.key] |= ((. // zero) | . as $prior |
+				.upload += ($entry.value.tx | delta($prior.tx)) |
+				.download += ($entry.value.rx | delta($prior.rx)) |
+				.tx = $entry.value.tx | .rx = $entry.value.rx))
+	' <<<"$stats" >"$staged" || return 1
+	mv -f -- "$staged" "$database"
+)
+
+checkpoint_hysteria_traffic() {
+	[[ -f hysteria/config/hysteria.yaml ]] || return 0
+	if [[ -f hysteria/config/user_limits.db ]]; then
+		local quota_data_dir=hysteria/config
+		with_proxy_quota_lock checkpoint_xray_quota_usage
+		return
+	fi
+	local address secret
+	read -r address secret < <(read_hysteria_traffic_endpoint) || return 0
+	if ! sample_hysteria_traffic "$address" "$secret"; then
+		echo "Could not refresh Hysteria 2 traffic. Showing the last saved sample if available." >&2
+	fi
+}
+
+collect_hysteria_quota_stats() {
+	local map_file=$1 address secret now
+	: >"$map_file" || return 1
+	if ! read -r address secret < <(read_hysteria_traffic_endpoint) ||
+		! sample_hysteria_traffic "$address" "$secret"; then
+		echo '|||Could not read the Hysteria 2 Traffic Stats API.'
+		return 0
+	fi
+	jq -er '
+		.users | to_entries | map(select(.key | test("^[a-z0-9_-]+$")) |
+			[.key, "total", ((.value.upload + .value.download) | tostring)] | join("|")) | join("\n")
+	' hysteria/traffic-usage.json >"$map_file" || return 1
+	now=$(date +%s) || return 1
+	printf 'hysteria-total|%s|%s|\n' "$now" "$now"
+}
+
+disconnect_suspended_hysteria_users() {
+	local suspended address secret online container_id
+	suspended=$(get_quota_db_records | awk -F'|' '$9 == "suspended" { print $1 }' | jq -Rn '[inputs]') || return 1
+	[[ "$suspended" != '[]' ]] || return 0
+	read -r address secret < <(read_hysteria_traffic_endpoint) || return 1
+	online=$(hysteria_traffic_request "$address" "$secret" online) || return 1
+	jq -e 'type == "object"' <<<"$online" >/dev/null || return 1
+	if ! jq -e --argjson suspended "$suspended" '. as $online | any($suspended[]; ($online[.] // 0) > 0)' \
+		<<<"$online" >/dev/null; then
+		return 0
+	fi
+
+	# Hysteria's /kick marks only the next session that logs traffic. Restart
+	# once to retire every existing session after saving the denied accounts.
+	container_id=$(scheduled_hysteria_container) || return 1
+	if ! { $SUDO docker restart "$container_id" >/dev/null && wait_for_hysteria; }; then
+		echo "Could not disconnect suspended Hysteria 2 sessions. The next quota check will retry." >&2
+		return 1
+	fi
+}
+
+read_legacy_hysteria_users() {
+	awk '
+		/^auth:[[:space:]]*$/ { section = 1; seen++; next }
+		/^[^[:space:]#]/ { section = 0 }
+		!section || /^[[:space:]]*(#|$)/ { next }
+		/^  type: (password|userpass)$/ { type = $2; next }
+		/^  userpass:$/ && type == "userpass" { next }
+		/^  password: "[a-f0-9]+"$/ && type == "password" {
+			gsub(/"/, "", $2)
+			if (length($2) != 64) invalid = 1
+			print "user|" $2 "|0"
+			users++
+			next
+		}
+		/^    [a-z0-9_-]+: "[a-f0-9]+"$/ && type == "userpass" {
+			sub(/:$/, "", $1)
+			gsub(/"/, "", $2)
+			if (length($2) != 64 || names[$1]++) invalid = 1
+			print $1 "|" $2 "|0"
+			users++
+			next
+		}
+		{ invalid = 1 }
+		END { exit (invalid || seen != 1 || users == 0 || (type == "password" && users != 1)) }
+	' "$1"
+}
+
+enable_existing_hysteria_quotas() {
+	if [[ ! -f hysteria/config/hysteria.yaml ]]; then
+		echo "Install or restore Hysteria 2 first." >&2
+		return 1
+	fi
+	if [[ -f hysteria/config/user_limits.db ]]; then
+		echo "Hysteria 2 quotas are already enabled."
+		return 0
+	fi
+	local answer
+	read -r -p "Enable quotas and restart Hysteria 2 if it is running? [y/N]: " answer || return 1
+	[[ "$answer" == [yY] ]] || return 0
+	with_hysteria_quota_lock migrate_hysteria_quotas
+}
+
+migrate_hysteria_quotas() (
+	umask 077
+	local directory=hysteria/config staging container_id running=false port=$HYSTERIA_STATS_PORT secret file
+	local -a installed=()
+	[[ ! -e "$directory/user_limits.db" && ! -e "$directory/auth-users" && ! -e "$directory/quota-auth.sh" ]] || return 1
+	staging=$(mktemp -d "$PWD/hysteria/.quota-enable.XXXXXX") || return 1
+	trap '[[ -z "$staging" ]] || rm -rf -- "$staging"' EXIT
+	if ! read_legacy_hysteria_users "$directory/hysteria.yaml" >"$staging/auth-users"; then
+		echo "This Hysteria 2 authentication configuration needs manual migration." >&2
+		return 1
+	fi
+
+	container_id=$($SUDO docker ps -aq --filter 'name=^/hysteria$') || return 1
+	if [[ -n "$container_id" ]]; then
+		container_id=$(scheduled_hysteria_container) || return 1
+		running=$($SUDO docker inspect -f '{{.State.Running}}' "$container_id") || return 1
+	fi
+	if grep -q '^trafficStats:' "$directory/hysteria.yaml"; then
+		local address token
+		if ! read -r address token < <(read_hysteria_traffic_endpoint); then
+			echo "The existing Hysteria 2 Traffic Stats API must use loopback and a 64-digit hexadecimal secret." >&2
+			return 1
+		fi
+		if [[ "$running" == true ]] && ! sample_hysteria_traffic "$address" "$token"; then
+			echo "Could not save the existing Hysteria 2 counters before migration." >&2
+			return 1
+		fi
+	fi
+	initialize_hysteria_quota_files "$staging" hysteria/traffic-usage.json || return 1
+	cp -p "$directory/hysteria.yaml" "$staging/previous.yaml" || return 1
+	awk '
+		/^auth:[[:space:]]*$/ {
+			print "auth:"
+			print "  type: command"
+			print "  command: /etc/proxy-hysteria/quota-auth.sh"
+			section = 1
+			next
+		}
+		/^[^[:space:]#]/ { section = 0 }
+		!section { print }
+	' "$staging/previous.yaml" >"$staging/next.yaml" || return 1
+	if ! grep -q '^trafficStats:' "$staging/next.yaml"; then
+		if command -v ss >/dev/null; then
+			while [[ -n "$(ss -H -ltn "sport = :$port")" ]]; do
+				((port < 65535)) || return 1
+				port=$((port + 1))
+			done
+		fi
+		secret=$(openssl rand -hex 32) || return 1
+		printf 'trafficStats:\n  listen: "127.0.0.1:%s"\n  secret: "%s"\n' "$port" "$secret" >>"$staging/next.yaml" || return 1
+	fi
+	for file in auth-users user_limits.conf user_limits.db quota-auth.sh; do
+		if ! mv -- "$staging/$file" "$directory/$file"; then
+			rm -f -- "${installed[@]}"
+			return 1
+		fi
+		installed+=("$directory/$file")
+	done
+	if ! mv -f -- "$staging/next.yaml" "$directory/hysteria.yaml"; then
+		rm -f -- "${installed[@]}"
+		return 1
+	fi
+	if [[ "$running" == true ]] &&
+		! { $SUDO docker restart "$container_id" >/dev/null && wait_for_hysteria; }; then
+		if mv -f -- "$staging/previous.yaml" "$directory/hysteria.yaml"; then
+			rm -f -- "${installed[@]}"
+			$SUDO docker restart "$container_id" >/dev/null || true
+			echo "Hysteria 2 quota migration failed. Restored the previous configuration." >&2
+		else
+			echo "Could not restore the previous Hysteria 2 configuration. Backup is in $staging." >&2
+			staging=""
+		fi
+		return 1
+	fi
+	echo "Hysteria 2 quotas enabled. Existing client links still work."
+)
+
+show_proxy_quota_status() {
+	local quota_data_dir=xray
+	if [[ -f xray/user_limits.db ]]; then
+		echo "Xray quotas"
+		show_xray_quota_status || true
+	fi
+	if [[ -f hysteria/config/hysteria.yaml ]]; then
+		echo "Hysteria 2 traffic by username (cumulative)"
+		if [[ -z "$(hysteria_traffic_api_settings)" ]]; then
+			echo "Traffic Stats API is not configured for this deployment."
+			return 0
+		fi
+		if [[ -f hysteria/config/user_limits.db ]]; then
+			quota_data_dir=hysteria/config
+			with_proxy_quota_lock refresh_xray_quota_accounting || true
+			show_xray_quota_status || true
+		else
+			checkpoint_hysteria_traffic
+		fi
+		if [[ -f hysteria/traffic-usage.json ]]; then
+			jq -r '
+				.users | to_entries | sort_by(.key)[] |
+				"- \(.key | tojson) | upload=\(.value.upload) bytes | download=\(.value.download) bytes | total=\(.value.upload + .value.download) bytes"
+			' hysteria/traffic-usage.json
+		else
+			echo "No Hysteria 2 traffic sample has been saved."
+		fi
+	elif [[ ! -f xray/user_limits.db ]]; then
+		echo "No proxy usage or quota data found."
+	fi
+}
+
 checkpoint_xray_quota_usage() {
-	[[ -f "xray/user_limits.db" && -f "xray/user_limits.conf" ]] || return 0
+	[[ -f "${quota_data_dir:-xray}/user_limits.db" && -f "${quota_data_dir:-xray}/user_limits.conf" ]] || return 0
 	if ! refresh_xray_quota_accounting strict; then
 		echo -e "${YELLOW}Continuing without a fresh quota checkpoint.${NC}" >&2
 	fi
@@ -3205,18 +4000,21 @@ checkpoint_xray_quota_usage() {
 
 check_and_apply_xray_quotas() {
 	if [[ "${XRAY_QUOTA_SCHEDULED:-0}" -eq 1 ]]; then
-		if [[ "$EUID" -eq 0 ]] && ! trusted_root_quota_deployment "$PWD"; then
+		if [[ "${quota_data_dir:-xray}" == hysteria/config ]]; then
+			if [[ "$EUID" -eq 0 ]]; then trusted_root_hysteria_quota_deployment "$PWD" || return 1; fi
+			scheduled_hysteria_container >/dev/null || return 1
+		elif [[ "$EUID" -eq 0 ]] && ! trusted_root_quota_deployment "$PWD"; then
 			echo 'Root quota checks stopped because deployment ownership or permissions changed.' >&2
 			return 1
 		fi
-		scheduled_xray_container >/dev/null || return 1
+		[[ "${quota_data_dir:-xray}" == hysteria/config ]] || scheduled_xray_container >/dev/null || return 1
 	fi
-	with_xray_quota_lock _check_and_apply_xray_quotas_internal "$@"
+	with_proxy_quota_lock _check_and_apply_xray_quotas_internal "$@"
 }
 
 _check_and_apply_xray_quotas_internal() {
-	if [[ ! -f "xray/user_limits.db" || ! -f "xray/user_limits.conf" ]]; then
-		echo -e "${RED}Quota files not found. Install Xray with quotas first.${NC}"
+	if [[ ! -f "${quota_data_dir:-xray}/user_limits.db" || ! -f "${quota_data_dir:-xray}/user_limits.conf" ]]; then
+		echo -e "${RED}Quota files not found for the selected proxy.${NC}"
 		return 1
 	fi
 
@@ -3265,6 +4063,9 @@ _check_and_apply_xray_quotas_internal() {
 	if [[ "$config_changed" -eq 1 || "$new_metadata" != "$metadata" ]]; then
 		finalize_quota_db_update "$db_lines" "$config_changed" "$new_metadata" || return 1
 	fi
+	if [[ "${quota_data_dir:-xray}" == hysteria/config && "$config_changed" -eq 0 ]]; then
+		disconnect_suspended_hysteria_users || return 1
+	fi
 	if [[ ${#notices[@]} -gt 0 ]]; then
 		printf '%s\n' "${notices[@]}"
 	fi
@@ -3273,8 +4074,26 @@ _check_and_apply_xray_quotas_internal() {
 	fi
 }
 
+check_and_apply_proxy_quotas() {
+	local quota_data_dir=xray status=0 found=0
+	if [[ -f xray/user_limits.db ]]; then
+		found=1
+		check_and_apply_xray_quotas "$@" || status=1
+	fi
+	if [[ -f hysteria/config/user_limits.db ]]; then
+		found=1
+		quota_data_dir=hysteria/config
+		check_and_apply_xray_quotas "$@" || status=1
+	fi
+	if [[ "$found" -eq 0 ]]; then
+		echo "No Xray or Hysteria 2 quotas are configured." >&2
+		return 1
+	fi
+	return "$status"
+}
+
 show_xray_quota_status() {
-	local db_file="xray/user_limits.db"
+	local db_file="${quota_data_dir:-xray}/user_limits.db"
 
 	if [[ ! -f "$db_file" ]]; then
 		echo -e "${RED}Quota database not found.${NC}"
@@ -3326,7 +4145,7 @@ show_xray_quota_status() {
 }
 
 select_quota_user() {
-	local db_file="xray/user_limits.db"
+	local db_file="${quota_data_dir:-xray}/user_limits.db"
 	if [[ ! -f "$db_file" ]]; then
 		echo -e "${RED}Quota database not found.${NC}" >&2
 		return 1
@@ -3374,7 +4193,7 @@ reset_xray_user_usage() {
 		target_email=$(select_quota_user) || return 0
 	fi
 
-	with_xray_quota_lock _reset_xray_user_usage "$target_email"
+	with_proxy_quota_lock _reset_xray_user_usage "$target_email"
 }
 
 prompt_xray_quota_resume() {
@@ -3398,7 +4217,7 @@ prompt_xray_quota_resume() {
 
 _reset_xray_user_usage() {
 	local target_email=$1
-	[[ -f "xray/user_limits.db" ]] || return 1
+	[[ -f "${quota_data_dir:-xray}/user_limits.db" ]] || return 1
 
 	local resume_requested
 	prompt_xray_quota_resume "$target_email" resume_requested 0 "User is suspended. Re-enable now? [Y/n]: " || return 1
@@ -3447,12 +4266,12 @@ change_xray_user_limit() {
 		return 1
 	fi
 
-	with_xray_quota_lock _change_xray_user_limit "$target_email" "$new_limit_gb"
+	with_proxy_quota_lock _change_xray_user_limit "$target_email" "$new_limit_gb"
 }
 
 _change_xray_user_limit() {
 	local target_email=$1 new_limit_gb=$2
-	[[ -f "xray/user_limits.db" ]] || return 1
+	[[ -f "${quota_data_dir:-xray}/user_limits.db" ]] || return 1
 	local resume_requested
 	prompt_xray_quota_resume "$target_email" resume_requested "$new_limit_gb" "New limit allows usage. Re-enable now? [Y/n]: " || return 1
 	checkpoint_xray_quota_usage
@@ -3523,12 +4342,12 @@ change_xray_user_billing_cycle() {
 	fi
 
 	read -p "Do you also want to wipe their current traffic usage back to 0 GB? [y/N]: " reset_usage || return 1
-	with_xray_quota_lock _change_xray_user_billing_cycle "$target_email" "$clean_day" "$reset_usage"
+	with_proxy_quota_lock _change_xray_user_billing_cycle "$target_email" "$clean_day" "$reset_usage"
 }
 
 _change_xray_user_billing_cycle() {
 	local target_email=$1 clean_day=$2 reset_usage=$3
-	[[ -f "xray/user_limits.db" ]] || return 1
+	[[ -f "${quota_data_dir:-xray}/user_limits.db" ]] || return 1
 
 	local resume_requested=0
 	if [[ "$reset_usage" == [yY] ]]; then
@@ -3586,11 +4405,35 @@ _change_xray_user_billing_cycle() {
 	echo -e "${GREEN}Billing cycle updated.${NC}"
 }
 
+run_proxy_quota_action() {
+	local quota_data_dir action=$1 choice
+	if [[ -f xray/user_limits.db && -f hysteria/config/user_limits.db ]]; then
+		echo "1) Xray"
+		echo "2) Hysteria 2"
+		echo "0) Back"
+		read -r -p "Choose a proxy [0-2]: " choice || return 1
+		case "$choice" in
+		1) quota_data_dir=xray ;;
+		2) quota_data_dir=hysteria/config ;;
+		0) return 0 ;;
+		*) echo "Invalid choice." >&2; return 1 ;;
+		esac
+	elif [[ -f hysteria/config/user_limits.db ]]; then
+		quota_data_dir=hysteria/config
+	elif [[ -f xray/user_limits.db ]]; then
+		quota_data_dir=xray
+	else
+		echo "No Xray or Hysteria 2 quotas are configured." >&2
+		return 1
+	fi
+	"$action"
+}
+
 manage_xray_quotas() {
 	local quota_choice
 	while true; do
 		echo ""
-		echo -e "${YELLOW}--- Xray Per-User Quota Management ---${NC}"
+		echo -e "${YELLOW}--- Proxy Usage and Quotas ---${NC}"
 		echo "1) Show quota status"
 		echo "2) Check/apply quotas now"
 		echo "3) Reset one user's current cycle usage"
@@ -3599,24 +4442,25 @@ manage_xray_quotas() {
 		echo "6) Configure automatic quota checks (systemd daemon / cron)"
 		echo "7) Show automatic quota check configuration status"
 		echo "8) Change quota billing timezone"
+		echo "9) Enable quotas on an existing Hysteria 2 deployment"
 		echo "0) Back"
-		read -p "Enter your choice [0-8]: " quota_choice || return 0
+		read -r -p "Enter your choice [0-9]: " quota_choice || return 0
 
 		case $quota_choice in
 		1)
-			show_xray_quota_status || true
+			show_proxy_quota_status || true
 			;;
 		2)
-			check_and_apply_xray_quotas || true
+			check_and_apply_proxy_quotas || true
 			;;
 		3)
-			reset_xray_user_usage || true
+			run_proxy_quota_action reset_xray_user_usage || true
 			;;
 		4)
-			change_xray_user_limit || true
+			run_proxy_quota_action change_xray_user_limit || true
 			;;
 		5)
-			change_xray_user_billing_cycle || true
+			run_proxy_quota_action change_xray_user_billing_cycle || true
 			;;
 		6)
 			configure_xray_quota_auto_check || true
@@ -3625,7 +4469,10 @@ manage_xray_quotas() {
 			show_xray_quota_auto_check_status || true
 			;;
 		8)
-			change_xray_quota_timezone || true
+			run_proxy_quota_action change_xray_quota_timezone || true
+			;;
+		9)
+			enable_existing_hysteria_quotas || true
 			;;
 		0)
 			break
@@ -3700,18 +4547,37 @@ scheduled_xray_container() {
 	printf '%s\n' "$container_id"
 }
 
+trusted_root_hysteria_quota_deployment() {
+	local deployment=$1 item directory="$1/hysteria"
+	trusted_root_quota_directory "$directory/config" || return 1
+	for item in hysteria.yaml quota-auth.sh auth-users user_limits.db user_limits.conf; do
+		[[ -f "$directory/config/$item" ]] && root_owned_quota_path "$directory/config/$item" || return 1
+	done
+	for item in hysteria_links.txt traffic-usage.json; do
+		if [[ -e "$directory/$item" || -L "$directory/$item" ]]; then
+			[[ -f "$directory/$item" ]] && root_owned_quota_path "$directory/$item" || return 1
+		fi
+	done
+}
+
+scheduled_hysteria_container() {
+	local inspected container_id source
+	inspected=$(timeout 10s $SUDO docker inspect --type container -f \
+		'{{.Id}}{{printf "\n"}}{{range .Mounts}}{{if and (eq .Type "bind") (eq .Destination "/etc/proxy-hysteria")}}{{println .Source}}{{end}}{{end}}' \
+		hysteria) || return 1
+	container_id=${inspected%%$'\n'*}
+	source=${inspected#*$'\n'}
+	if ! [[ "$container_id" =~ ^[0-9a-f]{64}$ && "$source" == "$PWD/hysteria/config" ]]; then
+		echo "The Hysteria 2 container is not bound to this deployment." >&2
+		return 1
+	fi
+	printf '%s\n' "$container_id"
+}
+
 prepare_scheduled_quota_check() {
 	SUDO=""
 	XRAY_QUOTA_SCHEDULED=1
 	cd -P -- "$1" || return 1
-	if [[ "$EUID" -eq 0 ]] && ! trusted_root_quota_deployment "$PWD"; then
-		echo 'Root quota jobs require a root-owned deployment with no group or world write access.' >&2
-		return 1
-	fi
-	if ! [[ -w xray && -r xray/server.jsonc && -r xray/user_limits.db && -r xray/user_limits.conf ]]; then
-		echo "The scheduler account needs access to the Xray configuration and quota files in $PWD/xray." >&2
-		return 1
-	fi
 	if ! command -v docker >/dev/null || ! command -v jq >/dev/null; then
 		echo 'Scheduled quota checks require Docker and jq.' >&2
 		return 1
@@ -3723,7 +4589,19 @@ prepare_scheduled_quota_check() {
 		export XDG_RUNTIME_DIR="/run/user/$EUID"
 		export DOCKER_HOST="unix:///run/user/$EUID/docker.sock"
 	fi
-	scheduled_xray_container >/dev/null
+	if [[ -w xray && -r xray/server.jsonc && -r xray/user_limits.db && -r xray/user_limits.conf ]] &&
+		{ [[ "$EUID" -ne 0 ]] || trusted_root_quota_deployment "$PWD"; } &&
+		scheduled_xray_container >/dev/null 2>&1; then
+		return 0
+	fi
+	if [[ -w hysteria && -w hysteria/config && -r hysteria/config/hysteria.yaml &&
+		-r hysteria/config/user_limits.db && -r hysteria/config/user_limits.conf ]] &&
+		{ [[ "$EUID" -ne 0 ]] || trusted_root_hysteria_quota_deployment "$PWD"; } &&
+		scheduled_hysteria_container >/dev/null 2>&1; then
+		return 0
+	fi
+	echo "The scheduler needs access to a managed Xray or Hysteria 2 deployment and its Docker container." >&2
+	return 1
 }
 
 read_quota_cron_state() {
@@ -3740,13 +4618,17 @@ read_quota_cron_state() {
 
 quota_scheduler_account() {
 	local deployment=$1 uid
-	if trusted_root_quota_deployment "$deployment"; then
+	if trusted_root_quota_deployment "$deployment" || trusted_root_hysteria_quota_deployment "$deployment"; then
 		echo root
 		return
 	fi
 	uid=$(stat -c %u -- "$deployment") || return 1
 	if [[ "$uid" == 0 ]]; then
-		uid=$(stat -c %u -- "$deployment/xray") || return 1
+		if [[ -f "$deployment/xray/user_limits.db" ]]; then
+			uid=$(stat -c %u -- "$deployment/xray") || return 1
+		else
+			uid=$(stat -c %u -- "$deployment/hysteria") || return 1
+		fi
 	fi
 	if [[ "$uid" == 0 ]]; then
 		echo 'This deployment needs an admin-controlled path for a root job, or a non-root deployment owner with Docker access.' >&2
@@ -3763,7 +4645,7 @@ render_quota_service() {
 	cat <<EOL
 $XRAY_QUOTA_SCHEDULER_MARKER
 [Unit]
-Description=Xray per-user quota check daemon
+Description=Proxy per-user quota check daemon
 After=network-online.target docker.service
 Wants=network-online.target
 
@@ -4043,6 +4925,13 @@ ensure_crontab_available() {
 
 quota_daemon_sleep_seconds() {
 	local interval=$1 now_epoch=$2
+	local -a databases=()
+	[[ ! -f xray/user_limits.db ]] || databases+=(xray/user_limits.db)
+	[[ ! -f hysteria/config/user_limits.db ]] || databases+=(hysteria/config/user_limits.db)
+	if [[ ${#databases[@]} -eq 0 ]]; then
+		printf '%s\n' "$interval"
+		return
+	fi
 	awk -F'|' -v now="$now_epoch" -v interval="$interval" '
         !/^[[:space:]]*#/ && NF == 9 && $6 ~ /^[0-9]+$/ && $6 > now {
             if (!next_cutoff || $6 < next_cutoff) next_cutoff = $6
@@ -4051,7 +4940,7 @@ quota_daemon_sleep_seconds() {
             if (next_cutoff && next_cutoff - now < interval) printf "%.0f\n", next_cutoff - now
             else print interval
         }
-	' xray/user_limits.db
+	' "${databases[@]}"
 }
 
 run_xray_quota_daemon() {
@@ -4068,7 +4957,7 @@ run_xray_quota_daemon() {
 	local running=1
 	trap 'running=0; exit 0' SIGTERM SIGINT
 
-	echo "Xray quota daemon started (check interval: ${interval}s)."
+	echo "Proxy quota daemon started (check interval: ${interval}s)."
 
 	while [[ "$running" -eq 1 ]]; do
 		# Self-detection: reload if the script file on disk has been updated
@@ -4083,12 +4972,10 @@ run_xray_quota_daemon() {
 			exec /bin/bash "$script_path" --quota-daemon "$interval" "$PWD"
 		fi
 
-		check_and_apply_xray_quotas quiet || true
+		check_and_apply_proxy_quotas quiet || true
 
 		local sleep_seconds=$interval
-		if [[ -f "xray/user_limits.db" ]]; then
-			sleep_seconds=$(quota_daemon_sleep_seconds "$interval" "$(date +%s)") || sleep_seconds=$interval
-		fi
+		sleep_seconds=$(quota_daemon_sleep_seconds "$interval" "$(date +%s)") || sleep_seconds=$interval
 		sleep "$sleep_seconds" &
 		wait $! 2>/dev/null || true
 	done
@@ -4108,12 +4995,12 @@ change_xray_quota_timezone() {
 		return 0
 	fi
 
-	with_xray_quota_lock _change_xray_quota_timezone "$new_tz"
+	with_proxy_quota_lock _change_xray_quota_timezone "$new_tz"
 }
 
 _change_xray_quota_timezone() {
 	local new_tz=$1
-	local conf_file="xray/user_limits.conf"
+	local conf_file="${quota_data_dir:-xray}/user_limits.conf"
 	checkpoint_xray_quota_usage
 	local db_records db_lines="" now_epoch cycle_bounds
 	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
@@ -4132,7 +5019,7 @@ _change_xray_quota_timezone() {
 	done <<<"$db_records"
 
 	local tmp_conf conf_backup=""
-	make_temp_file tmp_conf "$PWD/xray/.user_limits.conf.XXXXXX" || return 1
+	make_temp_file tmp_conf "$PWD/${quota_data_dir:-xray}/.user_limits.conf.XXXXXX" || return 1
 	if [[ -f "$conf_file" ]]; then
 		make_temp_file conf_backup || return 1
 		cp -p "$conf_file" "$conf_backup" || return 1
@@ -4506,7 +5393,9 @@ show_xray_quota_auto_check_status() {
 	local service='unknown|0' timer='unknown|0' schedules="" count=0 interval
 	local cron_scope="" cron_account="" cron_deployment="" user personal daemon="stopped"
 	local -A accounts=()
-	echo 'Automatic Xray quota check status'
+	echo 'Automatic proxy quota check status'
+	[[ ! -f xray/user_limits.db ]] || echo '  Xray quotas configured in this deployment'
+	[[ ! -f hysteria/config/user_limits.db ]] || echo '  Hysteria 2 quotas configured in this deployment'
 	if systemd_available; then
 		service=$(quota_systemd_unit_state xray-quota-check.service) || return 1
 		timer=$(quota_systemd_unit_state xray-quota-check.timer) || return 1
@@ -4921,6 +5810,10 @@ show_ss_links() {
 	show_saved_links "shadowsocks/ss_links.txt" "ss_links.txt" "SS"
 }
 
+show_hysteria_links() {
+	show_saved_links "hysteria/hysteria_links.txt" "" "Hysteria 2"
+}
+
 # --- Self-update subsystem ---
 
 fetch_latest_script_version() {
@@ -5074,24 +5967,22 @@ update_script() {
 # --- Entrypoint ---
 
 run_main_menu() {
-	local choice ver_choice update_choice delete_choice
+	local choice install_choice ver_choice update_choice links_choice delete_choice
 	while true; do
 		echo -e "${YELLOW}--- Proxy Installer v${SCRIPT_VERSION} ---${NC}"
 		echo "Please choose an option:"
 		echo "0) Update this script"
 		echo "1) Environment Check (Check distro and install Docker)"
-		echo "2) Install Xray (VLESS-XHTTP-Reality)"
-		echo "3) Install Shadowsocks (ssserver-rust)"
-		echo "4) Update / Change version of existing container (Xray / Shadowsocks)"
-		echo "5) Change Xray Reality target domain"
-		echo "6) Restore deployment from existing config"
-		echo "7) Show VLESS links for current config"
-		echo "8) Show SS links for current config"
-		echo "9) Delete container and config (Xray / Shadowsocks)"
-		echo "10) Manage Xray per-user data quotas"
-		echo "11) Manage users (Add/Remove for Xray / Shadowsocks)"
-		echo "12) Exit"
-		read -p "Enter your choice [0-12]: " choice || return 0
+		echo "2) Install Proxy Server"
+		echo "3) Update / Change version of existing container"
+		echo "4) Change Xray Reality target domain"
+		echo "5) Restore deployment from existing config"
+		echo "6) Show proxy links"
+		echo "7) Show proxy usage / Manage quotas"
+		echo "8) Manage users (Add/Remove for Xray / Shadowsocks)"
+		echo "9) Delete container and config"
+		echo "10) Exit"
+		read -r -p "Enter your choice [0-10]: " choice || return 0
 
 		case $choice in
 		0)
@@ -5101,21 +5992,22 @@ run_main_menu() {
 			check_environment || true
 			;;
 		2)
-			if ! ensure_docker_compose; then
-				continue
-			fi
-			install_xray || true
+			echo ""
+			echo "Install Proxy Server"
+			echo "1) Xray (VLESS-XHTTP-Reality)"
+			echo "2) Hysteria 2"
+			echo "3) Shadowsocks (ssserver-rust)"
+			echo "0) Back"
+			read -r -p "Enter your choice [0-3]: " install_choice || return 0
+			case $install_choice in
+			1) ensure_docker_compose && install_xray || true ;;
+			2) ensure_docker_compose && install_hysteria || true ;;
+			3) ensure_docker_compose && install_shadowsocks || true ;;
+			0) ;;
+			*) echo -e "${RED}Invalid choice.${NC}" ;;
+			esac
 			;;
 		3)
-			if ! ensure_docker_compose; then
-				continue
-			fi
-			install_shadowsocks || true
-			;;
-		5)
-			change_xray_reality_target || true
-			;;
-		4)
 			if ! ensure_docker_compose; then
 				continue
 			fi
@@ -5124,25 +6016,31 @@ run_main_menu() {
 			echo "1) Update existing containers to latest"
 			echo "2) Downgrade / Change container version"
 			echo "0) Back"
-			read -p "Enter your choice [0-2]: " ver_choice || return 1
+			read -r -p "Enter your choice [0-2]: " ver_choice || return 0
 			case $ver_choice in
 			1)
 				echo "Which container do you want to update?"
 				echo "1) Xray"
-				echo "2) Shadowsocks"
-				echo "3) Both"
-				read -p "Enter your choice [1-3]: " update_choice || return 1
+				echo "2) Hysteria 2"
+				echo "3) Shadowsocks"
+				echo "4) Xray and Shadowsocks"
+				echo "0) Back"
+				read -r -p "Enter your choice [0-4]: " update_choice || return 0
 				case $update_choice in
 				1)
 					update_xray || true
 					;;
 				2)
-					update_shadowsocks || true
+					update_hysteria || true
 					;;
 				3)
+					update_shadowsocks || true
+					;;
+				4)
 					update_xray || true
 					update_shadowsocks || true
 					;;
+				0) ;;
 				*)
 					echo -e "${RED}Invalid choice.${NC}"
 					;;
@@ -5158,17 +6056,42 @@ run_main_menu() {
 				;;
 			esac
 			;;
-		6)
+		4)
+			change_xray_reality_target || true
+			;;
+		5)
 			if ! ensure_docker_compose; then
 				continue
 			fi
 			restore_deployment || true
 			;;
+		6)
+			echo ""
+			echo "Show proxy links"
+			echo "1) Xray (VLESS)"
+			echo "2) Hysteria 2"
+			echo "3) Shadowsocks"
+			echo "0) Back"
+			read -r -p "Enter your choice [0-3]: " links_choice || return 0
+			case $links_choice in
+			1) show_links || true ;;
+			2) show_hysteria_links || true ;;
+			3) show_ss_links || true ;;
+			0) ;;
+			*) echo -e "${RED}Invalid choice.${NC}" ;;
+			esac
+			;;
 		7)
-			show_links || true
+			if ! ensure_docker_compose; then
+				continue
+			fi
+			manage_xray_quotas || true
 			;;
 		8)
-			show_ss_links || true
+			if ! ensure_docker_compose; then
+				continue
+			fi
+			manage_proxy_users || true
 			;;
 		9)
 			if ! ensure_docker_compose; then
@@ -5177,8 +6100,9 @@ run_main_menu() {
 			echo "Which container do you want to delete?"
 			echo "1) Xray"
 			echo "2) Shadowsocks"
-			echo "3) Both"
-			read -p "Enter your choice [1-3]: " delete_choice || return 1
+			echo "3) Xray and Shadowsocks"
+			echo "4) Hysteria 2"
+			read -r -p "Enter your choice [1-4]: " delete_choice || return 1
 			case $delete_choice in
 			1)
 				delete_xray || true
@@ -5190,24 +6114,15 @@ run_main_menu() {
 				delete_xray || true
 				delete_shadowsocks || true
 				;;
+			4)
+				delete_hysteria || true
+				;;
 			*)
 				echo -e "${RED}Invalid choice.${NC}"
 				;;
 			esac
 			;;
 		10)
-			if ! ensure_docker_compose; then
-				continue
-			fi
-			manage_xray_quotas || true
-			;;
-		11)
-			if ! ensure_docker_compose; then
-				continue
-			fi
-			manage_proxy_users || true
-			;;
-		12)
 			echo -e "${GREEN}Goodbye!${NC}"
 			exit 0
 			;;
@@ -5236,7 +6151,7 @@ main() {
 		read_quota_cron_state || return 1
 		[[ "$(id -un)" == "$cron_account" ]] || return 1
 		prepare_scheduled_quota_check "$cron_deployment" || return 1
-		check_and_apply_xray_quotas quiet
+		check_and_apply_proxy_quotas quiet
 		return
 		;;
 	esac
@@ -5247,7 +6162,7 @@ main() {
 	--quota-check)
 		if [[ -n "${2:-}" && -d "$2" ]]; then
 			target_dir="$2"
-		elif [[ -d "xray" || -f "xray/user_limits.db" ]]; then
+		elif [[ -d xray || -d hysteria ]]; then
 			target_dir="$PWD"
 		fi
 		;;
@@ -5260,7 +6175,7 @@ main() {
 		elif [[ -n "${2:-}" && -d "$2" ]]; then
 			target_dir="$2"
 		fi
-		if [[ -z "$target_dir" && (-d "xray" || -f "xray/user_limits.db") ]]; then
+		if [[ -z "$target_dir" && (-d xray || -d hysteria) ]]; then
 			target_dir="$PWD"
 		fi
 		;;
@@ -5281,7 +6196,7 @@ main() {
 		if ! ensure_docker_compose; then
 			return 1
 		fi
-		check_and_apply_xray_quotas
+		check_and_apply_proxy_quotas
 		return
 		;;
 	--quota-daemon)

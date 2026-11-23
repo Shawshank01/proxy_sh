@@ -89,7 +89,8 @@ bootstrap_install_file() {
 }
 
 bootstrap_has_deployment() {
-	[[ -f "$1/xray/docker-compose.yml" || -f "$1/shadowsocks/docker-compose.yml" ]]
+	[[ -f "$1/xray/docker-compose.yml" || -f "$1/shadowsocks/docker-compose.yml" ||
+		-f "$1/hysteria/docker-compose.yml" ]]
 }
 
 bootstrap_check_offline() {
@@ -105,17 +106,17 @@ bootstrap_check_offline() {
 			return 1
 		fi
 	fi
-	if [[ "$service" == xray ]]; then
+	if [[ "$service" == xray || "$service" == hysteria ]]; then
 		if [[ -e /etc/systemd/system/xray-quota-check.service || -e /etc/systemd/system/xray-quota-check.timer ||
 			-e /etc/cron.d/xray-quota-check || -e /etc/proxy-sh/quota-cron.conf ]]; then
-			bootstrap_error 'Disable the previous Xray quota scheduler from the original installation before importing.'
+			bootstrap_error 'Disable the previous quota scheduler from the original installation before importing.'
 			return 1
 		fi
 		if command -v crontab >/dev/null; then
 			for account in root "${SUDO_USER:-root}" "$(stat -c %U -- "$migration_source")"; do
 				if table=$(LC_ALL=C crontab -u "$account" -l 2>&1); then
 					if [[ "$table" == *'# proxy-sh:xray-quota-check'* ]]; then
-						bootstrap_error "Disable the previous Xray quota job in $account's crontab before importing."
+						bootstrap_error "Disable the previous quota job in $account's crontab before importing."
 						return 1
 					fi
 				elif [[ "$table" != *'no crontab for '* ]]; then
@@ -129,13 +130,13 @@ bootstrap_check_offline() {
 
 bootstrap_stage_deployment() {
 	local migration_source=$1 destination=$2 staging=$3 service container config link unsupported
-	for service in xray shadowsocks; do
+	for service in xray shadowsocks hysteria; do
 		[[ -e "$migration_source/$service" || -L "$migration_source/$service" ]] || continue
-		if [[ "$service" == xray ]]; then
-			container=xray_server config=server.jsonc link=vless_links.txt
-		else
-			container=ssserver config=server.json link=ss_links.txt
-		fi
+		case $service in
+		xray) container=xray_server config=server.jsonc link=vless_links.txt ;;
+		shadowsocks) container=ssserver config=server.json link=ss_links.txt ;;
+		hysteria) container=hysteria config=config/hysteria.yaml link=hysteria_links.txt ;;
+		esac
 		if ! [[ -f "$migration_source/$service/docker-compose.yml" && -f "$migration_source/$service/$config" ]]; then
 			bootstrap_error "The original $service directory needs its Compose file and $config."
 			return 1
@@ -245,7 +246,7 @@ bootstrap_install_as_root() (
 		bootstrap_stage_deployment "$migration_source" "$application" "$staged" || return 1
 	elif command -v docker >/dev/null && ! bootstrap_has_deployment "$application" &&
 		existing_containers=$(timeout 10s env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
-			docker ps -a --filter 'name=^/(xray_server|ssserver)$' --format '{{.Names}}' 2>/dev/null) &&
+		docker ps -a --filter 'name=^/(xray_server|ssserver|hysteria)$' --format '{{.Names}}' 2>/dev/null) &&
 		[[ -n "$existing_containers" ]]; then
 		bootstrap_error 'Found an existing proxy container. Use the documented --migrate-from procedure to import its deployment.'
 		return 1
@@ -259,7 +260,7 @@ bootstrap_install_as_root() (
 	fi
 
 	if [[ -n "$staged" ]]; then
-		for service in xray shadowsocks; do
+		for service in xray shadowsocks hysteria; do
 			[[ -d "$staged/$service" ]] || continue
 			mv -nT -- "$staged/$service" "$application/$service" || return 1
 			if [[ -d "$staged/$service" ]]; then
@@ -267,7 +268,7 @@ bootstrap_install_as_root() (
 				return 1
 			fi
 		done
-		printf 'Imported the deployment. Choose 6 in proxy.sh to restore it, then configure quota checks if needed.\n'
+		printf 'Imported the deployment. Choose Restore deployment from existing config in proxy.sh, then configure quota checks if needed.\n'
 	else
 		printf 'Installed the proxy.sh command.\n'
 	fi

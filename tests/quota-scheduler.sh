@@ -162,9 +162,16 @@ configure_xray_quota_auto_check <<<$'2\n'
 read_quota_cron_state
 [[ "$cron_scope" == system && "$cron_account" == "$account" && "$cron_deployment" == "$deployment" ]]
 (
+	mkdir -p hysteria/config
+	touch xray/user_limits.db hysteria/config/user_limits.db
 	prepare_scheduled_quota_check() { [[ "$1" == "$deployment" ]]; }
-	check_and_apply_xray_quotas() { [[ "$1" == quiet ]]; }
-	main --quota-scheduled-cron
+	check_and_apply_xray_quotas() { [[ "$1" == quiet ]] && printf '%s\n' "$quota_data_dir"; }
+	[[ "$(main --quota-scheduled-cron)" == $'xray\nhysteria/config' ]]
+	rm xray/user_limits.db
+	[[ "$(main --quota-scheduled-cron)" == hysteria/config ]]
+	touch xray/user_limits.db
+	rm hysteria/config/user_limits.db
+	[[ "$(main --quota-scheduled-cron)" == xray ]]
 )
 grep -q '^\*/2 \* \* \* \* .*--quota-scheduled-cron' "$XRAY_QUOTA_CRON_FILE"
 if grep -Fq "$deployment" "$XRAY_QUOTA_CRON_FILE"; then fail 'Embedded the deployment path in the cron command'; fi

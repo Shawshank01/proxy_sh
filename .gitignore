@@ -3,5 +3,7 @@
 # Local deployment files include proxy credentials.
 /xray/
 /shadowsocks/
+/hysteria/
+/.hysteria.*/
 /vless_links.txt
 /ss_links.txt

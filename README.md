@@ -3,7 +3,7 @@
 [![License: GPL v2](https://img.shields.io/badge/License-GPL_v2-blue.svg)](LICENSE)
 
 **No need** to use your own domain name ;-)  
-This is an automated shell script that installs and manages Docker containers on GNU/Linux systems. It can be used to construct encrypted and obfuscated traffic proxy servers using Xray (VLESS-XHTTP-REALITY) and Shadowsocks (2022).
+This shell script installs and manages Docker containers for Xray (VLESS-XHTTP-REALITY), Shadowsocks (2022), and Hysteria 2 on GNU/Linux.
 > "These walls are funny. First you hate 'em, then you get used to 'em. Enough time passes, you get so you depend on 'em. That's institutionalized."
 
 ## Features
@@ -39,25 +39,19 @@ The installer verifies the release signature and checksum before requesting `sud
 
 - **0) Update this script**: Checks for a new version on GitHub and updates itself.
 - **1) Environment Check**: Verifies the Linux distribution and installs Docker and Docker Compose if needed. Run this first if you are on a new server.
-- **2) Install Xray (VLESS-XHTTP-Reality)**: The main installation process. It will:
-  - Ask for the number of users and generate a shared server `shortId`.
-  - Generate a random UUID and user ID for each user, then prompt for an optional monthly GB limit.
-  - Generate `docker-compose.yml`, `server.jsonc`, `user_limits.conf`, and `user_limits.db` in `xray/`.
-  - Ask for your server's IP/domain and a remarks name to generate VLESS links.
-  - Save the `vless://` links to `xray/vless_links.txt`.
-  - Start the Xray container.
-- **3) Install Shadowsocks (ssserver-rust)**: Sets up a multi-user Shadowsocks 2022 server. It will:
-  - Ask for the number of users and the listening port.
-  - Generate `docker-compose.yml` and `server.json` in a new `shadowsocks/` directory.
-  - Start the container and save `ss://` links to `shadowsocks/ss_links.txt`.
-- **4) Update / Change version of existing container (Xray / Shadowsocks)**: Pulls and starts the latest container image, or pins/upgrades/downgrades to a specific version tag using Docker Compose. Updating to latest releases any version lock. For Xray, the target image validates the configuration, including any staged `finalRules` or `minClientVer` changes, before deployment. If startup or the readiness check fails, the script restores both configuration files and the previous container image.
-- **5) Change Xray Reality target domain**: Re-runs the Reality target checks, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. On legacy configs, this also adds the loopback Tunnel. Failed restarts automatically roll back the previous configuration.
-- **6) Restore deployment from existing config**: Recreates and starts containers from existing config directories.
-- **7) Show VLESS links for current config**: Displays the contents of `xray/vless_links.txt`.
-- **8) Show SS links for current config**: Displays the contents of `shadowsocks/ss_links.txt`.
-- **9) Delete container and config (Xray or Shadowsocks)**: Stops the selected Docker container, and deletes the corresponding config directory and link files.
-- **10) Manage Xray per-user data quotas**:
-  - Show quota status
+- **2) Install Proxy Server**
+  1. **Xray (VLESS-XHTTP-Reality)**. Generates user UUIDs and IDs, a shared server `shortId`, and optional monthly quotas. Starts Xray and saves `vless://` links to `xray/vless_links.txt`.
+  2. **Hysteria 2**. Deploys `tobyxdd/hysteria` with Docker Compose. Choose how many users to create (default one). Each receives a username, a random password, and a separate client link saved in `hysteria/hysteria_links.txt`. ECH is optional and defaults to off. If enabled, enter a separate DNS name for the visible outer TLS handshake and import the generated link into a client that supports Hysteria 2 ECH. [Hysteria 2 ECH documentation](https://v2.hysteria.network/docs/advanced/ECH/)
+     By default, Hysteria 2 mimics HTTP/3. Choose Salamander or experimental Gecko to enable obfuscation. The script generates a separate obfuscation password and includes it in the saved link. Use a client that supports the selected mode. [Hysteria 2 obfuscation documentation](https://v2.hysteria.network/docs/advanced/Full-Server-Config/#obfuscation)
+     The installer asks for the server's upload and download limits in Mbps for Brutal and prints the corresponding client settings. The standard link carries connection settings. Set both bandwidth values in the client to use Brutal in both directions. The server upload limit caps client download, and the server download limit caps client upload. Use lower client values if its connection is slower. [Hysteria 2 bandwidth documentation](https://v2.hysteria.network/docs/advanced/Full-Client-Config/#bandwidth) and [link format](https://v2.hysteria.network/docs/developers/URI-Scheme/#implementation-notes)
+     Mainland China destination blocking defaults to on at the installer prompt. It rejects GeoSite `cn` domains and GeoIP `cn` IPs, and enables hostname sniffing on TCP 80/443 and UDP 443 for requests that arrive as IP addresses. Hysteria downloads and caches the lists in `hysteria/geo/`. To block additional destinations, add rules under `acl.inline` in `hysteria/config/hysteria.yaml`, such as `reject(suffix:example.com)` or `reject(192.0.2.0/24)`, then restart the container. [Hysteria 2 ACL documentation](https://v2.hysteria.network/docs/advanced/ACL/#legacy-syntax)
+  3. **Shadowsocks (ssserver-rust)**. Sets up a multi-user Shadowsocks 2022 server on the selected port and saves `ss://` links to `shadowsocks/ss_links.txt`.
+- **3) Update / Change version of existing container**. Update Xray, Hysteria 2, or Shadowsocks to the latest Docker image or select a version tag. Updating to latest releases any version lock. For Xray, the target image validates the configuration, including any staged `finalRules` or `minClientVer` changes, before deployment. If startup or the readiness check fails, the script restores both configuration files and the previous container image.
+- **4) Change Xray Reality target domain**. Re-runs the Reality target checks, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. On legacy configs, this also adds the loopback Tunnel. Failed restarts automatically roll back the previous configuration.
+- **5) Restore deployment from existing config**. Recreates and starts containers from existing config directories.
+- **6) Show proxy links**. Select Xray, Hysteria 2, or Shadowsocks to display its saved client links.
+- **7) Show proxy usage / Manage quotas**
+  - Show current and previous billing cycle usage, limits, and account state for Xray and Hysteria 2, plus cumulative Hysteria 2 traffic by username
   - Check/apply quota suspension and automatic re-enable on next user cycle
   - Reset one user's current-cycle usage
   - Change one user's monthly limit
@@ -65,12 +59,14 @@ The installer verifies the release signature and checksum before requesting `sud
   - Configure automatic quota checks via the systemd daemon or cron (1/2/5-minute intervals)
   - Show automatic quota check configuration status (method and interval/schedule)
   - Change quota billing timezone
-- **11) Manage users (Add/Remove for Xray / Shadowsocks)**:
+  - Enable quotas on an existing Hysteria 2 deployment
+- **8) Manage users (Add/Remove for Xray / Shadowsocks)**
   - Add Xray users without recreating existing users
   - Remove specific Xray users without affecting others
   - Add Shadowsocks users without recreating existing users
   - Remove a selected Shadowsocks user without affecting others
-- **12) Exit**
+- **9) Delete container and config**. Stops the selected Docker container and deletes the corresponding config directory and link files.
+- **10) Exit**
 
 ## Recommended Clients
 
@@ -78,31 +74,7 @@ The installer verifies the release signature and checksum before requesting `sud
 - **Android**: [v2rayNG](https://github.com/2dust/v2rayNG)
 - **Windows**: [Furious](https://github.com/LorenEteval/Furious)
 
-Copy the `vless://` or `ss://` link and paste it into the client and enjoy!
-
-> [!TIP]
-> Some clients may require further configuration steps after pasting the link.
-
-## Xray Configuration Details
-
-- During installation, you can optionally enable built-in routing rules to block mainland China domains and IPs (`geosite:cn`, `geoip:cn`), or use lightweight direct routing to minimize memory usage on low-RAM VPS instances.
-- **Freedom Outbound & `finalRules`**: Configured in compliance with Xray's `FinalRuleObject` specification. The `direct` outbound blocks port 25 (SMTP) to protect VPS IP reputation, applies `geoip:cn` at the socket egress layer when China rules are active, and includes an explicit `allow` fallback to prevent Xray's default safe policy from blocking legitimate proxy connections or loopback tunnels.
-- The configuration uses the Reality protocol for obfuscation.
-- Failed REALITY handshakes are sent to `127.0.0.1:10086`, where a loopback-only `tunnel` (`dokodemo-door`) inbound rewrites the connection to the selected target on its configured port.
-- Tunnel routing allows only the configured Reality `serverNames` to use the `direct` outbound, every other fallback SNI is sent to `block`. Continue to choose a direct-origin, non-CDN Reality target. This protects the fallback path, but does not restrict destinations chosen by authenticated VLESS users.
-- Xray per-user quota enforcement uses Xray user traffic stats (`StatsService`) and stores state in:
-  - `xray/user_limits.conf` (timezone)
-  - `xray/user_limits.db` (per-user limits, cycle window, and usage accumulator)
-- Quota sync manages VLESS clients by UUID and preserves manual clients. When it suspends a managed client, it saves the full client entry in the quota database for reactivation. Quota counters use the database email. Configure user traffic stats for the managed client's Xray policy level and give each client a distinct email label.
-- A user's monthly cycle can begin at account creation or on a configured calendar day. The billing date is clamped to the last day of shorter months.
-- Usage is checkpointed before Xray restarts managed by this script. Each counter sample records the container and its start time, so a restart starts a fresh counter baseline. Traffic the old process never reported before an unexpected stop cannot be recovered.
-- The quota daemon wakes at the next billing cutoff if it falls before the regular poll. Cron checks use their configured cadence. If a counter sample spans a cutoff, its unsplittable delta is counted in the closing cycle, which appears in the quota status.
-- Quota timezones use installed IANA timezone names or whole-hour UTC offsets. If a billing time falls in a daylight-saving gap, it shifts forward by the size of the gap. If the time occurs twice, the first occurrence is used.
-- Quota checks run when you execute menu option `10 -> 2` (recommended to automate with a systemd daemon on Ubuntu, or cron fallback, for timely suspension/re-enable). You can check the scheduler status using menu option `10 -> 7` or via CLI command `./proxy.sh --quota-check-status`.
-- Scheduler status is read-only. To migrate a legacy timer or cron job, choose the scheduler through menu option `10 -> 6`. Press Enter at the interval prompt to keep the existing interval when the selected scheduler can represent it.
-- Both schedulers run the root-owned copy at `/usr/local/lib/proxy-sh/quota-check.sh`. An admin-controlled deployment can run quota checks as root. For a user-owned deployment, the scheduler uses its owner, who needs access to the quota files and Docker without an interactive sudo prompt. Setup checks that `xray_server` uses the deployment's configuration before enabling the job.
-- Explicit scheduler setup and verified script updates refresh the installed runner. Legacy jobs keep their existing configuration until you reconfigure them from the quota menu.
-- All configuration files are created in a new `xray` directory relative to the script's location.
+Import the saved link in a client that supports its protocol.
 
 >[!CAUTION]
 > **Do NOT use CDN or SaaS domains**: Avoid using any domains hosted by major CDN providers (such as **Akamai**, **Fastly**, **Amazon CloudFront**, **Cloudflare**, **EdgeCast** / Edge networks) or SaaS platforms with built-in enterprise-grade CDNs (such as **Shopify**, **Wix**, **Squarespace**, **Vercel**, **Netlify**, and **GitHub Pages**). Using CDN or SaaS-backed targets makes your server vulnerable to REALITY fallback bandwidth leeching and traffic hijacking. You can read this [blog](https://zaku.eu.org/blog/2026-04-25-everyone-should-start-using-a-vpn-or-proxy/#xray) for more setup guidance.
@@ -205,7 +177,7 @@ sudo ss -tulpn | grep -E ':(443|80)\b'
 If a newly released upstream Xray version introduces regressions or protocol handshake issues, you can pin or downgrade to a proven stable version (such as `26.7.28`):
 
 1. Run `./proxy.sh`.
-2. Select **`4) Update / Change version of existing container`**.
+2. Select **`3) Update / Change version of existing container`**.
 3. Select **`2) Downgrade / Change container version`**.
 4. Choose **`1) Xray`** and input the target version tag (e.g., `26.7.28`).
 

@@ -128,9 +128,13 @@ grep -Fxq 'Run proxy.sh to manage your deployment.' <<<"$output"
 grep -Fxq '# locally installed version' "$application/proxy.sh"
 
 old="$fixture/old deployment"
-mkdir -p "$old/xray" "$old/shadowsocks"
-printf 'services: {}\n' | tee "$old/xray/docker-compose.yml" "$old/shadowsocks/docker-compose.yml" >/dev/null
+mkdir -p "$old/xray" "$old/shadowsocks" "$old/hysteria/config" "$old/hysteria/acme"
+printf 'services: {}\n' | tee "$old/xray/docker-compose.yml" "$old/shadowsocks/docker-compose.yml" \
+	"$old/hysteria/docker-compose.yml" >/dev/null
 printf '{}\n' | tee "$old/xray/server.jsonc" "$old/shadowsocks/server.json" >/dev/null
+printf 'listen: ":443"\n' >"$old/hysteria/config/hysteria.yaml"
+printf 'acme state\n' >"$old/hysteria/acme/fixture"
+printf 'hysteria2://example.invalid\n' >"$old/hysteria/hysteria_links.txt"
 printf 'quota and profiles\n' >"$old/xray/user_limits.db"
 printf 'legacy link\n' >"$old/vless_links.txt"
 chmod -R a+rX "$old"
@@ -143,6 +147,8 @@ run_installer --release-commit "$revision" --migrate-from "$old"
 cmp "$old/xray/user_limits.db" "$application/xray/user_limits.db"
 cmp "$old/vless_links.txt" "$application/xray/vless_links.txt"
 cmp "$old/shadowsocks/server.json" "$application/shadowsocks/server.json"
+diff -r "$old/hysteria" "$application/hysteria"
+[[ "$(stat -c '%u:%a' "$application/hysteria")" == 0:700 ]]
 [[ "$(stat -c '%u:%a' "$application/xray")" == 0:700 ]]
 run_installer --release-commit "$revision"
 grep -Fxq '# locally installed version' "$application/proxy.sh"
