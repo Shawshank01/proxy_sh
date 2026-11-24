@@ -52,7 +52,7 @@ The installer verifies the release signature and checksum before requesting `sud
 - **5) Restore deployment from existing config**. Recreates and starts containers from existing config directories.
 - **6) Show proxy links**. Select Xray, Hysteria 2, or Shadowsocks to display its saved client links.
 - **7) Show proxy usage / Manage quotas**
-  - Show current and previous billing cycle usage, limits, and account state for Xray and Hysteria 2. Hysteria 2 shows lifetime traffic on the same row as each user's quota.
+  - Show current and previous billing cycle usage, limits, and account state for Xray and Hysteria 2. Hysteria 2 shows lifetime upload, download, and total in GB on a separate line under each user's quota.
   - Check/apply quota suspension and automatic re-enable on next user cycle
   - Reset one user's current-cycle usage
   - Change one user's monthly limit
@@ -60,7 +60,6 @@ The installer verifies the release signature and checksum before requesting `sud
   - Configure automatic quota checks via the systemd daemon or cron (1/2/5-minute intervals)
   - Show automatic quota check configuration status (method and interval/schedule)
   - Change quota billing timezone
-  - Enable quotas on an existing Hysteria 2 deployment
 - **8) Manage users (Add/Remove for Xray / Shadowsocks)**
   - Add Xray users without recreating existing users
   - Remove specific Xray users without affecting others

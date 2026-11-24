@@ -123,7 +123,7 @@ cp "$personal" "$fixture/original-personal"
 
 show_xray_quota_auto_check_status >"$fixture/status"
 grep -q 'Legacy systemd timer .*every 2 minutes' "$fixture/status"
-grep -q 'System cron enabled, daemon running, schedule \*/5' "$fixture/status"
+grep -Fq 'System cron enabled, daemon running, schedule */5 * * * * (every 5 minutes)' "$fixture/status"
 grep -q 'Multiple quota jobs are enabled' "$fixture/status"
 [[ ! -s "$fixture/activity" ]]
 cmp "$XRAY_QUOTA_SERVICE_FILE" "$fixture/original-service"
@@ -147,6 +147,8 @@ if grep -q 'disable --now xray-quota-check.timer' "$fixture/activity"; then fail
 configure_xray_quota_auto_check <<<$'1\n'
 grep -Fxq "WorkingDirectory=${deployment//%/%%}/." "$XRAY_QUOTA_SERVICE_FILE"
 grep -Fxq "ExecStart=/bin/bash $XRAY_QUOTA_RUNNER --quota-scheduled-daemon 120" "$XRAY_QUOTA_SERVICE_FILE"
+show_xray_quota_auto_check_status >"$fixture/status"
+grep -Fq 'Systemd service installed, enablement enabled, running yes, every 2 minutes' "$fixture/status"
 [[ -f "$fixture/services/xray-quota-check.service.active" && ! -e "$XRAY_QUOTA_TIMER_FILE" && ! -e "$XRAY_QUOTA_CRON_FILE" ]]
 grep -Fxq '15 * * * * housekeeping --quota-check' "$personal"
 if grep -Fq "$XRAY_QUOTA_CRON_MARKER" "$personal"; then fail 'Legacy cron entry remains'; fi
@@ -195,5 +197,12 @@ grep -Fxq '15 * * * * housekeeping --quota-check' "$personal"
 apply_quota_scheduler disabled
 [[ ! -e "$XRAY_QUOTA_CRON_STATE" && ! -d "$XRAY_QUOTA_SCHEDULER_LOCK" ]]
 grep -Fxq '15 * * * * housekeeping --quota-check' "$personal"
+(
+	rm -f xray/user_limits.db
+	touch hysteria/config/user_limits.db
+	show_xray_quota_auto_check_status >"$fixture/status"
+	grep -Fq 'Hysteria 2 quotas configured in this deployment' "$fixture/status"
+	grep -Fq 'Automatic checks: no enabled systemd or cron job found.' "$fixture/status"
+)
 
 echo 'Quota scheduler regression tests passed.'

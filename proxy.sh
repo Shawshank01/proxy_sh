@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.0.2"
+SCRIPT_VERSION="7.0.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2602,17 +2602,13 @@ AUTH
 }
 
 initialize_hysteria_quota_files() {
-	local directory=$1 totals_file=$2 timezone=${3:-$DEFAULT_QUOTA_TIMEZONE} anchor=${4:-}
-	local now bounds username password limit last_total rows=""
+	local directory=$1 timezone=$2 anchor=$3
+	local now bounds username password limit rows=""
 	now=$(date +%s) || return 1
 	anchor=${anchor:-$now}
 	bounds=$(calculate_cycle_bounds "$anchor" "$now" "$timezone") || return 1
 	while IFS='|' read -r username password limit; do
-		last_total=0
-		if [[ -f "$totals_file" ]]; then
-			last_total=$(jq -er --arg username "$username" '.users[$username] | (.upload // 0) + (.download // 0)' "$totals_file") || return 1
-		fi
-		rows+="${rows:+$'\n'}$username|$username|${limit:-0}|$anchor|${bounds%%|*}|${bounds##*|}|0|$last_total|active"
+		rows+="${rows:+$'\n'}$username|$username|${limit:-0}|$anchor|${bounds%%|*}|${bounds##*|}|0|0|active"
 	done <"$directory/auth-users"
 	[[ -n "$rows" ]] || return 1
 	printf 'TIMEZONE=%s\n' "$timezone" >"$directory/user_limits.conf" &&
@@ -2904,7 +2900,7 @@ EOF
 		prompt_select_timezone quota_timezone "$DEFAULT_QUOTA_TIMEZONE" || return 1
 		billing_anchor=$(prompt_hysteria_billing_anchor "$quota_timezone") || return 1
 	fi
-	initialize_hysteria_quota_files "$staging/config" /dev/null "$quota_timezone" "$billing_anchor" || return 1
+	initialize_hysteria_quota_files "$staging/config" "$quota_timezone" "$billing_anchor" || return 1
 	stats_secret=$(openssl rand -hex 32) || return 1
 	cat >>"$staging/config/hysteria.yaml" <<EOF || return 1
 bandwidth:
@@ -3931,124 +3927,14 @@ disconnect_suspended_hysteria_users() {
 	fi
 }
 
-read_legacy_hysteria_users() {
-	awk '
-		/^auth:[[:space:]]*$/ { section = 1; seen++; next }
-		/^[^[:space:]#]/ { section = 0 }
-		!section || /^[[:space:]]*(#|$)/ { next }
-		/^  type: (password|userpass)$/ { type = $2; next }
-		/^  userpass:$/ && type == "userpass" { next }
-		/^  password: "[a-f0-9]+"$/ && type == "password" {
-			gsub(/"/, "", $2)
-			if (length($2) != 64) invalid = 1
-			print "user|" $2 "|0"
-			users++
-			next
-		}
-		/^    [a-z0-9_-]+: "[a-f0-9]+"$/ && type == "userpass" {
-			sub(/:$/, "", $1)
-			gsub(/"/, "", $2)
-			if (length($2) != 64 || names[$1]++) invalid = 1
-			print $1 "|" $2 "|0"
-			users++
-			next
-		}
-		{ invalid = 1 }
-		END { exit (invalid || seen != 1 || users == 0 || (type == "password" && users != 1)) }
-	' "$1"
+hysteria_lifetime_traffic_rows() {
+	local rows
+	rows=$(jq -r '.users | to_entries | sort_by(.key)[] | [.key, .value.upload, .value.download] | @tsv' "$1") || return 1
+	LC_ALL=C awk -F '\t' '
+		NF == 3 { printf "%s\tup=%.2f GB | down=%.2f GB | total=%.2f GB\n",
+			$1, $2 / 1073741824, $3 / 1073741824, ($2 + $3) / 1073741824 }
+	' <<<"$rows"
 }
-
-enable_existing_hysteria_quotas() {
-	if [[ ! -f hysteria/config/hysteria.yaml ]]; then
-		echo "Install or restore Hysteria 2 first." >&2
-		return 1
-	fi
-	if [[ -f hysteria/config/user_limits.db ]]; then
-		echo "Hysteria 2 quotas are already enabled."
-		return 0
-	fi
-	local answer
-	read -r -p "Enable quotas and restart Hysteria 2 if it is running? [y/N]: " answer || return 1
-	[[ "$answer" == [yY] ]] || return 0
-	with_hysteria_quota_lock migrate_hysteria_quotas
-}
-
-migrate_hysteria_quotas() (
-	umask 077
-	local directory=hysteria/config staging container_id running=false port=$HYSTERIA_STATS_PORT secret file
-	local -a installed=()
-	[[ ! -e "$directory/user_limits.db" && ! -e "$directory/auth-users" && ! -e "$directory/quota-auth.sh" ]] || return 1
-	staging=$(mktemp -d "$PWD/hysteria/.quota-enable.XXXXXX") || return 1
-	trap '[[ -z "$staging" ]] || rm -rf -- "$staging"' EXIT
-	if ! read_legacy_hysteria_users "$directory/hysteria.yaml" >"$staging/auth-users"; then
-		echo "This Hysteria 2 authentication configuration needs manual migration." >&2
-		return 1
-	fi
-
-	container_id=$($SUDO docker ps -aq --filter 'name=^/hysteria$') || return 1
-	if [[ -n "$container_id" ]]; then
-		container_id=$(scheduled_hysteria_container) || return 1
-		running=$($SUDO docker inspect -f '{{.State.Running}}' "$container_id") || return 1
-	fi
-	if grep -q '^trafficStats:' "$directory/hysteria.yaml"; then
-		local address token
-		if ! read -r address token < <(read_hysteria_traffic_endpoint); then
-			echo "The existing Hysteria 2 Traffic Stats API must use loopback and a 64-digit hexadecimal secret." >&2
-			return 1
-		fi
-		if [[ "$running" == true ]] && ! sample_hysteria_traffic "$address" "$token"; then
-			echo "Could not save the existing Hysteria 2 counters before migration." >&2
-			return 1
-		fi
-	fi
-	initialize_hysteria_quota_files "$staging" hysteria/traffic-usage.json || return 1
-	cp -p "$directory/hysteria.yaml" "$staging/previous.yaml" || return 1
-	awk '
-		/^auth:[[:space:]]*$/ {
-			print "auth:"
-			print "  type: command"
-			print "  command: /etc/proxy-hysteria/quota-auth.sh"
-			section = 1
-			next
-		}
-		/^[^[:space:]#]/ { section = 0 }
-		!section { print }
-	' "$staging/previous.yaml" >"$staging/next.yaml" || return 1
-	if ! grep -q '^trafficStats:' "$staging/next.yaml"; then
-		if command -v ss >/dev/null; then
-			while [[ -n "$(ss -H -ltn "sport = :$port")" ]]; do
-				((port < 65535)) || return 1
-				port=$((port + 1))
-			done
-		fi
-		secret=$(openssl rand -hex 32) || return 1
-		printf 'trafficStats:\n  listen: "127.0.0.1:%s"\n  secret: "%s"\n' "$port" "$secret" >>"$staging/next.yaml" || return 1
-	fi
-	for file in auth-users user_limits.conf user_limits.db quota-auth.sh; do
-		if ! mv -- "$staging/$file" "$directory/$file"; then
-			rm -f -- "${installed[@]}"
-			return 1
-		fi
-		installed+=("$directory/$file")
-	done
-	if ! mv -f -- "$staging/next.yaml" "$directory/hysteria.yaml"; then
-		rm -f -- "${installed[@]}"
-		return 1
-	fi
-	if [[ "$running" == true ]] &&
-		! { $SUDO docker restart "$container_id" >/dev/null && wait_for_hysteria; }; then
-		if mv -f -- "$staging/previous.yaml" "$directory/hysteria.yaml"; then
-			rm -f -- "${installed[@]}"
-			$SUDO docker restart "$container_id" >/dev/null || true
-			echo "Hysteria 2 quota migration failed. Restored the previous configuration." >&2
-		else
-			echo "Could not restore the previous Hysteria 2 configuration. Backup is in $staging." >&2
-			staging=""
-		fi
-		return 1
-	fi
-	echo "Hysteria 2 quotas enabled. Existing client links still work."
-)
 
 show_proxy_quota_status() {
 	local quota_data_dir=xray
@@ -4071,10 +3957,12 @@ show_proxy_quota_status() {
 		echo "Hysteria 2 lifetime traffic by username"
 		checkpoint_hysteria_traffic
 		if [[ -f hysteria/traffic-usage.json ]]; then
-			jq -r '
-				.users | to_entries | sort_by(.key)[] |
-				"- \(.key | tojson) | upload=\(.value.upload) bytes | download=\(.value.download) bytes | total=\(.value.upload + .value.download) bytes"
-			' hysteria/traffic-usage.json
+			local traffic_user traffic_summary traffic_totals
+			traffic_totals=$(hysteria_lifetime_traffic_rows hysteria/traffic-usage.json) || return 1
+			while IFS=$'\t' read -r traffic_user traffic_summary; do
+				[[ -n "$traffic_user" ]] || continue
+				printf '%s\n  Lifetime traffic | %s\n' "- $traffic_user" "$traffic_summary"
+			done <<<"$traffic_totals"
 		else
 			echo "No Hysteria 2 traffic sample has been saved."
 		fi
@@ -4201,12 +4089,9 @@ show_xray_quota_status() {
 	if [[ -z "$traffic_file" ]]; then
 		echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
 	elif [[ -f "$traffic_file" ]]; then
-		traffic_totals=$(jq -r '
-			.users | to_entries[] | select(.key | test("^[a-z0-9_-]+$")) |
-			[.key, "\(.value.upload) / \(.value.download) / \(.value.upload + .value.download) bytes"] | @tsv
-		' "$traffic_file") || traffic_totals=""
+		traffic_totals=$(hysteria_lifetime_traffic_rows "$traffic_file") || traffic_totals=""
 		while IFS=$'\t' read -r traffic_user traffic_summary; do
-			[[ -n "$traffic_user" ]] || continue
+			[[ "$traffic_user" =~ ^[a-z0-9_-]+$ ]] || continue
 			traffic_by_user["$traffic_user"]=$traffic_summary
 		done <<<"$traffic_totals"
 	fi
@@ -4247,10 +4132,6 @@ show_xray_quota_status() {
 			row+=" / unlimited"
 		fi
 		row+=" | cycle=${cycle_start_h} -> ${cycle_end_h}"
-		if [[ -n "$traffic_file" ]]; then
-			shown_users["$email"]=1
-			row+=" | lifetime up/down/total=${traffic_by_user[$email]:-unavailable}"
-		fi
 		previous_row=""
 		if [[ -n "${closed_cycles[$uuid]+set}" ]]; then
 			IFS='|' read -r closed_start closed_end closed_usage <<<"${closed_cycles[$uuid]}"
@@ -4265,11 +4146,15 @@ show_xray_quota_status() {
 			fi
 		fi
 		printf '%s\n' "$row"
+		if [[ -n "$traffic_file" ]]; then
+			shown_users["$email"]=1
+			printf '  Lifetime traffic | %s\n' "${traffic_by_user[$email]:-unavailable}"
+		fi
 		[[ -z "$previous_row" ]] || printf '%s\n' "$previous_row"
 	done < <(get_quota_db_records)
 	while IFS=$'\t' read -r traffic_user traffic_summary; do
-		[[ -n "$traffic_user" && -z "${shown_users[$traffic_user]:-}" ]] || continue
-		printf '%s\n' "- $traffic_user | no quota record | lifetime up/down/total=$traffic_summary"
+		[[ "$traffic_user" =~ ^[a-z0-9_-]+$ && -z "${shown_users[$traffic_user]:-}" ]] || continue
+		printf '%s\n  Lifetime traffic | %s\n' "- $traffic_user | no quota record" "$traffic_summary"
 	done <<<"$traffic_totals"
 }
 
@@ -4571,9 +4456,8 @@ manage_xray_quotas() {
 		echo "6) Configure automatic quota checks (systemd daemon / cron)"
 		echo "7) Show automatic quota check configuration status"
 		echo "8) Change quota billing timezone"
-		echo "9) Enable quotas on an existing Hysteria 2 deployment"
 		echo "0) Back"
-		read -r -p "Enter your choice [0-9]: " quota_choice || return 0
+		read -r -p "Enter your choice [0-8]: " quota_choice || return 0
 
 		case $quota_choice in
 		1)
@@ -4599,9 +4483,6 @@ manage_xray_quotas() {
 			;;
 		8)
 			run_proxy_quota_action change_xray_quota_timezone || true
-			;;
-		9)
-			enable_existing_hysteria_quotas || true
 			;;
 		0)
 			break
@@ -5008,6 +4889,12 @@ format_seconds_label() {
 	else
 		echo "${sec} seconds"
 	fi
+}
+
+format_quota_cron_interval() {
+	local seconds
+	seconds=$(quota_cron_interval "$1") || return 1
+	format_seconds_label "$seconds"
 }
 
 ensure_crontab_available() {
@@ -5519,7 +5406,7 @@ configure_xray_quota_auto_check() {
 }
 
 show_xray_quota_auto_check_status() {
-	local service='unknown|0' timer='unknown|0' schedules="" count=0 interval
+	local service='unknown|0' timer='unknown|0' schedules="" count=0 interval schedule
 	local cron_scope="" cron_account="" cron_deployment="" user personal daemon="stopped"
 	local -A accounts=()
 	echo 'Automatic proxy quota check status'
@@ -5550,9 +5437,11 @@ show_xray_quota_auto_check_status() {
 	if cron_quota_running; then daemon=running; fi
 	if [[ -f "$XRAY_QUOTA_CRON_FILE" ]]; then
 		schedules=$(cron_quota_schedules system <"$XRAY_QUOTA_CRON_FILE") || return 1
-		while IFS= read -r interval; do
-			[[ -n "$interval" ]] || continue
-			printf '  System cron enabled, daemon %s, schedule %s\n' "$daemon" "$interval"
+		while IFS= read -r schedule; do
+			[[ -n "$schedule" ]] || continue
+			interval=$(format_quota_cron_interval "$schedule") || interval=""
+			printf '  System cron enabled, daemon %s, schedule %s%s\n' \
+				"$daemon" "$schedule" "${interval:+ (every $interval)}"
 			count=$((count + 1))
 		done <<<"$schedules"
 	fi
@@ -5564,15 +5453,18 @@ show_xray_quota_auto_check_status() {
 			accounts["$user"]=1
 			personal=$(read_visible_quota_crontab "$user" 2>/dev/null) || continue
 			schedules=$(cron_quota_schedules personal <<<"$personal") || return 1
-			while IFS= read -r interval; do
-				[[ -n "$interval" ]] || continue
-				printf '  Personal cron for %s enabled, daemon %s, schedule %s\n' "$user" "$daemon" "$interval"
+			while IFS= read -r schedule; do
+				[[ -n "$schedule" ]] || continue
+				interval=$(format_quota_cron_interval "$schedule") || interval=""
+				printf '  Personal cron for %s enabled, daemon %s, schedule %s%s\n' \
+					"$user" "$daemon" "$schedule" "${interval:+ (every $interval)}"
 				count=$((count + 1))
 			done <<<"$schedules"
 		done
 	fi
 	if [[ "$count" -eq 0 ]]; then
-		echo '  No enabled quota jobs found in the accessible scheduler configuration.'
+		echo '  Automatic checks: no enabled systemd or cron job found.'
+		echo '  Set a check interval in quota menu option 6.'
 	elif [[ "$count" -gt 1 ]]; then
 		echo '  Multiple quota jobs are enabled. Use the quota configuration menu to select one.'
 	fi
