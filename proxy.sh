@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.0.1"
+SCRIPT_VERSION="7.0.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2602,21 +2602,48 @@ AUTH
 }
 
 initialize_hysteria_quota_files() {
-	local directory=$1 totals_file=$2 now bounds username password limit last_total
-	local rows="" timezone=$DEFAULT_QUOTA_TIMEZONE
+	local directory=$1 totals_file=$2 timezone=${3:-$DEFAULT_QUOTA_TIMEZONE} anchor=${4:-}
+	local now bounds username password limit last_total rows=""
 	now=$(date +%s) || return 1
-	bounds=$(calculate_cycle_bounds "$now" "$now" "$timezone") || return 1
+	anchor=${anchor:-$now}
+	bounds=$(calculate_cycle_bounds "$anchor" "$now" "$timezone") || return 1
 	while IFS='|' read -r username password limit; do
 		last_total=0
 		if [[ -f "$totals_file" ]]; then
 			last_total=$(jq -er --arg username "$username" '.users[$username] | (.upload // 0) + (.download // 0)' "$totals_file") || return 1
 		fi
-		rows+="${rows:+$'\n'}$username|$username|${limit:-0}|$now|${bounds%%|*}|${bounds##*|}|0|$last_total|active"
+		rows+="${rows:+$'\n'}$username|$username|${limit:-0}|$anchor|${bounds%%|*}|${bounds##*|}|0|$last_total|active"
 	done <"$directory/auth-users"
 	[[ -n "$rows" ]] || return 1
 	printf 'TIMEZONE=%s\n' "$timezone" >"$directory/user_limits.conf" &&
 		write_quota_db_file "$directory/user_limits.db" "$rows" "# quota-sample|hysteria-total|$now" "" &&
 		write_hysteria_quota_auth "$directory"
+}
+
+prompt_hysteria_billing_anchor() {
+	local timezone=$1 choice day reset_time
+	echo "1) Start the monthly cycle at installation time [default]" >&2
+	echo "2) Set a monthly reset day and local time" >&2
+	while true; do
+		read -r -p "Choose a billing cycle [1]: " choice || return 1
+		case ${choice:-1} in
+		1) return 0 ;;
+		2) break ;;
+		*) echo "Choose 1 or 2." >&2 ;;
+		esac
+	done
+	while true; do
+		read -r -p "Monthly reset day [1-31, default 1]: " day || return 1
+		if day=$(parse_decimal_range "${day:-1}" 1 31); then break; fi
+		echo "Enter a day between 1 and 31." >&2
+	done
+	while true; do
+		read -r -p "Reset time in $timezone [HH:MM, default 00:00]: " reset_time || return 1
+		reset_time=${reset_time:-00:00}
+		if [[ "$reset_time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then break; fi
+		echo "Enter a 24-hour time such as 09:30." >&2
+	done
+	quota_wall_time_epoch "2000-01-$(printf '%02d' "$day") $reset_time:00" "$timezone"
 }
 
 wait_for_hysteria() {
@@ -2646,7 +2673,7 @@ install_hysteria() (
 	local obfs_choice obfs_type="" obfs_password
 	local bandwidth_up bandwidth_down
 	local user_count user_number
-	local set_limits limit
+	local set_limits limit has_quota_limits=0 quota_timezone=$DEFAULT_QUOTA_TIMEZONE billing_anchor="" enable_auto_sched
 	local china_rules_choice geo_workdir="" geo_mount=""
 	local stats_port=$HYSTERIA_STATS_PORT stats_secret
 	local -a identity_check user_passwords=()
@@ -2870,9 +2897,14 @@ EOF
 				echo "Enter a whole number from 0 to $MAX_USER_LIMIT_GB."
 			done
 		fi
+		if ((limit > 0)); then has_quota_limits=1; fi
 		printf 'user%s|%s|%s\n' "$user_number" "${user_passwords[user_number]}" "$limit" || return 1
 	done >"$staging/config/auth-users" || return 1
-	initialize_hysteria_quota_files "$staging/config" /dev/null || return 1
+	if [[ "$has_quota_limits" -eq 1 ]]; then
+		prompt_select_timezone quota_timezone "$DEFAULT_QUOTA_TIMEZONE" || return 1
+		billing_anchor=$(prompt_hysteria_billing_anchor "$quota_timezone") || return 1
+	fi
+	initialize_hysteria_quota_files "$staging/config" /dev/null "$quota_timezone" "$billing_anchor" || return 1
 	stats_secret=$(openssl rand -hex 32) || return 1
 	cat >>"$staging/config/hysteria.yaml" <<EOF || return 1
 bandwidth:
@@ -2983,6 +3015,16 @@ EOF
 	printf '\nThe link carries connection settings. Set bandwidth in your client to use Brutal.\n'
 	printf 'Use these client values if your connection can sustain them:\n'
 	printf 'bandwidth:\n  up: "%s mbps"\n  down: "%s mbps"\n' "$bandwidth_down" "$bandwidth_up"
+	if [[ "$has_quota_limits" -eq 1 ]]; then
+		while true; do
+			read -r -p "Configure automatic quota checks now? [Y/n]: " enable_auto_sched || return 0
+			case ${enable_auto_sched:-y} in
+			y|Y) configure_xray_quota_auto_check; return ;;
+			n|N) return 0 ;;
+			*) echo "Choose y or n." ;;
+			esac
+		done
+	fi
 )
 
 # --- Quota subsystem ---
@@ -4015,18 +4057,19 @@ show_proxy_quota_status() {
 		show_xray_quota_status || true
 	fi
 	if [[ -f hysteria/config/hysteria.yaml ]]; then
-		echo "Hysteria 2 traffic by username (cumulative)"
 		if [[ -z "$(hysteria_traffic_api_settings)" ]]; then
 			echo "Traffic Stats API is not configured for this deployment."
 			return 0
 		fi
 		if [[ -f hysteria/config/user_limits.db ]]; then
+			echo "Hysteria 2 quota status and lifetime traffic"
 			quota_data_dir=hysteria/config
 			with_proxy_quota_lock refresh_xray_quota_accounting || true
-			show_xray_quota_status || true
-		else
-			checkpoint_hysteria_traffic
+			show_xray_quota_status hysteria/traffic-usage.json
+			return
 		fi
+		echo "Hysteria 2 lifetime traffic by username"
+		checkpoint_hysteria_traffic
 		if [[ -f hysteria/traffic-usage.json ]]; then
 			jq -r '
 				.users | to_entries | sort_by(.key)[] |
@@ -4143,6 +4186,8 @@ check_and_apply_proxy_quotas() {
 
 show_xray_quota_status() {
 	local db_file="${quota_data_dir:-xray}/user_limits.db"
+	local traffic_file=${1:-} traffic_summary traffic_user traffic_totals=""
+	local -A traffic_by_user=() shown_users=()
 
 	if [[ ! -f "$db_file" ]]; then
 		echo -e "${RED}Quota database not found.${NC}"
@@ -4153,7 +4198,18 @@ show_xray_quota_status() {
 	timezone=$(read_xray_quota_timezone) || return 1
 
 	echo -e "${YELLOW}Timezone:${NC} ${timezone}"
-	echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
+	if [[ -z "$traffic_file" ]]; then
+		echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
+	elif [[ -f "$traffic_file" ]]; then
+		traffic_totals=$(jq -r '
+			.users | to_entries[] | select(.key | test("^[a-z0-9_-]+$")) |
+			[.key, "\(.value.upload) / \(.value.download) / \(.value.upload + .value.download) bytes"] | @tsv
+		' "$traffic_file") || traffic_totals=""
+		while IFS=$'\t' read -r traffic_user traffic_summary; do
+			[[ -n "$traffic_user" ]] || continue
+			traffic_by_user["$traffic_user"]=$traffic_summary
+		done <<<"$traffic_totals"
+	fi
 
 	local -A closed_cycles=()
 	local metadata kind closed_email closed_uuid closed_start closed_end closed_usage resume_flag
@@ -4164,33 +4220,57 @@ show_xray_quota_status() {
 		fi
 	done <<<"$metadata"
 
-	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status
+	local email uuid limit_gb anchor_epoch cycle_start cycle_end cycle_usage last_total status row previous_row
 	while IFS= read -r raw_line; do
 		[ -z "$raw_line" ] && continue
 		parse_quota_db_line "$raw_line" || continue
 
-		local usage_gb
-		usage_gb=$(awk -v b="$cycle_usage" 'BEGIN { printf "%.2f", b/1024/1024/1024 }')
+		local usage_display
+		if [[ -n "$traffic_file" ]] && ((cycle_usage > 0 && cycle_usage < 1073741824)); then
+			usage_display=$(awk -v b="$cycle_usage" 'BEGIN {
+				if (b < 1048576) printf "%d bytes", b
+				else printf "%.2f MiB", b / 1048576
+			}')
+		else
+			usage_display=$(awk -v b="$cycle_usage" 'BEGIN { printf "%.2fGB", b/1073741824 }')
+		fi
 		local cycle_start_h cycle_end_h
 		cycle_start_h=$(TZ="$timezone" date -d "@${cycle_start}" "+%Y-%m-%d %H:%M:%S")
 		cycle_end_h=$(TZ="$timezone" date -d "@${cycle_end}" "+%Y-%m-%d %H:%M:%S")
 
+		row="- ${email} | status=${status} | usage=${usage_display}"
 		if [[ "$limit_gb" -gt 0 ]]; then
 			local percent
 			percent=$(awk -v b="$cycle_usage" -v limit="$limit_gb" 'BEGIN { printf "%.0f", int(b / 1073741824 / limit * 100) }')
-			echo "- ${email} | status=${status} | usage=${usage_gb}GB / ${limit_gb}GB (${percent}%) | cycle=${cycle_start_h} -> ${cycle_end_h}"
+			row+=" / ${limit_gb}GB (${percent}%)"
 		else
-			echo "- ${email} | status=${status} | usage=${usage_gb}GB / unlimited | cycle=${cycle_start_h} -> ${cycle_end_h}"
+			row+=" / unlimited"
 		fi
+		row+=" | cycle=${cycle_start_h} -> ${cycle_end_h}"
+		if [[ -n "$traffic_file" ]]; then
+			shown_users["$email"]=1
+			row+=" | lifetime up/down/total=${traffic_by_user[$email]:-unavailable}"
+		fi
+		previous_row=""
 		if [[ -n "${closed_cycles[$uuid]+set}" ]]; then
 			IFS='|' read -r closed_start closed_end closed_usage <<<"${closed_cycles[$uuid]}"
 			local closing_gb closing_start_display closing_end_display
 			closing_gb=$(awk -v b="$closed_usage" 'BEGIN { printf "%.2f", b/1073741824 }')
 			closing_start_display=$(TZ="$timezone" date -d "@$closed_start" '+%Y-%m-%d %H:%M:%S')
 			closing_end_display=$(TZ="$timezone" date -d "@$closed_end" '+%Y-%m-%d %H:%M:%S')
-			printf '  Previous cycle %s -> %s | usage=%sGB\n' "$closing_start_display" "$closing_end_display" "$closing_gb"
+			if [[ -n "$traffic_file" ]]; then
+				row+=" | previous cycle=${closing_start_display} -> ${closing_end_display} (${closing_gb}GB)"
+			else
+				printf -v previous_row '  Previous cycle %s -> %s | usage=%sGB' "$closing_start_display" "$closing_end_display" "$closing_gb"
+			fi
 		fi
+		printf '%s\n' "$row"
+		[[ -z "$previous_row" ]] || printf '%s\n' "$previous_row"
 	done < <(get_quota_db_records)
+	while IFS=$'\t' read -r traffic_user traffic_summary; do
+		[[ -n "$traffic_user" && -z "${shown_users[$traffic_user]:-}" ]] || continue
+		printf '%s\n' "- $traffic_user | no quota record | lifetime up/down/total=$traffic_summary"
+	done <<<"$traffic_totals"
 }
 
 select_quota_user() {
