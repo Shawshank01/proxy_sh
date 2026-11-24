@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.0.10"
+SCRIPT_VERSION="7.3.0"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -92,6 +92,7 @@ DOCKER_COMPOSE_CMD=()
 XRAY_DOCKER_IMAGE="ghcr.io/xtls/xray-core:latest"
 SS_DOCKER_IMAGE="ghcr.io/shadowsocks/ssserver-rust:latest"
 HYSTERIA_DOCKER_IMAGE="tobyxdd/hysteria:latest"
+CERTBOT_DOCKER_IMAGE="certbot/certbot:v5.10.0"
 HYSTERIA_STATS_PORT=10087
 XRAY_REALITY_FALLBACK_PORT=10086
 RELEASE_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
@@ -674,16 +675,14 @@ release_version_lock_if_needed() {
 	local dir=$1
 	local base_image=$2
 	local default_tag=$3
+	local service=$4
 
 	if [[ ! -f "$dir/docker-compose.yml" ]]; then
 		return 0
 	fi
 
 	local current_image
-	current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
-	if [[ -z "$current_image" ]]; then
-		return 0
-	fi
+	current_image=$(compose_service_image "$service" "$dir/docker-compose.yml") || return 1
 
 	local expected_default="$base_image"
 	if [[ -n "$default_tag" ]]; then
@@ -701,7 +700,7 @@ release_version_lock_if_needed() {
 		make_temp_file backup_file || return 1
 		cp -p "$dir/docker-compose.yml" "$backup_file" || return 1
 
-		if ! awk -v new_img="$expected_default" '/^[[:space:]]*image:[[:space:]]*/ { sub(/image:[[:space:]]*.*/, "image: " new_img) } { print }' "$dir/docker-compose.yml" >"$tmp_file"; then
+		if ! compose_service_image "$service" "$dir/docker-compose.yml" "$expected_default" >"$tmp_file"; then
 			rm -f "$tmp_file" "$backup_file"
 			echo -e "${RED}Failed to update docker-compose.yml to release lock.${NC}"
 			return 1
@@ -744,7 +743,7 @@ update_container() {
 
 	# Release version lock if present
 	local lock_status=0
-	release_version_lock_if_needed "$compose_dir" "$base_image" "$default_tag" || lock_status=$?
+	release_version_lock_if_needed "$compose_dir" "$base_image" "$default_tag" "$container_name" || lock_status=$?
 	if [[ "$lock_status" -eq 1 ]]; then
 		return 1
 	elif [[ "$lock_status" -eq 2 ]]; then
@@ -781,32 +780,36 @@ update_container() {
 	return 0
 }
 
-stage_xray_compose_image() {
-	# Edit only the image key of the managed xray service.
-	awk -v image="$1" '
-        /^[^[:space:]#]/ { services = /^services:[[:space:]]*(#.*)?$/; xray = 0 }
-        services && /^[[:space:]]+xray:[[:space:]]*(#.*)?$/ {
+compose_service_image() {
+	local service=$1 config=$2 image=${3:-}
+	# Read or replace only the selected service's image key.
+	awk -v service="$service" -v image="$image" '
+        /^[^[:space:]#]/ { services = /^services:[[:space:]]*(#.*)?$/; selected = 0 }
+        services && $0 ~ ("^[[:space:]]+" service ":[[:space:]]*(#.*)?$") {
             match($0, /^[[:space:]]*/); service_indent = RLENGTH
-            property_indent = 0; xray = 1; print; next
+            property_indent = 0; selected = 1
+            if (image != "") print
+            next
         }
-        xray && /^[[:space:]]*[^[:space:]#]/ {
+        selected && /^[[:space:]]*[^[:space:]#]/ {
             match($0, /^[[:space:]]*/)
-            if (RLENGTH <= service_indent) xray = 0
+            if (RLENGTH <= service_indent) selected = 0
             else {
                 if (!property_indent || RLENGTH < property_indent) property_indent = RLENGTH
                 if (RLENGTH == property_indent && $0 ~ /^[[:space:]]+image:[[:space:]]/) {
                     old_image = $2
                     gsub(/["\047]/, "", old_image)
                     # An implicit latest and an explicit latest are equivalent.
-                    if (old_image != image && old_image ":latest" != image)
+                    if (image == "") print old_image
+                    else if (old_image != image && old_image ":latest" != image)
                         sub(/image:[[:space:]]*[^[:space:]]+/, "image: " image)
                     changed++
                 }
             }
         }
-        { print }
+        image != "" { print }
         END { if (changed != 1) exit 1 }
-	' "$2" >"$3"
+	' "$config"
 }
 
 start_xray_image() {
@@ -939,7 +942,7 @@ apply_xray_image_change() (
 	printf '%s\n' "${old_image:-none}" >"$work_dir/previous-image" || return 1
 	cp -p docker-compose.yml "$work_dir/docker-compose.yml" || return 1
 	cp -p server.jsonc "$work_dir/server.jsonc" || return 1
-	if ! stage_xray_compose_image "$target_image" "$work_dir/docker-compose.yml" "$work_dir/next-compose.yml"; then
+	if ! compose_service_image xray "$work_dir/docker-compose.yml" "$target_image" >"$work_dir/next-compose.yml"; then
 		echo -e "${RED}Could not find exactly one image key for the xray service.${NC}" >&2
 		return 1
 	fi
@@ -1038,10 +1041,10 @@ change_container_version() {
 	fi
 
 	# Read current image configuration
-	local current_image
-	current_image=$(grep -E '^\s*image:' "$dir/docker-compose.yml" | awk '{print $2}' || true)
-	if [[ -z "$current_image" ]]; then
-		echo -e "${RED}Could not find 'image:' configuration in $dir/docker-compose.yml.${NC}" >&2
+	local service=$container_name current_image
+	[[ "$dir" != xray ]] || service=xray
+	if ! current_image=$(compose_service_image "$service" "$dir/docker-compose.yml"); then
+		echo -e "${RED}Could not find a single image for $service in $dir/docker-compose.yml.${NC}" >&2
 		return 1
 	fi
 	echo -e "Current image in docker-compose.yml: ${GREEN}${current_image}${NC}"
@@ -1081,7 +1084,7 @@ change_container_version() {
 	make_temp_file backup_file || return 1
 	cp -p "$dir/docker-compose.yml" "$backup_file" || return 1
 
-	if ! awk -v new_img="$new_image" '/^[[:space:]]*image:[[:space:]]*/ { sub(/image:[[:space:]]*.*/, "image: " new_img) } { print }' "$dir/docker-compose.yml" >"$tmp_file"; then
+	if ! compose_service_image "$service" "$dir/docker-compose.yml" "$new_image" >"$tmp_file"; then
 		rm -f "$tmp_file" "$backup_file"
 		echo -e "${RED}Failed to update docker-compose.yml.${NC}"
 		return 1
@@ -1282,6 +1285,10 @@ delete_container() {
 	if [[ -n "$remaining_containers" ]]; then
 		echo -e "${RED}${service_name} still has running containers. Configuration was retained.${NC}"
 		return 1
+	fi
+
+	if [[ "$dir" == hysteria && -d "$dir/acme-ip" ]]; then
+		$SUDO rm -rf -- "$dir/acme-ip" || return 1
 	fi
 
 	if ! rm -rf -- "$dir"; then
@@ -2700,9 +2707,23 @@ wait_for_hysteria() {
 	return 1
 }
 
+issue_hysteria_ip_certificate() {
+	local directory=$1 address=$2 email=$3
+	local lineage="$directory/live/hysteria-ip"
+	mkdir -- "$directory" || return 1
+	echo "Requesting a new Let's Encrypt certificate for $address..."
+	$SUDO docker run --rm --network host \
+		-v "$directory:/etc/letsencrypt" "$CERTBOT_DOCKER_IMAGE" \
+		certonly --non-interactive --agree-tos --email "$email" --standalone \
+		--required-profile shortlived --cert-name hysteria-ip --ip-address "$address" || return 1
+	$SUDO test -s "$lineage/privkey.pem" &&
+		$SUDO openssl verify -purpose sslserver -verify_ip "$address" \
+			-untrusted "$lineage/fullchain.pem" "$lineage/cert.pem" >/dev/null
+}
+
 install_hysteria() (
-	local address_choice address host port mode cert_path key_path san
-	local challenge_port fingerprint staging start_confirm acme_mount=""
+	local address host port mode cert_path key_path san
+	local challenge_port fingerprint staging start_confirm acme_mount="" acme_email email_yaml
 	local enable_ech ech_public_name="" ech_config link_query="" link_endpoint
 	local obfs_choice obfs_type="" obfs_password
 	local bandwidth_up bandwidth_down
@@ -2727,43 +2748,75 @@ install_hysteria() (
 	fi
 
 	while true; do
-		echo "How should clients connect to this Hysteria 2 server?"
-		echo "1) Public VPS IP address (no domain required, uses a pinned or existing IP certificate)"
-		echo "2) Domain name (point DNS to your VPS to use the Let's Encrypt option)"
+		acme_mount=""
+		echo "How should Hysteria 2 get its certificate?"
+		echo "1) Generate a pinned self-signed certificate (TLS)"
+		echo "2) Obtain a Let's Encrypt certificate (ACME)"
 		echo "0) Back"
-		read -r -p "Choose a connection address [1]: " address_choice || return 1
-		case ${address_choice:-1} in
-		1)
-			while true; do
-				read -r -p "Enter your VPS's public IPv4 or IPv6 address [0 to go back]: " address || return 1
-				[[ "$address" != 0 ]] || break
-				if [[ "$address" == \[*\] ]]; then
-					address=${address:1:-1}
-				fi
-				if is_hysteria_ip_address "$address"; then break; fi
-				echo "Enter an IP address by itself. The UDP port is selected separately."
-			done
-			[[ "$address" != 0 ]] || continue
-			san="IP:$address"
-			identity_check=(-verify_ip "$address")
-			break
-			;;
-		2)
-			while true; do
-				read -r -p "Enter the hostname that points to your VPS (e.g. proxy.example.com) [0 to go back]: " address || return 1
-				[[ "$address" != 0 ]] || break
-				address=${address%.}
-				if is_hysteria_dns_name "$address" && [[ "$address" == *.* ]]; then break; fi
-				echo "Enter a hostname such as proxy.example.com."
-			done
-			[[ "$address" != 0 ]] || continue
-			san="DNS:$address"
-			identity_check=(-verify_hostname "$address")
-			break
-			;;
+		read -r -p "Certificate option [1]: " mode || return 1
+		mode=${mode:-1}
+		case $mode in
+		1|2) ;;
 		0) return 0 ;;
-		*) echo "Choose 1, 2 or 0." ;;
+		*) echo "Choose 1, 2 or 0."; continue ;;
 		esac
+
+		while true; do
+			read -r -p "Enter your VPS's public IPv4, IPv6, or domain [0 to go back]: " address || return 1
+			[[ "$address" != 0 ]] || break
+			local ip_address=$address
+			[[ "$ip_address" != \[*\] ]] || ip_address=${ip_address:1:-1}
+			if is_hysteria_ip_address "$ip_address"; then
+				address=$ip_address
+				san="IP:$address"
+				identity_check=(-verify_ip "$address")
+				break
+			fi
+			address=${address%.}
+			if is_hysteria_dns_name "$address" && [[ "$address" == *.* ]]; then
+				san="DNS:$address"
+				identity_check=(-verify_hostname "$address")
+				break
+			fi
+			echo "Enter a public IPv4 or IPv6 address or a hostname such as proxy.example.com."
+		done
+		[[ "$address" != 0 ]] || continue
+
+		if [[ "$mode" == 2 && "$san" == DNS:* ]]; then
+			echo "Point DNS to this server and allow inbound TCP on the challenge port."
+			while true; do
+				read -r -p "ACME challenge [1 = HTTP on TCP 80, 2 = TLS-ALPN on TCP 443, 0 = Back, default 1]: " challenge_port || return 1
+				case ${challenge_port:-1} in
+				1) challenge_port=80 ;;
+				2) challenge_port=443 ;;
+				0) continue 2 ;;
+				*) echo "Choose 1, 2 or 0."; continue ;;
+				esac
+				if command -v ss >/dev/null && [[ -n "$(ss -H -ltn "sport = :$challenge_port")" ]]; then
+					echo "TCP port $challenge_port is already in use. Choose another challenge."
+					continue
+				fi
+				break
+			done
+			acme_mount='      - ./acme:/acme'
+		elif [[ "$mode" == 2 ]]; then
+			echo "Let's Encrypt verifies your public IP over TCP 80. Keep this port reachable for automatic renewal."
+			if command -v ss >/dev/null && [[ -n "$(ss -H -ltn 'sport = :80')" ]]; then
+				echo "TCP port 80 is already in use. Free it before requesting an IP certificate."
+				continue
+			fi
+			acme_mount='      - ./acme-ip/live:/etc/letsencrypt/live:ro
+      - ./acme-ip/archive:/etc/letsencrypt/archive:ro'
+		fi
+		if [[ "$mode" == 2 ]]; then
+			while true; do
+				read -r -p "ACME account email address [0 to go back]: " acme_email || return 1
+				[[ "$acme_email" != 0 ]] || continue 2
+				if [[ "$acme_email" =~ ^[^[:space:]@]+@[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$ ]]; then break; fi
+				echo "Enter a valid email address."
+			done
+		fi
+		break
 	done
 	host=$(format_uri_host "$address")
 
@@ -2778,42 +2831,12 @@ install_hysteria() (
 		fi
 	done
 
-	while true; do
-		echo "1) Generate a self-signed certificate and add its pin to the client links"
-		echo "2) Use a PEM certificate and private key that cover $address"
-		if [[ "$san" == DNS:* ]]; then
-			echo "3) Request a Let's Encrypt certificate using ACME"
-		fi
-		read -r -p "Certificate option [1]: " mode || return 1
-		case ${mode:-1} in
-		1) mode=1; break ;;
-		2) break ;;
-		3)
-			if [[ "$san" != DNS:* ]]; then
-				echo "Choose 1 or 2 for an IP address."
-				continue
-			fi
-			echo "Point DNS to this server and allow inbound TCP on the challenge port."
-			read -r -p "ACME challenge [1 = HTTP on TCP 80, 2 = TLS-ALPN on TCP 443, default 1]: " challenge_port || return 1
-			case ${challenge_port:-1} in
-			1) challenge_port=80 ;;
-			2) challenge_port=443 ;;
-			*) echo "Choose 1 or 2."; continue ;;
-			esac
-			if command -v ss >/dev/null && [[ -n "$(ss -H -ltn "sport = :$challenge_port")" ]]; then
-				echo "TCP port $challenge_port is already in use. Choose another challenge or use certificate files."
-				continue
-			fi
-			acme_mount='      - ./acme:/acme'
-			break
-			;;
-		*) echo "Choose one of the certificate options shown." ;;
-		esac
-	done
-
 	umask 077
 	staging=$(mktemp -d ./.hysteria.XXXXXX) || return 1
-	trap 'if [[ -n "$staging" ]]; then rm -rf -- "$staging"; fi' EXIT
+	trap 'if [[ -n "$staging" ]]; then
+		if [[ -d "$staging/acme-ip" ]]; then $SUDO rm -rf -- "$staging/acme-ip"; fi
+		rm -rf -- "$staging"
+	fi' EXIT
 	mkdir -- "$staging/config" || return 1
 	cert_path="$staging/config/server.crt"
 	key_path="$staging/config/server.key"
@@ -2823,36 +2846,11 @@ install_hysteria() (
 			-subj "/CN=Hysteria 2" -addext "subjectAltName=$san" \
 			-addext 'basicConstraints=critical,CA:FALSE' -addext extendedKeyUsage=serverAuth \
 			-keyout "$key_path" -out "$cert_path" || return 1
-	elif [[ "$mode" == 2 ]]; then
-		local input_cert input_key
-		read -r -p "Path to the PEM certificate (full chain): " input_cert || return 1
-		read -r -p "Path to the unencrypted PEM private key: " input_key || return 1
-		[[ -f "$input_cert" && -f "$input_key" ]] || {
-			echo "Both paths must point to regular files." >&2
-			return 1
-		}
-		$SUDO cat -- "$input_cert" >"$cert_path" && $SUDO cat -- "$input_key" >"$key_path" || return 1
-		local cert_pub key_pub
-		cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout) &&
-			key_pub=$(openssl pkey -passin pass: -in "$key_path" -pubout) &&
-			[[ "$cert_pub" == "$key_pub" ]] || {
-			echo "The certificate and unencrypted private key must match." >&2
-			return 1
-		}
-	fi
-
-	if [[ "$mode" != 3 ]]; then
-		if [[ "$san" == DNS:* ]] && ! openssl x509 -in "$cert_path" -noout -ext subjectAltName | grep -Fq 'DNS:'; then
-			echo "The certificate needs a DNS Subject Alternative Name for $address." >&2
-			return 1
-		fi
 		openssl verify -partial_chain -trusted "$cert_path" -purpose sslserver \
 			"${identity_check[@]}" "$cert_path" >/dev/null || return 1
-		if [[ "$mode" == 1 ]]; then
-			fingerprint=$(openssl x509 -in "$cert_path" -noout -fingerprint -sha256) || return 1
-			fingerprint=${fingerprint#*=}
-			link_query="insecure=1&pinSHA256=${fingerprint//:/}"
-		fi
+		fingerprint=$(openssl x509 -in "$cert_path" -noout -fingerprint -sha256) || return 1
+		fingerprint=${fingerprint#*=}
+		link_query="insecure=1&pinSHA256=${fingerprint//:/}"
 	fi
 
 	while true; do
@@ -2971,17 +2969,25 @@ obfs:
 EOF
 		link_query="${link_query:+$link_query&}obfs=$obfs_type&obfs-password=$obfs_password"
 	fi
-	if [[ "$mode" == 3 ]]; then
+	if [[ "$mode" == 2 && "$san" == DNS:* ]]; then
 		local challenge=http
 		[[ "$challenge_port" == 443 ]] && challenge=tls
 		mkdir -- "$staging/acme" || return 1
+		email_yaml=$(jq -cn --arg email "$acme_email" '$email') || return 1
 		cat >>"$staging/config/hysteria.yaml" <<EOF || return 1
 acme:
   domains:
     - "$address"
   ca: letsencrypt
+  email: $email_yaml
   dir: /acme
   type: $challenge
+EOF
+	elif [[ "$mode" == 2 ]]; then
+		cat >>"$staging/config/hysteria.yaml" <<'EOF' || return 1
+tls:
+  cert: /etc/letsencrypt/live/hysteria-ip/fullchain.pem
+  key: /etc/letsencrypt/live/hysteria-ip/privkey.pem
 EOF
 	else
 		cat >>"$staging/config/hysteria.yaml" <<'EOF' || return 1
@@ -3008,6 +3014,28 @@ $acme_mount
         max-size: "10m"
         max-file: "3"
 EOF
+	if [[ "$mode" == 2 && "$san" == IP:* ]]; then
+		printf '  certbot:\n    image: %s\n' "$CERTBOT_DOCKER_IMAGE" >>"$staging/docker-compose.yml" || return 1
+		cat >>"$staging/docker-compose.yml" <<'EOF' || return 1
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./acme-ip:/etc/letsencrypt
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        trap 'exit 0' TERM INT
+        while :; do
+          certbot renew --non-interactive --quiet --required-profile shortlived
+          sleep 43200 & wait $$!
+        done
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOF
+	fi
 	read -r -p "Save the deployment and start Hysteria 2 on UDP $port? [Y/n]: " start_confirm || return 1
 	case ${start_confirm:-y} in
 	y|Y) ;;
@@ -3025,6 +3053,12 @@ ech:
   keyPath: /etc/proxy-hysteria/ech.pem
 EOF
 		link_query="${link_query:+$link_query&}ech=$ech_config"
+	fi
+	if [[ "$mode" == 2 && "$san" == IP:* ]]; then
+		if ! issue_hysteria_ip_certificate "$PWD/${staging#./}/acme-ip" "$address" "$acme_email"; then
+			echo "Could not obtain a trusted Let's Encrypt IP certificate. Check that TCP 80 is reachable." >&2
+			return 1
+		fi
 	fi
 	link_endpoint="$host:$port/${link_query:+?$link_query}"
 	printf '%s\n' "$link_endpoint" >"$staging/link-endpoint" || return 1
