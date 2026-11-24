@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.3.1"
+SCRIPT_VERSION="7.3.2"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -94,6 +94,7 @@ SS_DOCKER_IMAGE="ghcr.io/shadowsocks/ssserver-rust:latest"
 HYSTERIA_DOCKER_IMAGE="tobyxdd/hysteria:latest"
 CERTBOT_DOCKER_IMAGE="certbot/certbot:v5.10.0"
 HYSTERIA_STATS_PORT=10087
+HYSTERIA_ECH_DEFAULT_PUBLIC_NAME="dns.quad9.net"
 XRAY_REALITY_FALLBACK_PORT=10086
 RELEASE_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
 MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAnawkCaPdD130GQ0E6AAr
@@ -2861,8 +2862,11 @@ install_hysteria() (
 		read -r -p "Enable Encrypted Client Hello (ECH)? [y/N]: " enable_ech || return 1
 		case ${enable_ech:-n} in
 		y|Y)
+			local ech_default=$HYSTERIA_ECH_DEFAULT_PUBLIC_NAME
+			if [[ "${address,,}" == "$ech_default" ]]; then ech_default=""; fi
 			while true; do
-				read -r -p "ECH public DNS name (visible to the network): " ech_public_name || return 1
+				read -r -p "ECH public DNS name (visible to the network)${ech_default:+ [$ech_default]}: " ech_public_name || return 1
+				ech_public_name=${ech_public_name:-$ech_default}
 				if is_hysteria_dns_name "$ech_public_name" && [[ "$ech_public_name" == *.* &&
 					"${ech_public_name,,}" != "${address,,}" ]]; then
 					break
