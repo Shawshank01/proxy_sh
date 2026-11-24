@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.0.7"
+SCRIPT_VERSION="7.0.10"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2424,9 +2424,14 @@ generate_hysteria_ech() {
 }
 
 prompt_hysteria_bandwidth_mbps() {
-	local direction=$1 rate
+	local direction=$1 current=${2:-} client_direction=${3:-} rate
+	local prompt="Server $direction bandwidth in Mbps: "
+	if [[ -n "$current" ]]; then
+		prompt="Server $direction limit in Mbps (caps client $client_direction) [Enter to keep $current]: "
+	fi
 	while true; do
-		read -r -p "Server $direction bandwidth in Mbps: " rate || return 1
+		read -r -p "$prompt" rate || return 1
+		if [[ -n "$current" && -z "$rate" ]]; then return 0; fi
 		# Whole Mbps must fit in an unsigned 64-bit bits-per-second value.
 		if parse_decimal_range "$rate" 1 18446744073709; then
 			return 0
@@ -2435,14 +2440,79 @@ prompt_hysteria_bandwidth_mbps() {
 	done
 }
 
+hysteria_bandwidth_config() {
+	local config=$1 action=$2 upload=${3:-} download=${4:-}
+	awk -v action="$action" -v upload="$upload" -v download="$download" '
+		/^bandwidth:[[:blank:]]*(#.*)?$/ { in_bandwidth = 1; sections++ }
+		/^[^[:space:]#]/ && $0 !~ /^bandwidth:/ { in_bandwidth = 0 }
+		in_bandwidth && /^  (up|down):[[:blank:]]+/ {
+			key = ($0 ~ /^  up:/ ? "up" : "down")
+			value = $0
+			sub(/^  (up|down):[[:blank:]]*/, "", value)
+			comment = ""
+			if (match(value, /[[:blank:]]+#.*/)) {
+				comment = substr(value, RSTART)
+				value = substr(value, 1, RSTART - 1)
+			}
+			sub(/[[:blank:]]+$/, "", value)
+			gsub(/^["\047]|["\047]$/, "", value)
+			count[key]++
+			current[key] = value
+			rate = (key == "up" ? upload : download)
+			if (action == "write" && rate != "" && value != rate " mbps")
+				$0 = "  " key ": \"" rate " mbps\"" comment
+		}
+		action == "write" { print }
+		END {
+			if (sections != 1 || count["up"] != 1 || count["down"] != 1 ||
+				current["up"] !~ /^[0-9]+([[:blank:]]+[a-zA-Z]+)?$/ ||
+				current["down"] !~ /^[0-9]+([[:blank:]]+[a-zA-Z]+)?$/) exit 1
+			if (action == "read") printf "%s|%s\n", current["up"], current["down"]
+		}
+	' "$config"
+}
+
+change_hysteria_bandwidth() (
+	local directory=hysteria/config
+	local config="$directory/hysteria.yaml"
+	local current current_upload current_download upload download work
+	if [[ ! -f "$config" ]] || ! current=$(hysteria_bandwidth_config "$config" read); then
+		echo "Could not read the Hysteria 2 server upload and download limits." >&2
+		return 1
+	fi
+	IFS='|' read -r current_upload current_download <<<"$current"
+	echo "Current Hysteria 2 server limits: upload $current_upload, download $current_download."
+	upload=$(prompt_hysteria_bandwidth_mbps upload "$current_upload" download) || return 1
+	download=$(prompt_hysteria_bandwidth_mbps download "$current_download" upload) || return 1
+	[[ -n "$upload" || -n "$download" ]] || return 0
+
+	umask 077
+	work=$(mktemp -d "$directory/.bandwidth.XXXXXX") || return 1
+	trap 'if [[ ! -d "$work/previous" ]]; then rm -rf -- "$work"; fi' EXIT
+	mkdir -- "$work/next" || return 1
+	with_hysteria_quota_lock apply_hysteria_bandwidth "$directory" "$work" "$current" "$upload" "$download"
+)
+
+apply_hysteria_bandwidth() {
+	local directory=$1 work=$2 expected=$3 upload=$4 download=$5 current
+	if ! current=$(hysteria_bandwidth_config "$directory/hysteria.yaml" read) || [[ "$current" != "$expected" ]]; then
+		echo "The Hysteria 2 bandwidth settings changed while the prompt was open. Run the action again." >&2
+		return 1
+	fi
+	hysteria_bandwidth_config "$directory/hysteria.yaml" write "$upload" "$download" >"$work/next/hysteria.yaml" || return 1
+	apply_hysteria_file_update "$directory" "$work" bandwidth hysteria.yaml
+}
+
 download_hysteria_geodata() (
-	local directory=$1 asset checksum expected
-	local release_url=https://github.com/XTLS/Xray-rules-dat/releases/latest/download
+	local directory=$1 url asset checksum expected
 	local -a fetch=(curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 180 --retry 2)
 	mkdir -- "$directory" && cd -- "$directory" || return 1
-	for asset in geosite-expand.dat geoip-full.dat; do
-		if ! "${fetch[@]}" -o "$asset" "$release_url/$asset" ||
-			! checksum=$("${fetch[@]}" "$release_url/$asset.sha256sum"); then
+	for url in \
+		https://github.com/XTLS/Xray-rules-dat/releases/latest/download/geosite.dat \
+		https://raw.githubusercontent.com/XTLS/Xray-rules-dat/release/geoip/dat/cn.dat; do
+		asset=${url##*/}
+		if ! "${fetch[@]}" -o "$asset" "$url" ||
+			! checksum=$("${fetch[@]}" "$url.sha256sum"); then
 			echo "Could not download XTLS geodata or its checksum for $asset." >&2
 			return 1
 		fi
@@ -2454,6 +2524,88 @@ download_hysteria_geodata() (
 		fi
 	done
 )
+
+update_hysteria_geodata() (
+	local config=hysteria/config/hysteria.yaml directory=hysteria/config/geo work
+	if ! [[ -f "$config" && -f "$directory/geosite.dat" && -f "$directory/cn.dat" ]] ||
+		! grep -Fxq '  geosite: /etc/proxy-hysteria/geo/geosite.dat' "$config" ||
+		! grep -Fxq '  geoip: /etc/proxy-hysteria/geo/cn.dat' "$config"; then
+		echo "This deployment does not use the managed Hysteria 2 XTLS geodata files." >&2
+		return 1
+	fi
+
+	umask 077
+	work=$(mktemp -d "$directory/.update.XXXXXX") || return 1
+	trap 'if [[ ! -d "$work/previous" ]]; then rm -rf -- "$work"; fi' EXIT
+	echo "Downloading XTLS GeoSite and China GeoIP databases..."
+	download_hysteria_geodata "$work/next" || return 1
+	with_hysteria_quota_lock apply_hysteria_file_update "$directory" "$work" geodata geosite.dat cn.dat
+)
+
+apply_hysteria_file_update() (
+	local directory=$1 work=$2 subject=$3 file container running quota_data_dir=hysteria/config
+	shift 3
+	local -a files=("$@")
+	local changed=0 replacing=0 restart_attempted=0 committed=0
+	for file in "${files[@]}"; do
+		[[ -f "$directory/$file" && -f "$work/next/$file" ]] || return 1
+		cmp -s "$directory/$file" "$work/next/$file" || changed=1
+	done
+	if [[ "$changed" -eq 0 ]]; then
+		echo "Hysteria 2 $subject is already up to date."
+		return 0
+	fi
+
+	container=$(scheduled_hysteria_container) || return 1
+	running=$($SUDO docker inspect --type container -f '{{.State.Running}}' "$container") || return 1
+	if [[ "$running" == true ]] && ! refresh_xray_quota_accounting status; then
+		echo "Could not save Hysteria 2 quota usage before restarting. Hysteria 2 $subject update cancelled." >&2
+		return 1
+	fi
+
+	mkdir -- "$work/previous" || return 1
+	trap 'finish_hysteria_file_update "$?"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	for file in "${files[@]}"; do
+		cp -p -- "$directory/$file" "$work/previous/$file" || return 1
+		apply_preserved_file_metadata "$directory/$file" "$work/next/$file"
+	done
+
+	replacing=1
+	for file in "${files[@]}"; do
+		mv -f -- "$work/next/$file" "$directory/$file" || return 1
+	done
+	if [[ "$running" == true ]]; then
+		restart_attempted=1
+		if ! { $SUDO docker restart "$container" >/dev/null && wait_for_hysteria; }; then
+			echo "Hysteria 2 failed to start with the new $subject." >&2
+			return 1
+		fi
+	fi
+	committed=1
+	echo "Updated Hysteria 2 $subject."
+)
+
+finish_hysteria_file_update() {
+	local rc=$1 file restored=1
+	if [[ "$committed" -eq 0 && "$replacing" -eq 1 ]]; then
+		for file in "${files[@]}"; do
+			mv -f -- "$work/previous/$file" "$directory/$file" || restored=0
+		done
+		if [[ "$restored" -eq 0 ]]; then
+			echo "Could not restore Hysteria 2 $subject. Remaining backups are in $work/previous." >&2
+			return 1
+		fi
+		echo "Previous Hysteria 2 $subject restored." >&2
+		if [[ "$restart_attempted" -eq 1 ]] &&
+			! { $SUDO docker restart "$container" >/dev/null && wait_for_hysteria; }; then
+			echo "Hysteria 2 did not start after restoring the previous $subject." >&2
+		fi
+	fi
+	rm -rf -- "$work/previous"
+	return "$rc"
+}
 
 write_hysteria_quota_auth() {
 	local directory=$1
@@ -2802,8 +2954,8 @@ sniff:
   tcpPorts: "80,443"
   udpPorts: "443"
 acl:
-  geosite: /etc/proxy-hysteria/geo/geosite-expand.dat
-  geoip: /etc/proxy-hysteria/geo/geoip-full.dat
+  geosite: /etc/proxy-hysteria/geo/geosite.dat
+  geoip: /etc/proxy-hysteria/geo/cn.dat
   inline:
     - reject(geosite:cn)
     - reject(geoip:cn)
@@ -6019,8 +6171,10 @@ run_main_menu() {
 			echo "Version / Update Management:"
 			echo "1) Update existing containers to latest"
 			echo "2) Downgrade / Change container version"
+			echo "3) Update Hysteria 2 geodata"
+			echo "4) Change Hysteria 2 bandwidth limits"
 			echo "0) Back"
-			read -r -p "Enter your choice [0-2]: " ver_choice || return 0
+			read -r -p "Enter your choice [0-4]: " ver_choice || return 0
 			case $ver_choice in
 			1)
 				echo "Which container do you want to update?"
@@ -6052,6 +6206,12 @@ run_main_menu() {
 				;;
 			2)
 				change_container_version || true
+				;;
+			3)
+				update_hysteria_geodata || true
+				;;
+			4)
+				change_hysteria_bandwidth || true
 				;;
 			0)
 				;;
