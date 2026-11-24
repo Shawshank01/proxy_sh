@@ -24,16 +24,13 @@ bootstrap_error() {
 
 bootstrap_usage() {
 	cat <<'EOF'
-Usage: bash install.sh [--release-commit SHA] [--migrate-from DIRECTORY]
+Usage: bash install.sh [--release-commit SHA]
 
 Installs the signed script in /opt/proxy-sh and the proxy.sh command
 in /usr/local/bin. Requires GNU/Linux, curl, OpenSSL, and sudo for
 non-root users.
 
 --release-commit SHA   Install from a specific, signed Git commit.
---migrate-from DIR     Import an existing deployment while it is offline.
-                       Disable its quota scheduler and use Compose down
-                       in each old service directory before importing.
 EOF
 }
 
@@ -93,86 +90,6 @@ bootstrap_has_deployment() {
 		-f "$1/hysteria/docker-compose.yml" ]]
 }
 
-bootstrap_check_offline() {
-	local service=$1 container=$2 migration_source=$3 names table account
-	if command -v docker >/dev/null; then
-		names=$(timeout 10s env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
-			docker ps -a --filter "name=^/$container$" --format '{{.Names}}') || {
-			bootstrap_error "Cannot confirm that $container is offline. Make the system Docker daemon available and retry."
-			return 1
-		}
-		if [[ -n "$names" ]]; then
-			bootstrap_error "Run sudo docker compose down in the original $service directory before importing."
-			return 1
-		fi
-	fi
-	if [[ "$service" == xray || "$service" == hysteria ]]; then
-		if [[ -e /etc/systemd/system/xray-quota-check.service || -e /etc/systemd/system/xray-quota-check.timer ||
-			-e /etc/cron.d/xray-quota-check || -e /etc/proxy-sh/quota-cron.conf ]]; then
-			bootstrap_error 'Disable the previous quota scheduler from the original installation before importing.'
-			return 1
-		fi
-		if command -v crontab >/dev/null; then
-			for account in root "${SUDO_USER:-root}" "$(stat -c %U -- "$migration_source")"; do
-				if table=$(LC_ALL=C crontab -u "$account" -l 2>&1); then
-					if [[ "$table" == *'# proxy-sh:xray-quota-check'* ]]; then
-						bootstrap_error "Disable the previous quota job in $account's crontab before importing."
-						return 1
-					fi
-				elif [[ "$table" != *'no crontab for '* ]]; then
-					bootstrap_error "Cannot inspect the quota crontab for $account."
-					return 1
-				fi
-			done
-		fi
-	fi
-}
-
-bootstrap_stage_deployment() {
-	local migration_source=$1 destination=$2 staging=$3 service container config link unsupported
-	for service in xray shadowsocks hysteria; do
-		[[ -e "$migration_source/$service" || -L "$migration_source/$service" ]] || continue
-		case $service in
-		xray) container=xray_server config=server.jsonc link=vless_links.txt ;;
-		shadowsocks) container=ssserver config=server.json link=ss_links.txt ;;
-		hysteria) container=hysteria config=config/hysteria.yaml link=hysteria_links.txt ;;
-		esac
-		if ! [[ -f "$migration_source/$service/docker-compose.yml" && -f "$migration_source/$service/$config" ]]; then
-			bootstrap_error "The original $service directory needs its Compose file and $config."
-			return 1
-		fi
-		if [[ -e "$destination/$service" || -L "$destination/$service" ]]; then
-			bootstrap_error "$destination/$service already exists. Choose which deployment to keep before importing."
-			return 1
-		fi
-		bootstrap_check_offline "$service" "$container" "$migration_source" || return 1
-		unsupported=$(find "$migration_source/$service" ! -type f ! -type d -print -quit) || return 1
-		if [[ -n "$unsupported" ]]; then
-			bootstrap_error "Review and replace the symlink or special file at $unsupported before importing."
-			return 1
-		fi
-		if [[ -e "$migration_source/$service/.user_limits.lock.d" ]]; then
-			bootstrap_error 'An old quota check holds a directory lock. Wait for it to finish before importing.'
-			return 1
-		fi
-
-		# A private root-owned directory protects credentials while retaining
-		# the read modes used by the existing container bind mounts.
-		cp -R --preserve=mode -- "$migration_source/$service" "$staging/$service" || return 1
-		unsupported=$(find "$staging/$service" ! -type f ! -type d -print -quit) || return 1
-		if [[ -n "$unsupported" ]]; then
-			bootstrap_error "The source changed during import. Review $migration_source/$service and retry."
-			return 1
-		fi
-		chmod -R go-w -- "$staging/$service" && chmod 0700 -- "$staging/$service" || return 1
-		rm -f -- "$staging/$service/.user_limits.lock" || return 1
-		if [[ -f "$migration_source/$link" && ! -L "$migration_source/$link" &&
-			! -e "$staging/$service/$link" ]]; then
-			install -m 0600 -- "$migration_source/$link" "$staging/$service/$link" || return 1
-		fi
-	done
-}
-
 bootstrap_write_launcher() {
 	local application=$1
 	cat <<EOF
@@ -188,17 +105,16 @@ EOF
 }
 
 bootstrap_install_as_root() (
-	local downloaded=$1 migration_source=$2 calling_directory=$3 application=$4 launcher=$5
+	local downloaded=$1 calling_directory=$2 application=$3 launcher=$4
 	umask 077
 	if [[ "$EUID" -ne 0 ]]; then
 		bootstrap_error 'Administrative permissions are required to install the launcher.'
 		return 1
 	fi
 
-	local private_bundle staged="" locked=0
+	local private_bundle locked=0
 	private_bundle=$(mktemp -d /tmp/proxy-sh-root.XXXXXX) || return 1
 	trap '
-		if [[ -n "$staged" ]]; then rm -rf -- "$staged"; fi
 		if [[ "$locked" -eq 1 ]]; then rmdir -- "$application/.install.lock"; fi
 		rm -rf -- "$private_bundle"
 	' EXIT
@@ -208,9 +124,9 @@ bootstrap_install_as_root() (
 		return 1
 	}
 
-	if [[ -z "$migration_source" ]] && ! bootstrap_has_deployment "$application" &&
+	if ! bootstrap_has_deployment "$application" &&
 		[[ "$calling_directory" != "$application" ]] && bootstrap_has_deployment "$calling_directory"; then
-		bootstrap_error 'Found an existing deployment here. Use the documented --migrate-from procedure to import it.'
+		bootstrap_error 'Found an existing deployment here. Installation would use a different directory.'
 		return 1
 	fi
 	bootstrap_ensure_directory "$application" && bootstrap_ensure_directory "${launcher%/*}" || {
@@ -240,15 +156,12 @@ bootstrap_install_as_root() (
 		fi
 	fi
 
-	local service existing_containers
-	if [[ -n "$migration_source" ]]; then
-		staged=$(mktemp -d "$application/.import.XXXXXX") || return 1
-		bootstrap_stage_deployment "$migration_source" "$application" "$staged" || return 1
-	elif command -v docker >/dev/null && ! bootstrap_has_deployment "$application" &&
+	local existing_containers
+	if command -v docker >/dev/null && ! bootstrap_has_deployment "$application" &&
 		existing_containers=$(timeout 10s env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
 		docker ps -a --filter 'name=^/(xray_server|ssserver|hysteria)$' --format '{{.Names}}' 2>/dev/null) &&
 		[[ -n "$existing_containers" ]]; then
-		bootstrap_error 'Found an existing proxy container. Use the documented --migrate-from procedure to import its deployment.'
+		bootstrap_error 'Found an existing proxy container outside this installation.'
 		return 1
 	fi
 
@@ -259,23 +172,11 @@ bootstrap_install_as_root() (
 		bootstrap_install_file "$private_bundle/launcher" "$launcher" || return 1
 	fi
 
-	if [[ -n "$staged" ]]; then
-		for service in xray shadowsocks hysteria; do
-			[[ -d "$staged/$service" ]] || continue
-			mv -nT -- "$staged/$service" "$application/$service" || return 1
-			if [[ -d "$staged/$service" ]]; then
-				bootstrap_error "$application/$service was created during import. Review both deployments."
-				return 1
-			fi
-		done
-		printf 'Imported the deployment. Choose Restore deployment from existing config in proxy.sh, then configure quota checks if needed.\n'
-	else
-		printf 'Installed the proxy.sh command.\n'
-	fi
+	printf 'Installed the proxy.sh command.\n'
 )
 
 bootstrap_main() {
-	local revision="" migration_source="" tool
+	local revision="" tool
 	local application=/opt/proxy-sh launcher=/usr/local/bin/proxy.sh
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -289,18 +190,6 @@ bootstrap_main() {
 				return 1
 			}
 			revision=${2,,}
-			shift 2
-			;;
-		--migrate-from)
-			[[ $# -ge 2 && -d "$2" ]] || {
-				bootstrap_error 'Provide the existing deployment directory.'
-				return 1
-			}
-			migration_source=$(cd -P -- "$2" && pwd -P) || return 1
-			bootstrap_has_deployment "$migration_source" || {
-				bootstrap_error 'No existing Compose deployment found.'
-				return 1
-			}
 			shift 2
 			;;
 		*)
@@ -321,7 +210,7 @@ bootstrap_main() {
 		}
 	done
 
-	bootstrap_install_release "$revision" "$migration_source" "$application" "$launcher" || return 1
+	bootstrap_install_release "$revision" "$application" "$launcher" || return 1
 	# The bootstrap may be piped into Bash. Read menu choices from the terminal.
 	if { : </dev/tty; } 2>/dev/null; then
 		"$launcher" </dev/tty
@@ -331,7 +220,7 @@ bootstrap_main() {
 }
 
 bootstrap_install_release() (
-	local revision=$1 migration_source=$2 application=$3 launcher=$4 calling_directory
+	local revision=$1 application=$2 launcher=$3 calling_directory
 	local -a admin=()
 	if [[ "$EUID" -ne 0 ]]; then
 		command -v sudo >/dev/null || {
@@ -368,10 +257,10 @@ bootstrap_install_release() (
 	{
 		printf 'set -euo pipefail\nINSTALLER_RELEASE_PUBLIC_KEY=%q\n' "$INSTALLER_RELEASE_PUBLIC_KEY"
 		declare -f bootstrap_error bootstrap_verify_bundle bootstrap_owned_path bootstrap_trusted_directory \
-			bootstrap_ensure_directory bootstrap_install_file bootstrap_has_deployment bootstrap_check_offline \
-			bootstrap_stage_deployment bootstrap_write_launcher bootstrap_install_as_root
+			bootstrap_ensure_directory bootstrap_install_file bootstrap_has_deployment \
+			bootstrap_write_launcher bootstrap_install_as_root
 		printf '\nbootstrap_install_as_root "$@"\n'
-	} | "${admin[@]}" /bin/bash -s -- "$downloaded" "$migration_source" "$calling_directory" "$application" "$launcher"
+	} | "${admin[@]}" /bin/bash -s -- "$downloaded" "$calling_directory" "$application" "$launcher"
 )
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then

@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.0.4"
+SCRIPT_VERSION="7.0.5"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -781,44 +781,6 @@ update_container() {
 	return 0
 }
 
-# Preserve the original file when no migration is needed.
-prepare_xray_config_for_finalrules() {
-	local config_file=$1 candidate=$2 original_json
-	if ! original_json=$(jq -c . "$config_file" 2>/dev/null); then
-		# Legacy deployments may use JSONC comments. Let Xray validate the
-		# original file with its native parser.
-		cp -p "$config_file" "$candidate"
-		return
-	fi
-
-	jq '
-        ((.routing.rules // []) | any(.ip? // [] | index("geoip:cn"))) as $has_china_rules |
-        (.inbounds[]? | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings) |= (.minClientVer //= "") |
-        (.outbounds[]? | select(.tag == "direct" and .protocol == "freedom")) |= (
-            .settings //= {} |
-            .settings.domainStrategy //= "AsIs" |
-            if .settings.finalRules == null then
-                .settings.finalRules = (
-                    (if $has_china_rules then [{"action": "block", "ip": ["geoip:cn"]}] else [] end)
-                    + [{"action": "block", "network": "tcp", "port": "25"}, {"action": "allow"}]
-                )
-            else . end
-        ) |
-        (.outbounds[]? | select(.tag == "api" and .protocol == "freedom")) |= (
-            .settings //= {} |
-            if .settings.finalRules == null then
-                .settings.finalRules = [{"action": "allow"}]
-            else . end
-        )
-	' "$config_file" >"$candidate" || return 1
-
-	local candidate_json
-	candidate_json=$(jq -c . "$candidate") || return 1
-	if [[ "$candidate_json" == "$original_json" ]]; then
-		cp -p "$config_file" "$candidate"
-	fi
-}
-
 stage_xray_compose_image() {
 	# Edit only the image key of the managed xray service.
 	awk -v image="$1" '
@@ -913,11 +875,6 @@ finish_xray_image_change() {
 			cp -p "$work_dir/docker-compose.yml" "$work_dir/restore-compose.yml" &&
 				mv -f "$work_dir/restore-compose.yml" docker-compose.yml || restored=0
 		fi
-		if [[ "$config_changed" -eq 1 ]]; then
-			cp -p "$work_dir/server.jsonc" "$work_dir/restore-server.jsonc" &&
-				mv -f "$work_dir/restore-server.jsonc" server.jsonc || restored=0
-		fi
-
 		if [[ "$restored" -eq 1 && "$launch_attempted" -eq 1 ]]; then
 			if [[ -z "$old_image" ]]; then
 				$SUDO "${DOCKER_COMPOSE_CMD[@]}" "${compose_files[@]}" rm --stop --force xray || restored=0
@@ -944,7 +901,7 @@ finish_xray_image_change() {
 apply_xray_image_change() (
 	local target_image=$1 require_existing=$2
 	local container_id old_state old_image="" old_running="" target_id work_dir
-	local rollback_needed=0 launch_attempted=0 compose_changed=0 config_changed=0 override
+	local rollback_needed=0 launch_attempted=0 compose_changed=0 override
 	local -a compose_files=(-f docker-compose.yml)
 	cd xray || return 1
 	if [[ ! -f docker-compose.yml || ! -f server.jsonc ]]; then
@@ -986,22 +943,19 @@ apply_xray_image_change() (
 		echo -e "${RED}Could not find exactly one image key for the xray service.${NC}" >&2
 		return 1
 	fi
-	prepare_xray_config_for_finalrules "$work_dir/server.jsonc" "$work_dir/next-server.jsonc" || return 1
 	apply_preserved_file_metadata docker-compose.yml "$work_dir/next-compose.yml"
-	apply_preserved_file_metadata server.jsonc "$work_dir/next-server.jsonc"
 
 	# The managed Compose service reads the bind mount as root. Match it
 	# here so validation also works with owner-only configuration files.
 	if ! $SUDO docker run --rm --network none --user 0:0 --entrypoint xray \
-		-v "$work_dir/next-server.jsonc:/etc/xray/config.json:ro" "$target_id" \
+		-v "$work_dir/server.jsonc:/etc/xray/config.json:ro" "$target_id" \
 		run -test -c /etc/xray/config.json; then
 		echo -e "${RED}The target Xray image rejected the configuration.${NC}" >&2
 		return 1
 	fi
 
 	cmp -s docker-compose.yml "$work_dir/next-compose.yml" || compose_changed=1
-	cmp -s server.jsonc "$work_dir/next-server.jsonc" || config_changed=1
-	if [[ "$old_image" == "$target_id" && "$old_running" == "true" && "$compose_changed" -eq 0 && "$config_changed" -eq 0 ]] &&
+	if [[ "$old_image" == "$target_id" && "$old_running" == "true" && "$compose_changed" -eq 0 ]] &&
 		wait_for_xray_image "$target_id" server.jsonc; then
 		echo -e "${GREEN}Xray is already running the requested image and configuration.${NC}"
 		return 0
@@ -1011,9 +965,6 @@ apply_xray_image_change() (
 	rollback_needed=1
 	if [[ "$compose_changed" -eq 1 ]]; then
 		mv -f "$work_dir/next-compose.yml" docker-compose.yml || return 1
-	fi
-	if [[ "$config_changed" -eq 1 ]]; then
-		mv -f "$work_dir/next-server.jsonc" server.jsonc || return 1
 	fi
 	launch_attempted=1
 	if ! start_xray_image "$target_id" -d "${compose_files[@]}" || ! wait_for_xray_image "$target_id" server.jsonc; then
@@ -2118,10 +2069,7 @@ EOL
 TIMEZONE=$QUOTA_TIMEZONE
 EOL
 
-	cat >user_limits.db <<EOL || return 1
-# email|uuid|limit_gb|anchor_epoch|cycle_start_epoch|cycle_end_epoch|cycle_usage_bytes|last_total_bytes|status
-$QUOTA_DB_LINES
-EOL
+	write_quota_db_file user_limits.db "$QUOTA_DB_LINES" "# quota-sample||$now_epoch" "" || return 1
 
 	echo -e "${GREEN}Saved quota metadata:${NC} xray/user_limits.conf, xray/user_limits.db"
 
@@ -2150,23 +2098,18 @@ change_xray_reality_target() {
 	fi
 
 	local inbound_count tunnel_count tunnel_port
-	tunnel_count=$(jq -er '[.inbounds[]? | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))] | length' "$config_file" 2>/dev/null) || {
+	tunnel_count=$(jq -er '[.inbounds[]? | select(.tag == "reality-fallback" and .protocol == "dokodemo-door")] | length' "$config_file" 2>/dev/null) || {
 		echo -e "${RED}Xray config must be valid JSON before changing the Reality target.${NC}"
 		return 1
 	}
-	if [[ "$tunnel_count" -gt 1 ]]; then
-		echo -e "${RED}Expected at most one reality-fallback Tunnel inbound; found ${tunnel_count}. No changes were made.${NC}"
+	if [[ "$tunnel_count" -ne 1 ]]; then
+		echo -e "${RED}Expected one reality-fallback Tunnel inbound; found ${tunnel_count}.${NC}"
 		return 1
 	fi
-
-	if [[ "$tunnel_count" -eq 1 ]]; then
-		tunnel_port=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].port // empty' "$config_file") || return 1
-		if ! tunnel_port=$(parse_decimal_range "$tunnel_port" 1 65535); then
-			echo -e "${RED}The reality-fallback Tunnel has an invalid listening port. No changes were made.${NC}"
-			return 1
-		fi
-	else
-		tunnel_port=$XRAY_REALITY_FALLBACK_PORT
+	tunnel_port=$(jq -r '.inbounds[] | select(.tag == "reality-fallback" and .protocol == "dokodemo-door") | .port // empty' "$config_file") || return 1
+	if ! tunnel_port=$(parse_decimal_range "$tunnel_port" 1 65535); then
+		echo -e "${RED}The reality-fallback Tunnel has an invalid listening port.${NC}"
+		return 1
 	fi
 
 	inbound_count=$(jq -er '[.inbounds[]? | select(.protocol == "vless" and (.streamSettings.realitySettings? != null))] | length' "$config_file" 2>/dev/null) || {
@@ -2183,22 +2126,20 @@ change_xray_reality_target() {
 	old_sni=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames[0]][0] // empty' "$config_file")
 	echo -e "Current Reality target: ${GREEN}${old_target:-unknown}${NC}"
 	echo -e "Current Reality SNI: ${GREEN}${old_sni:-unknown}${NC}"
-	if [[ "$tunnel_count" -eq 1 ]]; then
-		old_fallback_address=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.rewriteAddress // [.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.address // empty' "$config_file")
-		old_fallback_port=$(jq -r '[.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.rewritePort // [.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door"))][0].settings.port // empty' "$config_file")
-		if [[ -n "$old_fallback_address" ]]; then
-			echo -e "Current Tunnel fallback destination: ${GREEN}${old_fallback_address}${old_fallback_port:+:${old_fallback_port}}${NC}"
-		fi
+	old_fallback_address=$(jq -r '.inbounds[] | select(.tag == "reality-fallback" and .protocol == "dokodemo-door") | .settings.address // empty' "$config_file") || return 1
+	old_fallback_port=$(jq -r '.inbounds[] | select(.tag == "reality-fallback" and .protocol == "dokodemo-door") | .settings.port // empty' "$config_file") || return 1
+	if [[ -n "$old_fallback_address" ]]; then
+		echo -e "Current Tunnel fallback destination: ${GREEN}${old_fallback_address}${old_fallback_port:+:${old_fallback_port}}${NC}"
 	fi
 
 	local REALITY_TARGET REALITY_SERVER_NAMES=()
 	prompt_reality_target || return 1
-	with_xray_quota_lock apply_xray_reality_target "$tunnel_count" "$tunnel_port" "$REALITY_TARGET" "${REALITY_SERVER_NAMES[@]}"
+	with_xray_quota_lock apply_xray_reality_target "$tunnel_port" "$REALITY_TARGET" "${REALITY_SERVER_NAMES[@]}"
 }
 
 apply_xray_reality_target() {
-	local tunnel_count=$1 tunnel_port=$2 reality_target=$3
-	shift 3
+	local tunnel_port=$1 reality_target=$2
+	shift 2
 	local server_names=("$@")
 	local config_file="xray/server.jsonc" links_file="xray/vless_links.txt"
 	local fallback_address="${reality_target%:*}" fallback_port="${reality_target##*:}"
@@ -2216,82 +2157,24 @@ apply_xray_reality_target() {
 		return 1
 	fi
 
-	if [[ "$tunnel_count" -eq 1 ]]; then
-		if ! jq \
-			--arg target "$tunnel_target" \
-			--arg fallback_address "$fallback_address" \
-			--argjson fallback_port "$fallback_port" \
-			--argjson server_names "$server_names_json" '
-            (.inbounds[] | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings)
-            |= (.target = $target | .serverNames = $server_names)
-            | (.inbounds[] | select(.tag == "reality-fallback" and (.protocol == "tunnel" or .protocol == "dokodemo-door")))
-            |= (.protocol = "dokodemo-door"
-                | .listen = "127.0.0.1"
-                | .settings = ((.settings // {})
-                    | del(.rewriteAddress, .rewritePort, .portMap)
-                    | .network = "tcp"
-                    | .address = $fallback_address
-                    | .port = $fallback_port
-                    | .followRedirect = false
-                    | .userLevel = 0)
-                | .sniffing = {"enabled": true, "destOverride": ["tls"], "routeOnly": true})
-            | (.routing //= {})
-            | (.routing.rules //= [])
-            | (.routing.rules) |= (
-                map(select(((.inboundTag? // []) | index("api")) != null))
-                + [
-                    {"type": "field", "inboundTag": ["reality-fallback"], "domain": $server_names, "outboundTag": "direct"},
-                    {"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "block"}
-                  ]
-                + map(select(((.inboundTag? // []) | index("reality-fallback")) == null and ((.inboundTag? // []) | index("api")) == null))
-              )
-        ' "$config_file" >"$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
-			rm -f "$tmp_config" "$config_backup"
-			echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
-			return 1
-		fi
-	else
-		if ! jq \
-			--arg target "$tunnel_target" \
-			--arg fallback_address "$fallback_address" \
-			--argjson fallback_port "$fallback_port" \
-			--argjson tunnel_port "$tunnel_port" \
-			--argjson server_names "$server_names_json" '
-            (.inbounds[] | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings)
-            |= (.target = $target | .serverNames = $server_names)
-            | .inbounds += [{
-                "listen": "127.0.0.1",
-                "port": $tunnel_port,
-                "protocol": "dokodemo-door",
-                "settings": {
-                    "network": "tcp",
-                    "address": $fallback_address,
-                    "port": $fallback_port,
-                    "followRedirect": false,
-                    "userLevel": 0
-                },
-                "sniffing": {
-                    "enabled": true,
-                    "destOverride": ["tls"],
-                    "routeOnly": true
-                },
-                "tag": "reality-fallback"
-              }]
-            | (.routing //= {})
-            | (.routing.rules //= [])
-            | (.routing.rules) |= (
-                map(select(((.inboundTag? // []) | index("api")) != null))
-                + [
-                    {"type": "field", "inboundTag": ["reality-fallback"], "domain": $server_names, "outboundTag": "direct"},
-                    {"type": "field", "inboundTag": ["reality-fallback"], "outboundTag": "block"}
-                  ]
-                + map(select(((.inboundTag? // []) | index("reality-fallback")) == null and ((.inboundTag? // []) | index("api")) == null))
-              )
-        ' "$config_file" >"$tmp_config" || ! jq -e . "$tmp_config" >/dev/null 2>&1; then
-			rm -f "$tmp_config" "$config_backup"
-			echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
-			return 1
-		fi
+	if ! jq \
+		--arg target "$tunnel_target" \
+		--arg fallback_address "$fallback_address" \
+		--argjson fallback_port "$fallback_port" \
+		--argjson server_names "$server_names_json" '
+        def fallback_rule: (.inboundTag // []) == ["reality-fallback"] and .outboundTag == "direct";
+        if ([.routing.rules[] | select(fallback_rule)] | length) != 1
+        then error("expected one direct route for the Reality fallback") else . end
+        | (.inbounds[] | select(.protocol == "vless" and .streamSettings.realitySettings? != null) | .streamSettings.realitySettings)
+        |= (.target = $target | .serverNames = $server_names)
+        | (.inbounds[] | select(.tag == "reality-fallback" and .protocol == "dokodemo-door") | .settings)
+        |= (.address = $fallback_address | .port = $fallback_port)
+        | (.routing.rules[] | select(fallback_rule) | .domain)
+        = $server_names
+    ' "$config_file" >"$tmp_config"; then
+		rm -f "$tmp_config" "$config_backup"
+		echo -e "${RED}Failed to prepare the new Xray Reality configuration. No changes were made.${NC}"
+		return 1
 	fi
 
 	local tmp_links="" sni_url
@@ -3341,9 +3224,7 @@ parse_quota_db_line() {
 		return 1
 	fi
 
-	# Older installations can have zero-padded limits in the database.
-	limit_gb=${limit_gb#"${limit_gb%%[!0]*}"}
-	limit_gb=${limit_gb:-0}
+	[[ "$limit_gb" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
 	[[ ${#limit_gb} -lt ${#MAX_USER_LIMIT_GB} ||
 		(${#limit_gb} -eq ${#MAX_USER_LIMIT_GB} && ! "$limit_gb" > "$MAX_USER_LIMIT_GB") ]]
 }
@@ -3445,7 +3326,10 @@ stage_xray_client_sync() {
             + [$next_rows[] | select(.status == "active") |
                (.id | client_key) as $id |
                select($live_managed | has($id) | not) |
-               $saved[$id] // {id, email, flow: ""}]
+               $saved[$id] //
+               (if $previous[$id].status == "suspended"
+                then error("missing VLESS client profile for suspended user " + .email)
+                else {id, email, flow: ""} end)]
         ) as $clients |
         {
             changed: ($clients != $live),
@@ -3629,12 +3513,12 @@ collect_xray_user_stats() {
 	printf '%s@%s|%s|%s|\n' "$full_id" "$started_at" "$sample_epoch" "$started_epoch"
 }
 
-# Metadata stays in comments so a quota DB still has the existing nine fields.
+# Store accounting metadata in comment lines alongside user records.
 # The collector and all quota writes hold the same lock.
 refresh_xray_quota_accounting() {
 	local mode=${1:-quiet}
 	local stats_map_file result generation sample_epoch started_epoch stats_error
-	local db_records metadata previous_generation="" previous_sample=0 calendar_initialized=0
+	local db_records metadata previous_generation="" previous_sample=""
 	local kind first second closed_start closed_end closed_usage pending_resume
 	local -A closed_cycles=() totals=()
 	db_records=$(get_quota_db_records) || return 1
@@ -3649,7 +3533,6 @@ refresh_xray_quota_accounting() {
 			fi
 			previous_generation=$first
 			previous_sample=$second
-			calendar_initialized=1
 			;;
 		'# quota-closed')
 			if ! [[ -n "$second" && "$closed_start" =~ ^[0-9]+$ && "$closed_end" =~ ^[0-9]+$ &&
@@ -3661,6 +3544,11 @@ refresh_xray_quota_accounting() {
 			;;
 		esac
 	done <<<"$metadata"
+
+	if [[ -z "$previous_sample" ]]; then
+		echo -e "${RED}Quota database is missing its accounting metadata.${NC}" >&2
+		return 1
+	fi
 
 	make_temp_file stats_map_file || return 1
 	local collector=collect_xray_user_stats
@@ -3707,7 +3595,7 @@ refresh_xray_quota_accounting() {
 		delta=0
 		interval_start=$previous_sample
 		if [[ -n "$generation" ]]; then
-			if [[ "$new_run" -eq 1 || ("$previous_sample" -eq 0 && "$last_total" -eq 0) ]]; then
+			if [[ "$new_run" -eq 1 || (-z "$previous_generation" && "$started_epoch" -gt "$previous_sample") ]]; then
 				interval_start=$started_epoch
 				last_total=0
 			fi
@@ -3720,7 +3608,7 @@ refresh_xray_quota_accounting() {
 			last_total=$current_total
 		fi
 
-		if [[ "$calendar_initialized" -eq 0 || "$now_epoch" -ge "$cycle_end" ]]; then
+		if [[ "$now_epoch" -ge "$cycle_end" ]]; then
 			cycle_bounds=$(calculate_cycle_bounds "$anchor_epoch" "$now_epoch" "$timezone") || return 1
 			new_start=${cycle_bounds%%|*}
 			new_end=${cycle_bounds##*|}
@@ -4482,8 +4370,7 @@ XRAY_QUOTA_CRON_MARKER="# proxy-sh:xray-quota-check"
 XRAY_QUOTA_RUNNER="/usr/local/lib/proxy-sh/quota-check.sh"
 XRAY_QUOTA_CRON_STATE="/etc/proxy-sh/quota-cron.conf"
 XRAY_QUOTA_CRON_FILE="/etc/cron.d/xray-quota-check"
-XRAY_QUOTA_SERVICE_FILE="/etc/systemd/system/xray-quota-check.service"
-XRAY_QUOTA_TIMER_FILE="/etc/systemd/system/xray-quota-check.timer"
+PROXY_QUOTA_SERVICE_FILE="/etc/systemd/system/proxy-quota-check.service"
 XRAY_QUOTA_SCHEDULER_MARKER="# proxy-sh:managed-quota-scheduler"
 XRAY_QUOTA_SCHEDULER_LOCK="/run/proxy-sh-quota-scheduler.lock"
 XRAY_QUOTA_JOB_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -4709,7 +4596,7 @@ quota_scheduler_probe_as() {
 
 refresh_verified_quota_runner() (
 	local verified_script=$1
-	if ! grep -Fxq "$XRAY_QUOTA_SCHEDULER_MARKER" "$XRAY_QUOTA_SERVICE_FILE" 2>/dev/null &&
+	if ! grep -Fxq "$XRAY_QUOTA_SCHEDULER_MARKER" "$PROXY_QUOTA_SERVICE_FILE" 2>/dev/null &&
 		[[ ! -f "$XRAY_QUOTA_CRON_STATE" ]]; then
 		return 0
 	fi
@@ -4722,47 +4609,11 @@ refresh_verified_quota_runner() (
 		install_quota_scheduler_file "$verified_script" "$XRAY_QUOTA_RUNNER" 0755
 )
 
-parse_systemd_timespan_sec() {
-	local val=$1 scale=1 amount
-	val=${val//[[:space:]\" ]/}
-	case "$val" in
-	*min)
-		scale=60
-		val=${val%min}
-		;;
-	*m)
-		scale=60
-		val=${val%m}
-		;;
-	*h)
-		scale=3600
-		val=${val%h}
-		;;
-	*d)
-		scale=86400
-		val=${val%d}
-		;;
-	*s) val=${val%s} ;;
-	esac
-	amount=$(parse_decimal_range "$val" 1 "$((9223372036854775807 / scale))") || return 1
-	printf '%s\n' "$((amount * scale))"
-}
-
 systemd_quota_interval() {
 	local unit
-	unit=$(cat "$XRAY_QUOTA_SERVICE_FILE" 2>/dev/null) || unit=""
-	if [[ "$unit" =~ --quota-(scheduled-)?daemon[[:space:]]+([0-9]+) ]]; then
-		parse_systemd_timespan_sec "${BASH_REMATCH[2]}"
-	else
-		legacy_quota_timer_interval
-	fi
-}
-
-legacy_quota_timer_interval() {
-	local interval
-	[[ -f "$XRAY_QUOTA_TIMER_FILE" ]] || return 1
-	interval=$(awk -F= '/^OnUnitActiveSec=/{print $2; exit}' "$XRAY_QUOTA_TIMER_FILE") || return 1
-	parse_systemd_timespan_sec "$interval"
+	unit=$(cat "$PROXY_QUOTA_SERVICE_FILE" 2>/dev/null) || return 1
+	[[ "$unit" =~ --quota-scheduled-daemon[[:space:]]+([0-9]+) ]] || return 1
+	parse_decimal_range "${BASH_REMATCH[1]}" 1 9223372036854775807
 }
 
 cron_quota_running() {
@@ -4815,19 +4666,19 @@ write_quota_personal_crontab() {
 strip_quota_cron_jobs() {
 	awk -v marker="$XRAY_QUOTA_CRON_MARKER" '
         { line = $0; sub(/[[:space:]]+$/, "", line) }
-        substr(line, length(line) - length(marker) + 1) != marker
+        substr(line, length(line) - length(marker) + 1) != marker || line !~ /[[:space:]]--quota-scheduled-cron[[:space:]]/
     '
 }
 
 valid_quota_cron_schedule() {
-	# Only the time fields can be carried over from a legacy cron job.
 	[[ "$1" =~ ^[0-9*/,-]+(\ [0-9*/,-]+){4}$ ]]
 }
 
 cron_quota_schedules() {
-	awk -v marker="$XRAY_QUOTA_CRON_MARKER" -v scope="$1" '
+	awk -v marker="$XRAY_QUOTA_CRON_MARKER" '
         { line = $0; sub(/[[:space:]]+$/, "", line) }
-        NF >= 6 && $1 !~ /^#/ && (scope == "system" || substr(line, length(line) - length(marker) + 1) == marker) {
+        NF >= 6 && $1 !~ /^#/ && line ~ /[[:space:]]--quota-scheduled-cron[[:space:]]/ &&
+            substr(line, length(line) - length(marker) + 1) == marker {
             print $1 " " $2 " " $3 " " $4 " " $5
         }
     '
@@ -5083,11 +4934,8 @@ finish_quota_scheduler_change() {
 	if [[ "$committed" -eq 0 && "$backup_ready" -eq 1 ]]; then
 		if systemd_available; then
 			if [[ "$service_touched" -eq 1 ]]; then
-				$SUDO systemctl disable --now xray-quota-check.service >/dev/null 2>&1 || true
-				$SUDO systemctl stop xray-quota-check.service >/dev/null 2>&1 || true
-			fi
-			if [[ "$timer_touched" -eq 1 ]]; then
-				$SUDO systemctl stop xray-quota-check.timer >/dev/null 2>&1 || true
+				$SUDO systemctl disable --now proxy-quota-check.service >/dev/null 2>&1 || true
+				$SUDO systemctl stop proxy-quota-check.service >/dev/null 2>&1 || true
 			fi
 		fi
 		if [[ "$runner_touched" -eq 1 ]]; then
@@ -5103,19 +4951,11 @@ finish_quota_scheduler_change() {
 			write_quota_personal_crontab "$user" "$backup_dir/crontab.$user" || restored=0
 		done
 		if [[ "$service_touched" -eq 1 ]]; then
-			restore_quota_scheduler_file "$backup_dir/service" "$XRAY_QUOTA_SERVICE_FILE" 0644 || restored=0
+			restore_quota_scheduler_file "$backup_dir/service" "$PROXY_QUOTA_SERVICE_FILE" 0644 || restored=0
 		fi
-		if [[ "$timer_touched" -eq 1 ]]; then
-			restore_quota_scheduler_file "$backup_dir/timer" "$XRAY_QUOTA_TIMER_FILE" 0644 || restored=0
-		fi
-		if systemd_available && [[ "$service_touched" -eq 1 || "$timer_touched" -eq 1 ]]; then
+		if systemd_available && [[ "$service_touched" -eq 1 ]]; then
 			$SUDO systemctl daemon-reload || restored=0
-			if [[ "$service_touched" -eq 1 ]]; then
-				restore_quota_systemd_state xray-quota-check.service "$old_service" || restored=0
-			fi
-			if [[ "$timer_touched" -eq 1 ]]; then
-				restore_quota_systemd_state xray-quota-check.timer "$old_timer" || restored=0
-			fi
+			restore_quota_systemd_state proxy-quota-check.service "$old_service" || restored=0
 		fi
 	fi
 	$SUDO rmdir -- "$XRAY_QUOTA_SCHEDULER_LOCK" || restored=0
@@ -5169,9 +5009,9 @@ apply_quota_scheduler() (
 		$SUDO rmdir -- "$XRAY_QUOTA_SCHEDULER_LOCK"
 		return 1
 	}
-	local committed=0 backup_ready=0 runner_touched=0 service_touched=0 timer_touched=0
+	local committed=0 backup_ready=0 runner_touched=0 service_touched=0
 	local cron_state_touched=0 cron_file_touched=0
-	local old_service='unknown|0' old_timer='unknown|0'
+	local old_service='unknown|0'
 	local cron_scope="" cron_account="" cron_deployment=""
 	local -A personal_backed_up=() personal_touched=()
 	trap 'finish_quota_scheduler_change "$?"' EXIT
@@ -5179,12 +5019,10 @@ apply_quota_scheduler() (
 	trap 'exit 143' TERM
 
 	if systemd_available; then
-		old_service=$(quota_systemd_unit_state xray-quota-check.service) || return 1
-		old_timer=$(quota_systemd_unit_state xray-quota-check.timer) || return 1
+		old_service=$(quota_systemd_unit_state proxy-quota-check.service) || return 1
 	fi
 	snapshot_quota_scheduler_file "$XRAY_QUOTA_RUNNER" "$backup_dir/runner" &&
-		snapshot_quota_scheduler_file "$XRAY_QUOTA_SERVICE_FILE" "$backup_dir/service" &&
-		snapshot_quota_scheduler_file "$XRAY_QUOTA_TIMER_FILE" "$backup_dir/timer" &&
+		snapshot_quota_scheduler_file "$PROXY_QUOTA_SERVICE_FILE" "$backup_dir/service" &&
 		snapshot_quota_scheduler_file "$XRAY_QUOTA_CRON_FILE" "$backup_dir/cron" &&
 		snapshot_quota_scheduler_file "$XRAY_QUOTA_CRON_STATE" "$backup_dir/cron-state" || return 1
 
@@ -5194,6 +5032,11 @@ apply_quota_scheduler() (
 			return 1
 		}
 	fi
+	if [[ "$new_scope" == system && "$cron_scope" != system && -e "$XRAY_QUOTA_CRON_FILE" ]]; then
+		echo "The cron file $XRAY_QUOTA_CRON_FILE already exists without a system cron registration." >&2
+		return 1
+	fi
+	local old_cron_scope=$cron_scope
 	if command -v crontab >/dev/null; then
 		for user in "$(id -un)" "${SUDO_USER:-}" root "$cron_account" "$account"; do
 			[[ "$user" =~ ^[A-Za-z0-9_.-]+[$]?$ ]] || continue
@@ -5219,12 +5062,12 @@ apply_quota_scheduler() (
 	systemd)
 		render_quota_service "$deployment" "$account" "$timing" >"$backup_dir/new-service" || return 1
 		service_touched=1
-		install_quota_scheduler_file "$backup_dir/new-service" "$XRAY_QUOTA_SERVICE_FILE" 0644 &&
+		install_quota_scheduler_file "$backup_dir/new-service" "$PROXY_QUOTA_SERVICE_FILE" 0644 &&
 			$SUDO systemctl daemon-reload &&
-			$SUDO systemctl enable xray-quota-check.service &&
-			$SUDO systemctl restart xray-quota-check.service &&
-			systemctl is-enabled --quiet xray-quota-check.service &&
-			systemctl is-active --quiet xray-quota-check.service || return 1
+			$SUDO systemctl enable proxy-quota-check.service &&
+			$SUDO systemctl restart proxy-quota-check.service &&
+			systemctl is-enabled --quiet proxy-quota-check.service &&
+			systemctl is-active --quiet proxy-quota-check.service || return 1
 		;;
 	cron)
 		ensure_quota_scheduler_directory "${XRAY_QUOTA_CRON_STATE%/*}" || return 1
@@ -5262,7 +5105,7 @@ apply_quota_scheduler() (
 			write_quota_personal_crontab "$user" "$backup_dir/filtered-cron" || return 1
 		fi
 	done
-	if [[ "$new_scope" != system && -f "$XRAY_QUOTA_CRON_FILE" ]]; then
+	if [[ "$old_cron_scope" == system && "$new_scope" != system && -f "$XRAY_QUOTA_CRON_FILE" ]]; then
 		cron_file_touched=1
 		$SUDO rm -f -- "$XRAY_QUOTA_CRON_FILE" || return 1
 	fi
@@ -5270,15 +5113,11 @@ apply_quota_scheduler() (
 		cron_state_touched=1
 		$SUDO rm -f -- "$XRAY_QUOTA_CRON_STATE" || return 1
 	fi
-	if [[ -f "$XRAY_QUOTA_TIMER_FILE" || "$old_timer" == enabled* || "$old_timer" == *'|1' ]]; then
-		timer_touched=1
-		remove_quota_systemd_unit "$XRAY_QUOTA_TIMER_FILE" "$old_timer" || return 1
-	fi
-	if [[ "$method" != systemd && (-f "$XRAY_QUOTA_SERVICE_FILE" || "$old_service" == enabled* || "$old_service" == *'|1') ]]; then
+	if [[ "$method" != systemd && (-f "$PROXY_QUOTA_SERVICE_FILE" || "$old_service" == enabled* || "$old_service" == *'|1') ]]; then
 		service_touched=1
-		remove_quota_systemd_unit "$XRAY_QUOTA_SERVICE_FILE" "$old_service" || return 1
+		remove_quota_systemd_unit "$PROXY_QUOTA_SERVICE_FILE" "$old_service" || return 1
 	fi
-	if systemd_available && [[ "$service_touched" -eq 1 || "$timer_touched" -eq 1 ]]; then
+	if systemd_available && [[ "$service_touched" -eq 1 ]]; then
 		$SUDO systemctl daemon-reload || return 1
 	fi
 	committed=1
@@ -5290,20 +5129,13 @@ apply_quota_scheduler() (
 )
 
 first_quota_cron_schedule() {
-	local user cron_scope="" cron_account="" cron_deployment="" schedules="" personal
-	local -A checked=()
-	if [[ -f "$XRAY_QUOTA_CRON_FILE" ]]; then
-		schedules=$(cron_quota_schedules system <"$XRAY_QUOTA_CRON_FILE") || return 1
-	fi
-	if [[ -z "$schedules" ]] && command -v crontab >/dev/null; then
-		read_quota_cron_state || true
-		for user in "$cron_account" "$(id -un)" "${SUDO_USER:-}" root; do
-			[[ -n "$user" && -z "${checked[$user]+set}" ]] || continue
-			checked["$user"]=1
-			personal=$(read_visible_quota_crontab "$user" 2>/dev/null) || continue
-			schedules=$(cron_quota_schedules personal <<<"$personal") || return 1
-			[[ -z "$schedules" ]] || break
-		done
+	local cron_scope="" cron_account="" cron_deployment="" schedules="" personal
+	read_quota_cron_state || return 1
+	if [[ "$cron_scope" == system && -f "$XRAY_QUOTA_CRON_FILE" ]]; then
+		schedules=$(cron_quota_schedules <"$XRAY_QUOTA_CRON_FILE") || return 1
+	elif [[ "$cron_scope" == personal ]] && command -v crontab >/dev/null; then
+		personal=$(read_visible_quota_crontab "$cron_account" 2>/dev/null) || return 1
+		schedules=$(cron_quota_schedules <<<"$personal") || return 1
 	fi
 	local schedule="${schedules%%$'\n'*}"
 	valid_quota_cron_schedule "$schedule" || return 1
@@ -5401,37 +5233,27 @@ configure_xray_quota_auto_check() {
 }
 
 show_xray_quota_auto_check_status() {
-	local service='unknown|0' timer='unknown|0' schedules="" count=0 interval schedule
-	local cron_scope="" cron_account="" cron_deployment="" user personal daemon="stopped"
-	local -A accounts=()
+	local service='unknown|0' schedules="" count=0 interval schedule
+	local cron_scope="" cron_account="" cron_deployment="" personal daemon="stopped"
 	echo 'Automatic proxy quota check status'
 	[[ ! -f xray/user_limits.db ]] || echo '  Xray quotas configured in this deployment'
 	[[ ! -f hysteria/config/user_limits.db ]] || echo '  Hysteria 2 quotas configured in this deployment'
 	if systemd_available; then
-		service=$(quota_systemd_unit_state xray-quota-check.service) || return 1
-		timer=$(quota_systemd_unit_state xray-quota-check.timer) || return 1
+		service=$(quota_systemd_unit_state proxy-quota-check.service) || return 1
 	fi
-	if [[ -f "$XRAY_QUOTA_SERVICE_FILE" ]]; then
+	if [[ -f "$PROXY_QUOTA_SERVICE_FILE" ]]; then
 		interval=$(systemd_quota_interval) || interval=""
 		if [[ -n "$interval" ]]; then interval=$(format_seconds_label "$interval"); fi
 		if [[ "$service" == enabled* || "$service" == *'|1' ]]; then
-			if [[ ! -f "$XRAY_QUOTA_TIMER_FILE" ]] || grep -q -- '--quota-\(scheduled-\)\?daemon' "$XRAY_QUOTA_SERVICE_FILE"; then
-				count=$((count + 1))
-			fi
+			count=$((count + 1))
 		fi
-		printf '  Systemd service installed, enablement %s, running %s%s\n' \
-			"${service%%|*}" "$([[ "${service#*|}" == 1 ]] && echo yes || echo no)" "${interval:+, every $interval}"
-	fi
-	if [[ -f "$XRAY_QUOTA_TIMER_FILE" ]]; then
-		if [[ "$timer" == enabled* || "$timer" == *'|1' ]]; then count=$((count + 1)); fi
-		interval=$(legacy_quota_timer_interval) || interval=""
-		if [[ -n "$interval" ]]; then interval=$(format_seconds_label "$interval"); fi
-		printf '  Legacy systemd timer installed, enablement %s, active %s%s\n' \
-			"${timer%%|*}" "$([[ "${timer#*|}" == 1 ]] && echo yes || echo no)" "${interval:+, every $interval}"
+		printf '  Systemd service %s installed, enablement %s, running %s%s\n' \
+			"${PROXY_QUOTA_SERVICE_FILE##*/}" "${service%%|*}" "$([[ "${service#*|}" == 1 ]] && echo yes || echo no)" "${interval:+, every $interval}"
 	fi
 	if cron_quota_running; then daemon=running; fi
-	if [[ -f "$XRAY_QUOTA_CRON_FILE" ]]; then
-		schedules=$(cron_quota_schedules system <"$XRAY_QUOTA_CRON_FILE") || return 1
+	read_quota_cron_state || true
+	if [[ "$cron_scope" == system && -f "$XRAY_QUOTA_CRON_FILE" ]]; then
+		schedules=$(cron_quota_schedules <"$XRAY_QUOTA_CRON_FILE") || return 1
 		while IFS= read -r schedule; do
 			[[ -n "$schedule" ]] || continue
 			interval=$(format_quota_cron_interval "$schedule") || interval=""
@@ -5440,22 +5262,16 @@ show_xray_quota_auto_check_status() {
 			count=$((count + 1))
 		done <<<"$schedules"
 	fi
-	read_quota_cron_state || true
-	if command -v crontab >/dev/null; then
-		for user in "$(id -un)" "${SUDO_USER:-}" root "$cron_account"; do
-			[[ "$user" =~ ^[A-Za-z0-9_.-]+[$]?$ ]] || continue
-			[[ -z "${accounts[$user]+set}" ]] || continue
-			accounts["$user"]=1
-			personal=$(read_visible_quota_crontab "$user" 2>/dev/null) || continue
-			schedules=$(cron_quota_schedules personal <<<"$personal") || return 1
-			while IFS= read -r schedule; do
-				[[ -n "$schedule" ]] || continue
-				interval=$(format_quota_cron_interval "$schedule") || interval=""
-				printf '  Personal cron for %s enabled, daemon %s, schedule %s%s\n' \
-					"$user" "$daemon" "$schedule" "${interval:+ (every $interval)}"
-				count=$((count + 1))
-			done <<<"$schedules"
-		done
+	if [[ "$cron_scope" == personal ]] && command -v crontab >/dev/null &&
+		personal=$(read_visible_quota_crontab "$cron_account" 2>/dev/null); then
+		schedules=$(cron_quota_schedules <<<"$personal") || return 1
+		while IFS= read -r schedule; do
+			[[ -n "$schedule" ]] || continue
+			interval=$(format_quota_cron_interval "$schedule") || interval=""
+			printf '  Personal cron for %s enabled, daemon %s, schedule %s%s\n' \
+				"$cron_account" "$daemon" "$schedule" "${interval:+ (every $interval)}"
+			count=$((count + 1))
+		done <<<"$schedules"
 	fi
 	if [[ "$count" -eq 0 ]]; then
 		echo '  Automatic checks: no enabled systemd or cron job found.'
@@ -5915,7 +5731,7 @@ perform_script_update() {
 
 	local verified_runner_source=""
 	if [[ -f "$XRAY_QUOTA_CRON_STATE" ]] ||
-		grep -Fxq "$XRAY_QUOTA_SCHEDULER_MARKER" "$XRAY_QUOTA_SERVICE_FILE" 2>/dev/null; then
+		grep -Fxq "$XRAY_QUOTA_SCHEDULER_MARKER" "$PROXY_QUOTA_SERVICE_FILE" 2>/dev/null; then
 		if ! make_temp_file verified_runner_source ||
 			! cp "$tmp_script" "$verified_runner_source" ||
 			! openssl dgst -sha256 -verify "$tmp_public_key" -signature "$tmp_sig" "$verified_runner_source" >/dev/null 2>&1; then

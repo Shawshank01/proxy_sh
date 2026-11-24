@@ -72,7 +72,10 @@ seed() {
         {inbounds:[{protocol:"vless", settings:{clients:
             (if $status == "active" then [{id:"uuid",email:"user",flow:""}] else [] end)}}]}
 	' >xray/server.jsonc
-	save_quota_db_content "user|uuid|$1|$jan|$jan|$feb|$2|$3|$4" "${5:-}"
+	save_quota_db_content "user|uuid|$1|$jan|$jan|$feb|$2|$3|$4" "${5:-# quota-sample|$fixture_generation|$fixture_now}"
+	if [[ "$4" == suspended ]]; then
+		printf '%s\n' '# vless-client {"id":"uuid","email":"user","flow":""}' >>xray/user_limits.db
+	fi
 }
 
 assert_usage() {
@@ -87,7 +90,7 @@ assert_closed_usage() {
 	assert_equal "$1" "$usage"
 }
 
-# Upgrade a nine-field database, then grow the new counter past the old one.
+# Sample traffic across a container restart without double-counting.
 seed 0 300 100 active
 fixture_counter=160
 check_and_apply_xray_quotas quiet
@@ -170,7 +173,7 @@ check_and_apply_xray_quotas quiet
 assert_usage 5 115 active
 
 # Opening quota status samples traffic, but applying a quota is a separate action.
-seed 1 0 0 active
+seed 1 0 0 active "# quota-sample||$fixture_now"
 fixture_counter=1073741824
 show_proxy_quota_status >status
 assert_usage 1073741824 1073741824 active

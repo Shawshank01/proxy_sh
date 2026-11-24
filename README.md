@@ -47,8 +47,8 @@ The installer verifies the release signature and checksum before requesting `sud
      The installer asks for the server's upload and download limits in Mbps for Brutal and prints the corresponding client settings. The standard link carries connection settings. Set both bandwidth values in the client to use Brutal in both directions. The server upload limit caps client download, and the server download limit caps client upload. Use lower client values if its connection is slower. [Hysteria 2 bandwidth documentation](https://v2.hysteria.network/docs/advanced/Full-Client-Config/#bandwidth) and [link format](https://v2.hysteria.network/docs/developers/URI-Scheme/#implementation-notes)
      Mainland China destination blocking defaults to on at the installer prompt. It rejects GeoSite `cn` domains and GeoIP `cn` IPs, and enables hostname sniffing on TCP 80/443 and UDP 443 for requests that arrive as IP addresses. Hysteria downloads and caches the lists in `hysteria/geo/`. To block additional destinations, add rules under `acl.inline` in `hysteria/config/hysteria.yaml`, such as `reject(suffix:example.com)` or `reject(192.0.2.0/24)`, then restart the container. [Hysteria 2 ACL documentation](https://v2.hysteria.network/docs/advanced/ACL/#legacy-syntax)
   3. **Shadowsocks (ss-2022)**. Sets up a multi-user Shadowsocks 2022 server on the selected port and saves `ss://` links to `shadowsocks/ss_links.txt`.
-- **3) Update / Change version of existing container**. Update Xray, Hysteria 2, or Shadowsocks to the latest Docker image or select a version tag. Updating to latest releases any version lock. For Xray, the target image validates the configuration, including any staged `finalRules` or `minClientVer` changes, before deployment. If startup or the readiness check fails, the script restores both configuration files and the previous container image.
-- **4) Change Xray Reality target domain**. Re-runs the Reality target checks, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. On legacy configs, this also adds the loopback Tunnel. Failed restarts automatically roll back the previous configuration.
+- **3) Update / Change version of existing container**. Update Xray, Hysteria 2, or Shadowsocks to the latest Docker image or select a version tag. Updating to latest releases any version lock. For Xray, the target image validates the existing server configuration before deployment. If startup or the readiness check fails, the script restores the previous Compose file and container image.
+- **4) Change Xray Reality target domain**. Re-runs the Reality target checks, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. Failed restarts automatically roll back the previous configuration.
 - **5) Restore deployment from existing config**. Recreates and starts containers from existing config directories.
 - **6) Show proxy links**. Select Xray, Hysteria 2, or Shadowsocks to display its saved client links.
 - **7) Show proxy usage / Manage quotas**
@@ -144,18 +144,18 @@ If you cannot establish a proxy connection or services fail to start, check the 
 
 ### 2. Checking Automatic Quota Check Logs
 
-If per-user quota checking is automated via systemd, inspect the daemon logs:
+The systemd quota service is named `proxy-quota-check.service`.
 
 - **View recent quota check logs:**
 
   ```bash
-  sudo journalctl -u xray-quota-check.service -n 50 --no-pager
+  sudo journalctl -u proxy-quota-check.service -n 50 --no-pager
   ```
 
 - **Follow live quota check daemon logs:**
 
   ```bash
-  sudo journalctl -u xray-quota-check.service -f
+  sudo journalctl -u proxy-quota-check.service -f
   ```
 
 ### 3. Validating Xray Configuration

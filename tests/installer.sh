@@ -127,31 +127,12 @@ grep -Fxq 'Run proxy.sh to manage your deployment.' <<<"$output"
 ! grep -Fq "0|$application|" <<<"$output" || fail 'The installer opened the menu without a terminal'
 grep -Fxq '# locally installed version' "$application/proxy.sh"
 
-old="$fixture/old deployment"
-mkdir -p "$old/xray" "$old/shadowsocks" "$old/hysteria/config" "$old/hysteria/acme"
-printf 'services: {}\n' | tee "$old/xray/docker-compose.yml" "$old/shadowsocks/docker-compose.yml" \
-	"$old/hysteria/docker-compose.yml" >/dev/null
-printf '{}\n' | tee "$old/xray/server.jsonc" "$old/shadowsocks/server.json" >/dev/null
-printf 'listen: ":443"\n' >"$old/hysteria/config/hysteria.yaml"
-printf 'acme state\n' >"$old/hysteria/acme/fixture"
-printf 'hysteria2://example.invalid\n' >"$old/hysteria/hysteria_links.txt"
-printf 'quota and profiles\n' >"$old/xray/user_limits.db"
-printf 'legacy link\n' >"$old/vless_links.txt"
-chmod -R a+rX "$old"
 touch "$fixture/container-present"
-if run_installer --release-commit "$revision" --migrate-from "$old"; then fail 'Imported live deployment'; fi
+if run_installer --release-commit "$revision"; then fail 'Ignored an existing container'; fi
 [[ ! -e "$application/xray" ]]
-rm -f "$fixture/container-present"
-
-run_installer --release-commit "$revision" --migrate-from "$old"
-cmp "$old/xray/user_limits.db" "$application/xray/user_limits.db"
-cmp "$old/vless_links.txt" "$application/xray/vless_links.txt"
-cmp "$old/shadowsocks/server.json" "$application/shadowsocks/server.json"
-diff -r "$old/hysteria" "$application/hysteria"
-[[ "$(stat -c '%u:%a' "$application/hysteria")" == 0:700 ]]
-[[ "$(stat -c '%u:%a' "$application/xray")" == 0:700 ]]
+mkdir -p "$application/xray"
+printf 'services: {}\n' >"$application/xray/docker-compose.yml"
 run_installer --release-commit "$revision"
+grep -Fxq 'services: {}' "$application/xray/docker-compose.yml"
 grep -Fxq '# locally installed version' "$application/proxy.sh"
-if run_installer --release-commit "$revision" --migrate-from "$old"; then fail 'Overwrote existing deployment'; fi
-cmp "$old/xray/user_limits.db" "$application/xray/user_limits.db"
 echo 'Installer regression tests passed.'

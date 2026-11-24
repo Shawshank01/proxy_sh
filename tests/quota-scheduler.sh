@@ -15,8 +15,7 @@ mkdir -p "$fixture/bin" "$fixture/etc/cron.d" "$fixture/etc/systemd" "$fixture/e
 XRAY_QUOTA_RUNNER="$fixture/lib/quota-check.sh"
 XRAY_QUOTA_CRON_STATE="$fixture/etc/proxy-sh/quota-cron.conf"
 XRAY_QUOTA_CRON_FILE="$fixture/etc/cron.d/xray-quota-check"
-XRAY_QUOTA_SERVICE_FILE="$fixture/etc/systemd/xray-quota-check.service"
-XRAY_QUOTA_TIMER_FILE="$fixture/etc/systemd/xray-quota-check.timer"
+PROXY_QUOTA_SERVICE_FILE="$fixture/etc/systemd/proxy-quota-check.service"
 XRAY_QUOTA_SCHEDULER_LOCK="$fixture/run/scheduler.lock"
 deployment="$fixture/deploy with spaces 15% complete"
 mkdir -p "$deployment/xray"
@@ -107,57 +106,33 @@ export PATH="$fixture/bin:$PATH"
 account=$(id -un)
 personal="$QUOTA_TEST_SPOOL/$account"
 
-printf 'legacy runner\n' >"$XRAY_QUOTA_RUNNER"
-printf '[Timer]\nOnUnitActiveSec=2min\n' >"$XRAY_QUOTA_TIMER_FILE"
-printf '[Service]\nType=oneshot\nExecStart=/bin/bash legacy --quota-check\n' >"$XRAY_QUOTA_SERVICE_FILE"
-printf '*/5 * * * * root /bin/bash legacy --quota-check\n' >"$XRAY_QUOTA_CRON_FILE"
-printf '15 * * * * housekeeping --quota-check\n*/3 * * * * /bin/bash legacy --quota-check %s\n' \
-	"$XRAY_QUOTA_CRON_MARKER" >"$personal"
-touch "$fixture/services/xray-quota-check.timer.enabled" "$fixture/services/xray-quota-check.timer.active" \
-	"$fixture/services/cron.service.active"
-cp "$XRAY_QUOTA_SERVICE_FILE" "$fixture/original-service"
-cp "$XRAY_QUOTA_TIMER_FILE" "$fixture/original-timer"
-cp "$XRAY_QUOTA_CRON_FILE" "$fixture/original-cron"
-cp "$personal" "$fixture/original-personal"
+touch "$fixture/services/cron.service.active"
+printf '%s\n' '15 * * * * housekeeping --quota-check' >"$personal"
 : >"$fixture/activity"
 
 show_xray_quota_auto_check_status >"$fixture/status"
-grep -q 'Legacy systemd timer .*every 2 minutes' "$fixture/status"
-grep -Fq 'System cron enabled, daemon running, schedule */5 * * * * (every 5 minutes)' "$fixture/status"
-grep -q 'Multiple quota jobs are enabled' "$fixture/status"
+grep -Fq 'Automatic checks: no enabled systemd or cron job found.' "$fixture/status"
 [[ ! -s "$fixture/activity" ]]
-cmp "$XRAY_QUOTA_SERVICE_FILE" "$fixture/original-service"
-cmp "$XRAY_QUOTA_TIMER_FILE" "$fixture/original-timer"
-cmp "$XRAY_QUOTA_CRON_FILE" "$fixture/original-cron"
-cmp "$personal" "$fixture/original-personal"
 
-# Failure while starting the replacement preserves both former jobs.
+# Failure while starting the service leaves no partially configured job.
 touch "$fixture/fail-restart"
-if configure_xray_quota_auto_check <<<$'1\n' >/dev/null 2>&1; then fail 'Expected systemd failure'; fi
-cmp "$XRAY_QUOTA_SERVICE_FILE" "$fixture/original-service"
-cmp "$XRAY_QUOTA_TIMER_FILE" "$fixture/original-timer"
-cmp "$XRAY_QUOTA_CRON_FILE" "$fixture/original-cron"
-cmp "$personal" "$fixture/original-personal"
-grep -Fxq 'legacy runner' "$XRAY_QUOTA_RUNNER"
-[[ -f "$fixture/services/xray-quota-check.timer.active" ]]
-if grep -q 'disable --now xray-quota-check.timer' "$fixture/activity"; then fail 'Disabled the timer too early'; fi
+if configure_xray_quota_auto_check <<<$'1\n2' >/dev/null 2>&1; then fail 'Expected systemd failure'; fi
+[[ ! -e "$PROXY_QUOTA_SERVICE_FILE" && ! -e "$XRAY_QUOTA_RUNNER" ]]
+[[ ! -e "$fixture/services/proxy-quota-check.service.enabled" ]]
 
-# Explicit migration keeps the two-minute interval and takes down the
-# timer and cron only once systemd passes verification.
-configure_xray_quota_auto_check <<<$'1\n'
-grep -Fxq "WorkingDirectory=${deployment//%/%%}/." "$XRAY_QUOTA_SERVICE_FILE"
-grep -Fxq "ExecStart=/bin/bash $XRAY_QUOTA_RUNNER --quota-scheduled-daemon 120" "$XRAY_QUOTA_SERVICE_FILE"
+configure_xray_quota_auto_check <<<$'1\n2'
+grep -Fxq "WorkingDirectory=${deployment//%/%%}/." "$PROXY_QUOTA_SERVICE_FILE"
+grep -Fxq "ExecStart=/bin/bash $XRAY_QUOTA_RUNNER --quota-scheduled-daemon 120" "$PROXY_QUOTA_SERVICE_FILE"
 show_xray_quota_auto_check_status >"$fixture/status"
-grep -Fq 'Systemd service installed, enablement enabled, running yes, every 2 minutes' "$fixture/status"
-[[ -f "$fixture/services/xray-quota-check.service.active" && ! -e "$XRAY_QUOTA_TIMER_FILE" && ! -e "$XRAY_QUOTA_CRON_FILE" ]]
+grep -Fq 'Systemd service proxy-quota-check.service installed, enablement enabled, running yes, every 2 minutes' "$fixture/status"
+[[ -f "$fixture/services/proxy-quota-check.service.active" && ! -e "$XRAY_QUOTA_CRON_FILE" ]]
 grep -Fxq '15 * * * * housekeeping --quota-check' "$personal"
-if grep -Fq "$XRAY_QUOTA_CRON_MARKER" "$personal"; then fail 'Legacy cron entry remains'; fi
 
-cp "$XRAY_QUOTA_SERVICE_FILE" "$fixture/active-service"
+cp "$PROXY_QUOTA_SERVICE_FILE" "$fixture/active-service"
 touch "$fixture/fail-cron-write"
 if configure_xray_quota_auto_check <<<$'2\n' >/dev/null 2>&1; then fail 'Expected cron setup failure'; fi
-cmp "$XRAY_QUOTA_SERVICE_FILE" "$fixture/active-service"
-[[ -f "$fixture/services/xray-quota-check.service.active" && ! -e "$XRAY_QUOTA_CRON_STATE" ]]
+cmp "$PROXY_QUOTA_SERVICE_FILE" "$fixture/active-service"
+[[ -f "$fixture/services/proxy-quota-check.service.active" && ! -e "$XRAY_QUOTA_CRON_STATE" ]]
 
 # Cron reads the deployment path from the root-owned registration.
 configure_xray_quota_auto_check <<<$'2\n'
@@ -177,7 +152,7 @@ read_quota_cron_state
 )
 grep -q '^\*/2 \* \* \* \* .*--quota-scheduled-cron' "$XRAY_QUOTA_CRON_FILE"
 if grep -Fq "$deployment" "$XRAY_QUOTA_CRON_FILE"; then fail 'Embedded the deployment path in the cron command'; fi
-[[ ! -e "$XRAY_QUOTA_SERVICE_FILE" && ! -f "$fixture/services/xray-quota-check.service.active" ]]
+[[ ! -e "$PROXY_QUOTA_SERVICE_FILE" && ! -f "$fixture/services/proxy-quota-check.service.active" ]]
 
 # A verified-update runner refresh on a cron-only deployment keeps its job.
 printf 'new runner from a verified update\n' >"$fixture/verified"

@@ -83,18 +83,9 @@ finalize_quota_db_update "$managed_row|active" 1
 assert_clients "[$manual_profile,$managed_profile]"
 if grep -q '^# vless-client ' "$db"; then fail 'Retained an active client profile'; fi
 
-# A legacy suspended record with no profile is restored using the existing
-# default entry. An unrelated active client's new settings still survive.
-legacy=11111111-2222-3333-4444-555555555555
-legacy_row="legacy|$legacy|1|100|100|200|0|0"
-save_quota_db_content "$managed_row|active"$'\n'"$legacy_row|suspended"
-finalize_quota_db_update "$managed_row|active"$'\n'"$legacy_row|active" 1
-assert_clients "[$manual_profile,$managed_profile,{\"id\":\"$legacy\",\"email\":\"legacy\",\"flow\":\"\"}]"
-
 # An explicit remove uses the previous ownership database and deletes the
 # final managed user without touching the manual client.
 select_quota_user() { printf '%s\n' "$selected_user"; }
-selected_user=legacy remove_xray_user >/dev/null
 printf 'vless://%s@host:443#managed\nvless://%s@host:443#manual\n' "$managed" "$manual" >xray/vless_links.txt
 selected_user=managed remove_xray_user >/dev/null
 assert_clients "[$manual_profile]"
