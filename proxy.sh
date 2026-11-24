@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.3.0"
+SCRIPT_VERSION="7.3.1"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2710,11 +2710,15 @@ wait_for_hysteria() {
 issue_hysteria_ip_certificate() {
 	local directory=$1 address=$2 email=$3
 	local lineage="$directory/live/hysteria-ip"
+	local -a contact=()
+	if [[ -n "$email" ]]; then
+		contact=(--email "$email")
+	fi
 	mkdir -- "$directory" || return 1
 	echo "Requesting a new Let's Encrypt certificate for $address..."
 	$SUDO docker run --rm --network host \
 		-v "$directory:/etc/letsencrypt" "$CERTBOT_DOCKER_IMAGE" \
-		certonly --non-interactive --agree-tos --email "$email" --standalone \
+		certonly --non-interactive --agree-tos "${contact[@]}" --standalone \
 		--required-profile shortlived --cert-name hysteria-ip --ip-address "$address" || return 1
 	$SUDO test -s "$lineage/privkey.pem" &&
 		$SUDO openssl verify -purpose sslserver -verify_ip "$address" \
@@ -2723,7 +2727,7 @@ issue_hysteria_ip_certificate() {
 
 install_hysteria() (
 	local address host port mode cert_path key_path san
-	local challenge_port fingerprint staging start_confirm acme_mount="" acme_email email_yaml
+	local challenge_port fingerprint staging start_confirm acme_mount="" acme_email
 	local enable_ech ech_public_name="" ech_config link_query="" link_endpoint
 	local obfs_choice obfs_type="" obfs_password
 	local bandwidth_up bandwidth_down
@@ -2810,9 +2814,9 @@ install_hysteria() (
 		fi
 		if [[ "$mode" == 2 ]]; then
 			while true; do
-				read -r -p "ACME account email address [0 to go back]: " acme_email || return 1
+				read -r -p "ACME email [Enter to skip, 0 to go back]: " acme_email || return 1
 				[[ "$acme_email" != 0 ]] || continue 2
-				if [[ "$acme_email" =~ ^[^[:space:]@]+@[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$ ]]; then break; fi
+				if [[ -z "$acme_email" || "$acme_email" =~ ^[^[:space:]@]+@[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$ ]]; then break; fi
 				echo "Enter a valid email address."
 			done
 		fi
@@ -2970,16 +2974,18 @@ EOF
 		link_query="${link_query:+$link_query&}obfs=$obfs_type&obfs-password=$obfs_password"
 	fi
 	if [[ "$mode" == 2 && "$san" == DNS:* ]]; then
-		local challenge=http
+		local challenge=http email_yaml email_line=""
 		[[ "$challenge_port" == 443 ]] && challenge=tls
 		mkdir -- "$staging/acme" || return 1
-		email_yaml=$(jq -cn --arg email "$acme_email" '$email') || return 1
+		if [[ -n "$acme_email" ]]; then
+			email_yaml=$(jq -cn --arg email "$acme_email" '$email') || return 1
+			email_line=$'\n'"  email: $email_yaml"
+		fi
 		cat >>"$staging/config/hysteria.yaml" <<EOF || return 1
 acme:
   domains:
     - "$address"
-  ca: letsencrypt
-  email: $email_yaml
+  ca: letsencrypt$email_line
   dir: /acme
   type: $challenge
 EOF
