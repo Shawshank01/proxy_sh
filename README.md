@@ -45,7 +45,7 @@ The installer verifies the release signature and checksum before requesting `sud
      Choose **Public VPS IP address** to connect directly by IPv4 or IPv6 with a pinned certificate or an existing certificate for the IP. Choose **Domain name** if DNS already points the hostname to your VPS. This also offers automatic Let's Encrypt certificates.
      By default, Hysteria 2 mimics HTTP/3. Choose Salamander or experimental Gecko to enable obfuscation. The script generates a separate obfuscation password and includes it in the saved link. Use a client that supports the selected mode. [Hysteria 2 obfuscation documentation](https://v2.hysteria.network/docs/advanced/Full-Server-Config/#obfuscation)
      The installer asks for the server's upload and download limits in Mbps for Brutal and prints the corresponding client settings. The standard link carries connection settings. Set both bandwidth values in the client to use Brutal in both directions. The server upload limit caps client download, and the server download limit caps client upload. Use lower client values if its connection is slower. [Hysteria 2 bandwidth documentation](https://v2.hysteria.network/docs/advanced/Full-Client-Config/#bandwidth) and [link format](https://v2.hysteria.network/docs/developers/URI-Scheme/#implementation-notes)
-     Mainland China destination blocking defaults to on at the installer prompt. It rejects GeoSite `cn` domains and GeoIP `cn` IPs, and enables hostname sniffing on TCP 80/443 and UDP 443 for requests that arrive as IP addresses. Hysteria downloads and caches the lists in `hysteria/geo/`. To block additional destinations, add rules under `acl.inline` in `hysteria/config/hysteria.yaml`, such as `reject(suffix:example.com)` or `reject(192.0.2.0/24)`, then restart the container. [Hysteria 2 ACL documentation](https://v2.hysteria.network/docs/advanced/ACL/#legacy-syntax)
+     Mainland China destination blocking defaults to on at the installer prompt. It rejects GeoSite `cn` domains and GeoIP `cn` IPs, and enables hostname sniffing on TCP 80/443 and UDP 443 for requests that arrive as IP addresses. The installer verifies and stores XTLS GeoSite Expanded and GeoIP Full in `hysteria/config/geo/`. These files are fixed at installation time. To block additional destinations, add rules under `acl.inline` in `hysteria/config/hysteria.yaml`, such as `reject(suffix:example.com)` or `reject(192.0.2.0/24)`, then restart the container. [XTLS geodata releases](https://github.com/XTLS/Xray-rules-dat/releases) · [Hysteria 2 ACL documentation](https://v2.hysteria.network/docs/advanced/ACL/#legacy-syntax)
   3. **Shadowsocks (ss-2022)**. Sets up a multi-user Shadowsocks 2022 server on the selected port and saves `ss://` links to `shadowsocks/ss_links.txt`.
 - **3) Update / Change version of existing container**. Update Xray, Hysteria 2, or Shadowsocks to the latest Docker image or select a version tag. Updating to latest releases any version lock. For Xray, the target image validates the existing server configuration before deployment. If startup or the readiness check fails, the script restores the previous Compose file and container image.
 - **4) Change Xray Reality target domain**. Re-runs the Reality target checks, updates the Tunnel destination while preserving users and keys, restarts the container, and updates saved VLESS links with the new SNI. Failed restarts automatically roll back the previous configuration.
@@ -60,11 +60,13 @@ The installer verifies the release signature and checksum before requesting `sud
   - Configure automatic quota checks via the systemd daemon or cron (1/2/5-minute intervals)
   - Show automatic quota check configuration status (method and interval/schedule)
   - Change quota billing timezone
-- **8) Manage users (Add/Remove for Xray / Shadowsocks)**
+- **8) Manage users (Add/Remove for Xray / Shadowsocks / Hysteria 2)**
   - Add Xray users without recreating existing users
   - Remove specific Xray users without affecting others
   - Add Shadowsocks users without recreating existing users
   - Remove a selected Shadowsocks user without affecting others
+  - Add a Hysteria 2 user with a generated password, saved client link, and optional monthly limit
+  - Remove a Hysteria 2 user and revoke their credentials. If they are connected, the script restarts Hysteria 2 to end their session, briefly disconnecting other users.
 - **9) Delete container and config**. Stops the selected Docker container and deletes the corresponding config directory and link files.
 - **10) Exit**
 

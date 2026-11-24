@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.0.5"
+SCRIPT_VERSION="7.0.7"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -2435,6 +2435,26 @@ prompt_hysteria_bandwidth_mbps() {
 	done
 }
 
+download_hysteria_geodata() (
+	local directory=$1 asset checksum expected
+	local release_url=https://github.com/XTLS/Xray-rules-dat/releases/latest/download
+	local -a fetch=(curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 180 --retry 2)
+	mkdir -- "$directory" && cd -- "$directory" || return 1
+	for asset in geosite-expand.dat geoip-full.dat; do
+		if ! "${fetch[@]}" -o "$asset" "$release_url/$asset" ||
+			! checksum=$("${fetch[@]}" "$release_url/$asset.sha256sum"); then
+			echo "Could not download XTLS geodata or its checksum for $asset." >&2
+			return 1
+		fi
+		read -r expected _ <<<"$checksum"
+		if ! [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] ||
+			! printf '%s  %s\n' "$expected" "$asset" | sha256sum --check --status; then
+			echo "XTLS geodata checksum verification failed for $asset." >&2
+			return 1
+		fi
+	done
+)
+
 write_hysteria_quota_auth() {
 	local directory=$1
 	cat >"$directory/quota-auth.sh" <<'AUTH' || return 1
@@ -2531,12 +2551,12 @@ wait_for_hysteria() {
 install_hysteria() (
 	local address_choice address host port mode cert_path key_path san
 	local challenge_port fingerprint staging start_confirm acme_mount=""
-	local enable_ech ech_public_name="" ech_config link_query=""
+	local enable_ech ech_public_name="" ech_config link_query="" link_endpoint
 	local obfs_choice obfs_type="" obfs_password
 	local bandwidth_up bandwidth_down
 	local user_count user_number
 	local set_limits limit has_quota_limits=0 quota_timezone=$DEFAULT_QUOTA_TIMEZONE billing_anchor=""
-	local china_rules_choice geo_workdir="" geo_mount=""
+	local china_rules_choice block_china=0
 	local stats_port=$HYSTERIA_STATS_PORT stats_secret
 	local -a identity_check user_passwords=()
 
@@ -2723,9 +2743,7 @@ install_hysteria() (
 		read -r -p "Block outbound connections to mainland China domains and IPs? [Y/n]: " china_rules_choice || return 1
 		case ${china_rules_choice:-y} in
 		y|Y)
-			mkdir -- "$staging/geo" || return 1
-			geo_workdir='    working_dir: /var/lib/hysteria'
-			geo_mount='      - ./geo:/var/lib/hysteria'
+			block_china=1
 			break
 			;;
 		n|N) break ;;
@@ -2776,7 +2794,7 @@ trafficStats:
   listen: "127.0.0.1:$stats_port"
   secret: "$stats_secret"
 EOF
-	if [[ -n "$geo_mount" ]]; then
+	if [[ "$block_china" -eq 1 ]]; then
 		cat >>"$staging/config/hysteria.yaml" <<'EOF' || return 1
 sniff:
   enable: true
@@ -2784,6 +2802,8 @@ sniff:
   tcpPorts: "80,443"
   udpPorts: "443"
 acl:
+  geosite: /etc/proxy-hysteria/geo/geosite-expand.dat
+  geoip: /etc/proxy-hysteria/geo/geoip-full.dat
   inline:
     - reject(geosite:cn)
     - reject(geoip:cn)
@@ -2826,11 +2846,9 @@ services:
     container_name: hysteria
     restart: unless-stopped
     network_mode: host
-$geo_workdir
     volumes:
       - ./config:/etc/proxy-hysteria:ro
 $acme_mount
-$geo_mount
     command: ["server", "-c", "/etc/proxy-hysteria/hysteria.yaml"]
     logging:
       driver: "json-file"
@@ -2844,6 +2862,10 @@ EOF
 	*) return 0 ;;
 	esac
 
+	if [[ "$block_china" -eq 1 ]]; then
+		echo "Downloading XTLS GeoSite and GeoIP databases..."
+		download_hysteria_geodata "$staging/config/geo" || return 1
+	fi
 	if [[ -n "$ech_public_name" ]]; then
 		ech_config=$(generate_hysteria_ech "$PWD/${staging#./}/config" "$ech_public_name") || return 1
 		cat >>"$staging/config/hysteria.yaml" <<'EOF' || return 1
@@ -2852,9 +2874,11 @@ ech:
 EOF
 		link_query="${link_query:+$link_query&}ech=$ech_config"
 	fi
+	link_endpoint="$host:$port/${link_query:+?$link_query}"
+	printf '%s\n' "$link_endpoint" >"$staging/link-endpoint" || return 1
 	for ((user_number = 1; user_number <= user_count; user_number++)); do
-		printf 'hysteria2://user%s:%s@%s:%s/%s#Hysteria%%202-user%s\n' \
-			"$user_number" "${user_passwords[user_number]}" "$host" "$port" "${link_query:+?$link_query}" "$user_number" ||
+		printf 'hysteria2://user%s:%s@%s#Hysteria%%202-user%s\n' \
+			"$user_number" "${user_passwords[user_number]}" "$link_endpoint" "$user_number" ||
 			return 1
 	done >"$staging/hysteria_links.txt" || return 1
 
@@ -2864,9 +2888,6 @@ EOF
 		return 1
 	fi
 	staging=""
-	if [[ -n "$geo_mount" ]]; then
-		echo "Hysteria 2 will download its GeoIP and GeoSite databases if needed."
-	fi
 	if ! (cd hysteria && { [[ -n "$ech_public_name" ]] || $SUDO "${DOCKER_COMPOSE_CMD[@]}" pull; } &&
 		$SUDO "${DOCKER_COMPOSE_CMD[@]}" up -d) || ! wait_for_hysteria; then
 		echo "Hysteria 2 settings were saved. After fixing startup, choose Restore deployment from existing config." >&2
@@ -3713,7 +3734,7 @@ sample_hysteria_traffic() (
 	[[ "$after" == "$before" ]] || return 1
 
 	usernames=$(sed -nE '
-		s#^hysteria2://(user[0-9]+):[[:xdigit:]]+@.*#\1#p
+		s#^hysteria2://([a-z0-9_-]+):[[:xdigit:]]+@.*#\1#p
 		s#^hysteria2://[[:xdigit:]]+@.*#user#p
 	' hysteria/hysteria_links.txt 2>/dev/null) || usernames=""
 	[[ ! -e "$database" ]] || previous=$database
@@ -3773,13 +3794,21 @@ collect_hysteria_quota_stats() {
 }
 
 disconnect_suspended_hysteria_users() {
-	local suspended address secret online container_id
+	local suspended
 	suspended=$(get_quota_db_records | awk -F'|' '$9 == "suspended" { print $1 }' | jq -Rn '[inputs]') || return 1
 	[[ "$suspended" != '[]' ]] || return 0
+	if ! disconnect_hysteria_users "$suspended"; then
+		echo "Could not disconnect suspended Hysteria 2 sessions. The next quota check will retry." >&2
+		return 1
+	fi
+}
+
+disconnect_hysteria_users() {
+	local users=$1 address secret online container_id
 	read -r address secret < <(read_hysteria_traffic_endpoint) || return 1
 	online=$(hysteria_traffic_request "$address" "$secret" online) || return 1
 	jq -e 'type == "object"' <<<"$online" >/dev/null || return 1
-	if ! jq -e --argjson suspended "$suspended" '. as $online | any($suspended[]; ($online[.] // 0) > 0)' \
+	if ! jq -e --argjson users "$users" '. as $online | any($users[]; ($online[.] // 0) > 0)' \
 		<<<"$online" >/dev/null; then
 		return 0
 	fi
@@ -3787,10 +3816,7 @@ disconnect_suspended_hysteria_users() {
 	# Hysteria's /kick marks only the next session that logs traffic. Restart
 	# once to retire every existing session after saving the denied accounts.
 	container_id=$(scheduled_hysteria_container) || return 1
-	if ! { $SUDO docker restart "$container_id" >/dev/null && wait_for_hysteria; }; then
-		echo "Could not disconnect suspended Hysteria 2 sessions. The next quota check will retry." >&2
-		return 1
-	fi
+	$SUDO docker restart "$container_id" >/dev/null && wait_for_hysteria
 }
 
 hysteria_lifetime_traffic_rows() {
@@ -5283,6 +5309,144 @@ show_xray_quota_auto_check_status() {
 
 # --- User management ---
 
+hysteria_user_files_available() {
+	local name
+	for name in hysteria.yaml quota-auth.sh auth-users user_limits.db user_limits.conf; do
+		if [[ ! -f "hysteria/config/$name" ]]; then
+			echo "A managed Hysteria 2 deployment is required to manage users." >&2
+			return 1
+		fi
+	done
+}
+
+save_hysteria_user_change() (
+	local action=$1 username=$2 limit=${3:-0}
+	local auth="hysteria/config/auth-users" db="hysteria/config/user_limits.db"
+	local links="hysteria/hysteria_links.txt" endpoint_file="hysteria/link-endpoint"
+	local work endpoint="" records metadata path password now timezone bounds link index link_source=/dev/null
+	local committed=0
+	local -a files applied=()
+	hysteria_user_files_available || return 1
+	umask 077
+	work=$(mktemp -d hysteria/.users.XXXXXX) || return 1
+	trap '
+		if [[ "$committed" -eq 0 ]]; then
+			for ((index = ${#applied[@]} - 1; index >= 0; index--)); do
+				path=${applied[index]}
+				if [[ -f "$work/old/${path##*/}" ]]; then
+					mv -f -- "$work/old/${path##*/}" "$path" || {
+						echo "Could not restore $path. Remaining backups are in $work/old." >&2
+						exit 1
+					}
+				else
+					rm -f -- "$path" || exit 1
+				fi
+			done
+		fi
+		rm -rf -- "$work"
+	' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	mkdir "$work/old" || return 1
+
+	# Use an existing saved link if this deployment has no endpoint file yet.
+	[[ ! -f "$links" ]] || link_source=$links
+	if [[ -f "$endpoint_file" ]]; then
+		IFS= read -r endpoint <"$endpoint_file" || return 1
+	else
+		endpoint=$(awk '/^hysteria2:\/\/[^@]+@/ { sub(/^[^@]+@/, ""); sub(/#.*/, ""); print; exit }' "$link_source") || return 1
+		if [[ -n "$endpoint" ]]; then
+			printf '%s\n' "$endpoint" >"$work/endpoint" &&
+				mv -f -- "$work/endpoint" "$endpoint_file" || return 1
+		fi
+	fi
+	if [[ "$action" == remove ]]; then
+		if [[ ! "$username" =~ ^[a-z0-9_-]+$ ]] || ! grep -q "^$username|" "$auth" ||
+			! get_quota_db_records | awk -F'|' -v name="$username" '$1 == name { found = 1 } END { exit !found }'; then
+			echo "Hysteria 2 user $username is no longer present." >&2
+			return 1
+		fi
+		checkpoint_xray_quota_usage
+	fi
+	records=$(get_quota_db_records) || return 1
+	metadata=$(get_quota_accounting_metadata) || return 1
+
+	if [[ "$action" == add ]]; then
+		if [[ ! "$endpoint" =~ ^[^[:space:]@#]+$ ]]; then
+			echo "No saved Hysteria 2 connection settings could be found." >&2
+			return 1
+		fi
+		while true; do
+			username="u$(openssl rand -hex 8)" || return 1
+			if ! grep -q "^$username|" "$auth" "$db"; then break; fi
+		done
+		password=$(openssl rand -hex 32) || return 1
+		now=$(date +%s) || return 1
+		timezone=$(read_xray_quota_timezone) || return 1
+		bounds=$(calculate_cycle_bounds "$now" "$now" "$timezone") || return 1
+		records+="${records:+$'\n'}$username|$username|$limit|$now|${bounds%%|*}|${bounds##*|}|0|0|active"
+		link="hysteria2://$username:$password@$endpoint#Hysteria%202-$username"
+		{ awk '1' "$auth" && printf '%s|%s|%s\n' "$username" "$password" "$limit"; } >"$work/auth-users" || return 1
+		{ awk '1' "$link_source" && printf '%s\n' "$link"; } >"$work/hysteria_links.txt" || return 1
+		# Authentication only succeeds when both the quota record and credential exist.
+		files=("$db" "$links" "$auth")
+	else
+		records=$(awk -F'|' -v name="$username" 'NF && $1 != name' <<<"$records") || return 1
+		metadata=$(awk -F'|' -v name="$username" '$1 != "# quota-closed" || $3 != name' <<<"$metadata") || return 1
+		awk -F'|' -v name="$username" '$1 != name' "$auth" >"$work/auth-users" || return 1
+		awk -v prefix="hysteria2://$username:" 'index($0, prefix) != 1' "$link_source" >"$work/hysteria_links.txt" || return 1
+		files=("$auth" "$db" "$links")
+	fi
+	write_quota_db_file "$work/user_limits.db" "$records" "$metadata" "" || return 1
+	for path in "${files[@]}"; do
+		if [[ -f "$path" ]]; then
+			cp -p -- "$path" "$work/old/${path##*/}" || return 1
+			apply_preserved_file_metadata "$path" "$work/${path##*/}"
+		fi
+	done
+	for path in "${files[@]}"; do
+		applied+=("$path")
+		if ! mv -f -- "$work/${path##*/}" "$path"; then
+			echo "Could not save the Hysteria 2 user change. Restoring the previous files." >&2
+			return 1
+		fi
+	done
+	committed=1
+
+	if [[ "$action" == add ]]; then
+		printf 'Added Hysteria 2 user %s\n\n%s\n' "$username" "$link"
+	else
+		local running users
+		echo "Removed Hysteria 2 user $username."
+		running=$($SUDO docker ps -q --filter 'name=^/hysteria$') || return 1
+		if [[ -n "$running" ]]; then
+			users=$(jq -cn --arg username "$username" '[$username]') || return 1
+			if ! disconnect_hysteria_users "$users"; then
+				echo "Could not verify that existing sessions ended. Restart Hysteria 2 to disconnect them." >&2
+				return 1
+			fi
+		fi
+	fi
+)
+
+add_hysteria_user() {
+	hysteria_user_files_available || return 1
+	local limit quota_data_dir=hysteria/config
+	while true; do
+		read -r -p "Monthly limit in GB [0 = unlimited]: " limit || return 1
+		if limit=$(parse_decimal_range "${limit:-0}" 0 "$MAX_USER_LIMIT_GB"); then break; fi
+		echo "Enter a whole number from 0 to $MAX_USER_LIMIT_GB."
+	done
+	with_hysteria_quota_lock save_hysteria_user_change add "" "$limit"
+}
+
+remove_hysteria_user() {
+	hysteria_user_files_available || return 1
+	local username quota_data_dir=hysteria/config
+	username=$(select_quota_user) || return 0
+	with_hysteria_quota_lock save_hysteria_user_change remove "$username"
+}
+
 add_xray_user() {
 	local db_file="xray/user_limits.db"
 	local config_file="xray/server.jsonc"
@@ -5568,8 +5732,10 @@ manage_proxy_users() {
 		echo "2) Remove Xray user"
 		echo "3) Add Shadowsocks user"
 		echo "4) Remove Shadowsocks user"
+		echo "5) Add Hysteria 2 user"
+		echo "6) Remove Hysteria 2 user"
 		echo "0) Back"
-		read -p "Enter your choice [0-4]: " user_mgmt_choice || return 0
+		read -p "Enter your choice [0-6]: " user_mgmt_choice || return 0
 
 		case $user_mgmt_choice in
 		1)
@@ -5583,6 +5749,12 @@ manage_proxy_users() {
 			;;
 		4)
 			remove_shadowsocks_user || true
+			;;
+		5)
+			add_hysteria_user || true
+			;;
+		6)
+			remove_hysteria_user || true
 			;;
 		0)
 			break
@@ -5811,7 +5983,7 @@ run_main_menu() {
 		echo "5) Restore deployment from existing config"
 		echo "6) Show proxy links"
 		echo "7) Show proxy usage / Manage quotas"
-		echo "8) Manage users (Add/Remove for Xray / Shadowsocks)"
+		echo "8) Manage users (Add/Remove for Xray / Shadowsocks / Hysteria 2)"
 		echo "9) Delete container and config"
 		echo "10) Exit"
 		read -r -p "Enter your choice [0-10]: " choice || return 0
