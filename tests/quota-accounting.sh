@@ -39,6 +39,7 @@ fixture_boot_epoch=$jan
 fixture_generation="container-a"
 fixture_counter=0
 fixture_stats_error=""
+fixture_container_stopped=0
 fixture_reload_status=0
 
 date() {
@@ -51,7 +52,9 @@ date() {
 
 collect_xray_user_stats() {
 	: >"$1"
-	if [[ -n "$fixture_stats_error" ]]; then
+	if [[ "$fixture_container_stopped" -eq 1 ]]; then
+		printf '|||\n'
+	elif [[ -n "$fixture_stats_error" ]]; then
 		printf '|||%s\n' "$fixture_stats_error"
 	else
 		printf 'user|uplink|%s\n' "$fixture_counter" >"$1"
@@ -165,5 +168,35 @@ assert_usage 0 110 active
 fixture_counter=115
 check_and_apply_xray_quotas quiet
 assert_usage 5 115 active
+
+# Opening quota status samples traffic, but applying a quota is a separate action.
+seed 1 0 0 active
+fixture_counter=1073741824
+show_proxy_quota_status >status
+assert_usage 1073741824 1073741824 active
+grep -Fq 'status=active | usage=1.00GB / 1GB (100%)' status
+cp xray/user_limits.db saved.db
+fixture_now=$((feb + 60))
+fixture_container_stopped=1
+show_proxy_quota_status >status
+grep -Fxq 'Live usage unavailable. Showing the last saved snapshot.' status
+cmp saved.db xray/user_limits.db
+fixture_container_stopped=0
+fixture_stats_error='query failed'
+show_proxy_quota_status >status
+grep -Fxq 'Live usage unavailable. Showing the last saved snapshot.' status
+cmp saved.db xray/user_limits.db
+fixture_stats_error=""
+
+(
+	configure_xray_quota_auto_check() { printf '%s\n' configured >>scheduler-calls; }
+	prompt_install_quota_scheduler 0 </dev/null >prompt
+	[[ ! -s prompt && ! -e scheduler-calls ]]
+	prompt_install_quota_scheduler 1 <<<$'invalid\nn' >prompt
+	grep -Fxq 'Choose y or n.' prompt
+	[[ ! -e scheduler-calls ]]
+	prompt_install_quota_scheduler 1 <<< ''
+	grep -Fxq configured scheduler-calls
+)
 
 echo 'Quota accounting regression tests passed.'

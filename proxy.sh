@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.0.3"
+SCRIPT_VERSION="7.0.4"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -1650,7 +1650,7 @@ install_xray() (
 	local XHTTP_PATH REALITY_TARGET REALITY_SERVER_NAMES
 	local REALITY_FALLBACK_ADDRESS REALITY_FALLBACK_PORT
 	local enable_ipv6 LISTEN_ADDR client_pairs idx shortids_json server_names_json clients_json
-	local SERVER_ADDR REMARKS SNI_DOMAIN TARGET_VALUE LINKS link server_uri_host sni_url public_key_url xhttp_path_url fragment_url start_confirm enable_auto_sched
+	local SERVER_ADDR REMARKS SNI_DOMAIN TARGET_VALUE LINKS link server_uri_host sni_url public_key_url xhttp_path_url fragment_url start_confirm
 
 	echo -e "${YELLOW}Starting Xray VLESS-XHTTP-Reality installation...${NC}"
 
@@ -2131,24 +2131,7 @@ EOL
 		echo -e "${GREEN}Xray container has been started!${NC}"
 		echo "Remember to open port 443 (TCP & UDP) in your server's firewall."
 
-		if [[ "$has_quota_limits" -eq 1 ]]; then
-			echo ""
-			while true; do
-				read -p "Enable automatic background quota check daemon now? [Y/n]: " enable_auto_sched || return 1
-				case "$enable_auto_sched" in
-				[yY] | "")
-					configure_xray_quota_auto_check || return 1
-					break
-					;;
-				[nN])
-					break
-					;;
-				*)
-					echo -e "${RED}Invalid choice. Please enter 'y' or 'n' (or press Enter for default 'y').${NC}"
-					;;
-				esac
-			done
-		fi
+		prompt_install_quota_scheduler "$has_quota_limits"
 	else
 		echo -e "${RED}Container start cancelled.${NC}"
 	fi
@@ -2669,7 +2652,7 @@ install_hysteria() (
 	local obfs_choice obfs_type="" obfs_password
 	local bandwidth_up bandwidth_down
 	local user_count user_number
-	local set_limits limit has_quota_limits=0 quota_timezone=$DEFAULT_QUOTA_TIMEZONE billing_anchor="" enable_auto_sched
+	local set_limits limit has_quota_limits=0 quota_timezone=$DEFAULT_QUOTA_TIMEZONE billing_anchor=""
 	local china_rules_choice geo_workdir="" geo_mount=""
 	local stats_port=$HYSTERIA_STATS_PORT stats_secret
 	local -a identity_check user_passwords=()
@@ -3011,16 +2994,7 @@ EOF
 	printf '\nThe link carries connection settings. Set bandwidth in your client to use Brutal.\n'
 	printf 'Use these client values if your connection can sustain them:\n'
 	printf 'bandwidth:\n  up: "%s mbps"\n  down: "%s mbps"\n' "$bandwidth_down" "$bandwidth_up"
-	if [[ "$has_quota_limits" -eq 1 ]]; then
-		while true; do
-			read -r -p "Configure automatic quota checks now? [Y/n]: " enable_auto_sched || return 0
-			case ${enable_auto_sched:-y} in
-			y|Y) configure_xray_quota_auto_check; return ;;
-			n|N) return 0 ;;
-			*) echo "Choose y or n." ;;
-			esac
-		done
-	fi
+	prompt_install_quota_scheduler "$has_quota_limits"
 )
 
 # --- Quota subsystem ---
@@ -3696,6 +3670,10 @@ refresh_xray_quota_accounting() {
 		return 1
 	fi
 	IFS='|' read -r generation sample_epoch started_epoch stats_error <<<"$result"
+	if [[ "$mode" == status && ( -z "$generation" || -n "$stats_error" ) ]]; then
+		rm -f "$stats_map_file"
+		return 1
+	fi
 	if [[ -n "$stats_error" ]]; then
 		echo -e "${YELLOW}Could not sample traffic: ${stats_error}${NC}" >&2
 		if [[ "$mode" == "strict" ]]; then
@@ -3936,11 +3914,18 @@ hysteria_lifetime_traffic_rows() {
 	' <<<"$rows"
 }
 
+show_refreshed_quota_status() {
+	if ! with_proxy_quota_lock refresh_xray_quota_accounting status; then
+		echo "Live usage unavailable. Showing the last saved snapshot."
+	fi
+	show_xray_quota_status "$@"
+}
+
 show_proxy_quota_status() {
 	local quota_data_dir=xray
 	if [[ -f xray/user_limits.db ]]; then
 		echo "Xray quotas"
-		show_xray_quota_status || true
+		show_refreshed_quota_status || true
 	fi
 	if [[ -f hysteria/config/hysteria.yaml ]]; then
 		if [[ -z "$(hysteria_traffic_api_settings)" ]]; then
@@ -3950,8 +3935,7 @@ show_proxy_quota_status() {
 		if [[ -f hysteria/config/user_limits.db ]]; then
 			echo "Hysteria 2 quota status and lifetime traffic"
 			quota_data_dir=hysteria/config
-			with_proxy_quota_lock refresh_xray_quota_accounting || true
-			show_xray_quota_status hysteria/traffic-usage.json
+			show_refreshed_quota_status hysteria/traffic-usage.json
 			return
 		fi
 		echo "Hysteria 2 lifetime traffic by username"
@@ -4086,9 +4070,7 @@ show_xray_quota_status() {
 	timezone=$(read_xray_quota_timezone) || return 1
 
 	echo -e "${YELLOW}Timezone:${NC} ${timezone}"
-	if [[ -z "$traffic_file" ]]; then
-		echo -e "${YELLOW}User quota status (stored usage; run 'Check/apply quotas now' for fresh stats):${NC}"
-	elif [[ -f "$traffic_file" ]]; then
+	if [[ -n "$traffic_file" && -f "$traffic_file" ]]; then
 		traffic_totals=$(hysteria_lifetime_traffic_rows "$traffic_file") || traffic_totals=""
 		while IFS=$'\t' read -r traffic_user traffic_summary; do
 			[[ "$traffic_user" =~ ^[a-z0-9_-]+$ ]] || continue
@@ -5326,6 +5308,19 @@ first_quota_cron_schedule() {
 	local schedule="${schedules%%$'\n'*}"
 	valid_quota_cron_schedule "$schedule" || return 1
 	printf '%s\n' "$schedule"
+}
+
+prompt_install_quota_scheduler() {
+	[[ "$1" -eq 1 ]] || return 0
+	local answer
+	while true; do
+		read -r -p "Configure automatic quota checks now? [Y/n]: " answer || return 0
+		case ${answer:-y} in
+		y|Y) configure_xray_quota_auto_check; return ;;
+		n|N) return 0 ;;
+		*) echo "Choose y or n." ;;
+		esac
+	done
 }
 
 configure_xray_quota_auto_check() {
