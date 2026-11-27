@@ -19,7 +19,7 @@ set -euo pipefail
 #
 
 # --- Configuration & Colors ---
-SCRIPT_VERSION="7.3.2"
+SCRIPT_VERSION="7.3.3"
 DEFAULT_UUIDS=1
 DEFAULT_SHORTIDS=1
 DEFAULT_SS_USERS=1
@@ -6307,23 +6307,18 @@ run_main_menu() {
 			fi
 			echo "Which container do you want to delete?"
 			echo "1) Xray"
-			echo "2) Shadowsocks"
-			echo "3) Xray and Shadowsocks"
-			echo "4) Hysteria 2"
-			read -r -p "Enter your choice [1-4]: " delete_choice || return 1
+			echo "2) Hysteria 2"
+			echo "3) Shadowsocks"
+			read -r -p "Enter your choice [1-3]: " delete_choice || return 1
 			case $delete_choice in
 			1)
 				delete_xray || true
 				;;
 			2)
-				delete_shadowsocks || true
+				delete_hysteria || true
 				;;
 			3)
-				delete_xray || true
 				delete_shadowsocks || true
-				;;
-			4)
-				delete_hysteria || true
 				;;
 			*)
 				echo -e "${RED}Invalid choice.${NC}"
